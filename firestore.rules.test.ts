@@ -1,0 +1,103 @@
+// Security Rules Verification Specification for VISION POINT SUPER EXCEL
+// Covers the 12 Dirty Dozen adversarial payloads defined in security_spec.md.
+// To run against Firebase Emulator Suite:
+//   npx firebase emulators:exec --only firestore "npx tsx firestore.rules.test.ts"
+
+export const DIRTY_DOZEN_CASES = [
+  {
+    id: 1,
+    name: 'Unverified Admin Email Spoof',
+    collection: 'system_settings/global',
+    operation: 'create',
+    auth: { uid: 'spoof-uid', email: 'krishnasharma011981@gmail.com', email_verified: false },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    id: 2,
+    name: 'Self-Role Escalation on User Create',
+    collection: 'users/attacker-uid',
+    operation: 'create',
+    auth: { uid: 'attacker-uid', email: 'attacker@visionpoint.edu', email_verified: true },
+    payload: { role: 'super_admin', centreId: 'vp_lookerganj', department: 'all' },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    id: 3,
+    name: 'Self-Role Escalation on User Update',
+    collection: 'users/head-civillines',
+    operation: 'update',
+    auth: { uid: 'head-civillines', email: 'head@visionpoint.edu', email_verified: true },
+    payload: { role: 'super_admin', centreId: 'vp_lookerganj' },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    id: 4,
+    name: 'Cross-Centre Student Read',
+    collection: 'students',
+    operation: 'list',
+    auth: { uid: 'head-civillines', centreId: 'vp_civillines', role: 'centre_head' },
+    queryWhereCentreId: 'xis_varanasi',
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    id: 5,
+    name: 'Cross-Department Write (Fee Recovery -> Practical)',
+    collection: 'practical_records/VP-LKG-2026-0001',
+    operation: 'create',
+    auth: { uid: 'emp-fee', centreId: 'vp_lookerganj', role: 'employee', department: 'fee_recovery' },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    id: 6,
+    name: 'Cross-Department Read (TMA -> Fee Recovery)',
+    collection: 'fee_recovery/VP-LKG-2026-0001',
+    operation: 'get',
+    auth: { uid: 'emp-tma', centreId: 'vp_lookerganj', role: 'employee', department: 'tma' },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    id: 7,
+    name: 'Shadow Ghost Field Injection on Student Update',
+    collection: 'students/VP-LKG-2026-0001',
+    operation: 'update',
+    payload: { isAdminVerified: true },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    id: 8,
+    name: 'Orphaned Department Record without Central Student',
+    collection: 'tma_records/NON_EXISTENT_ID',
+    operation: 'create',
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    id: 9,
+    name: 'ID Poisoning / 1500-char Document ID',
+    collection: `students/${'A'.repeat(1500)}`,
+    operation: 'create',
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    id: 10,
+    name: 'Client Timestamp Forgery on Student Create',
+    collection: 'students/VP-LKG-2026-0099',
+    operation: 'create',
+    payload: { createdAt: '2020-01-01T00:00:00Z' },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    id: 11,
+    name: 'Audit Log Tampering (Update/Delete)',
+    collection: 'activity_logs/log-1',
+    operation: 'delete',
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    id: 12,
+    name: 'Deactivated Account Access',
+    collection: 'fee_recovery/VP-LKG-2026-0001',
+    operation: 'get',
+    auth: { uid: 'inactive-emp', status: 'Inactive', role: 'employee', department: 'fee_recovery' },
+    expected: 'PERMISSION_DENIED',
+  },
+];

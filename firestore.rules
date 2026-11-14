@@ -1,0 +1,937 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Hardened Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn();
+    }
+
+    function isBootstrappedSuperAdmin() {
+      return isSignedIn() && request.auth.token.email_verified == true && request.auth.token.email.lower() in [
+        'niosvisionpoint9@gmail.com',
+        'krishnasharma011981@gmail.com'
+      ];
+    }
+
+    function hasUserDoc() {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isActiveUser() {
+      return isVerifiedUser() && hasUserDoc() && userDoc().status == 'Active';
+    }
+
+    function isSuperAdmin() {
+      return isBootstrappedSuperAdmin() || (isActiveUser() && userDoc().role == 'super_admin');
+    }
+
+    function isCentreHeadOf(centreId) {
+      return isActiveUser() && userDoc().role == 'centre_head' && userDoc().centreId == centreId;
+    }
+
+    function isEmployeeOf(centreId, dept) {
+      return isActiveUser() && userDoc().role == 'employee' && userDoc().centreId == centreId && userDoc().department == dept;
+    }
+
+    function isValidStr(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    // 3. Entity Validation Blueprints
+    function isValidCentre(data) {
+      return data.keys().hasAll([
+        'id', 'name', 'city', 'code', 'address', 'latitude', 'longitude',
+        'geofenceRadiusMeters', 'headUid', 'headName', 'status', 'createdAt', 'updatedAt', 'updatedBy'
+      ]) && data.keys().hasOnly([
+        'id', 'name', 'city', 'code', 'address', 'latitude', 'longitude',
+        'geofenceRadiusMeters', 'headUid', 'headName', 'status', 'createdAt', 'updatedAt', 'updatedBy'
+      ])
+      && isValidId(data.id)
+      && isValidStr(data.name, 3, 120)
+      && isValidStr(data.city, 2, 60)
+      && isValidStr(data.code, 2, 20)
+      && isValidStr(data.address, 0, 250)
+      && data.latitude is number && data.latitude >= -90 && data.latitude <= 90
+      && data.longitude is number && data.longitude >= -180 && data.longitude <= 180
+      && data.geofenceRadiusMeters is number && data.geofenceRadiusMeters >= 20 && data.geofenceRadiusMeters <= 10000
+      && isValidStr(data.headUid, 0, 128)
+      && isValidStr(data.headName, 0, 100)
+      && data.status in ['Active', 'Inactive']
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp
+      && isValidStr(data.updatedBy, 1, 128);
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll([
+        'uid', 'fullName', 'email', 'mobileNumber', 'role', 'centreId', 'centreName',
+        'department', 'status', 'joiningDate', 'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
+      ]) && data.keys().hasOnly([
+        'uid', 'fullName', 'email', 'mobileNumber', 'role', 'centreId', 'centreName',
+        'department', 'status', 'joiningDate', 'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
+      ])
+      && isValidId(data.uid)
+      && isValidStr(data.fullName, 2, 100)
+      && isValidStr(data.email, 5, 160)
+      && isValidStr(data.mobileNumber, 0, 20)
+      && data.role in ['super_admin', 'centre_head', 'employee']
+      && isValidId(data.centreId)
+      && isValidStr(data.centreName, 2, 120)
+      && data.department in ['all', 'fee_recovery', 'practical', 'tma', 'online_classes', 'admission', 'hr']
+      && data.status in ['Active', 'Inactive']
+      && isValidStr(data.joiningDate, 4, 30)
+      && isValidStr(data.createdBy, 1, 128)
+      && data.createdAt is timestamp
+      && isValidStr(data.updatedBy, 1, 128)
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidStudent(data) {
+      return data.keys().hasAll([
+        'serialNumber', 'studentId', 'studentName', 'mobileNumber', 'subject',
+        'tcStatus', 'bookStatus', 'classAttendanceStatus', 'whyNios',
+        'currentEducationStatus', 'futurePlanning', 'tmaStatus', 'practicalStatus',
+        'examinationStatus', 'centreId', 'centreName', 'admissionDate',
+        'assignedEmployeeUid', 'assignedEmployeeName', 'additionalRemarks',
+        'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
+      ]) && data.keys().hasOnly([
+        'serialNumber', 'studentId', 'studentName', 'mobileNumber', 'subject',
+        'tcStatus', 'bookStatus', 'classAttendanceStatus', 'whyNios',
+        'currentEducationStatus', 'futurePlanning', 'tmaStatus', 'practicalStatus',
+        'examinationStatus', 'centreId', 'centreName', 'admissionDate',
+        'assignedEmployeeUid', 'assignedEmployeeName', 'additionalRemarks',
+        'employeeLocked', 'tmaLocked', 'practicalLocked', 'onlineClassesLocked', 'admissionLocked',
+        'lockedByUid', 'lockedByName', 'superAdminAccessGranted', 'extraColumns',
+        'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
+      ])
+      && data.serialNumber is number && data.serialNumber >= 1
+      && isValidId(data.studentId)
+      && isValidStr(data.studentName, 2, 120)
+      && isValidStr(data.mobileNumber, 7, 20)
+      && isValidStr(data.subject, 1, 200)
+      && data.tcStatus in ['Received', 'Not Received', 'Not Applicable']
+      && data.bookStatus in ['Received', 'Not Received', 'Pending']
+      && data.classAttendanceStatus in ['Regular', 'Irregular', 'Not Attending']
+      && isValidStr(data.whyNios, 0, 1000)
+      && isValidStr(data.currentEducationStatus, 0, 1000)
+      && isValidStr(data.futurePlanning, 0, 1000)
+      && data.tmaStatus in ['Submitted', 'Not Submitted', 'Pending']
+      && data.practicalStatus in ['Completed', 'Not Completed', 'Pending']
+      && data.examinationStatus in ['Completed', 'Not Completed', 'Partially Completed']
+      && isValidId(data.centreId)
+      && isValidStr(data.centreName, 2, 120)
+      && isValidStr(data.admissionDate, 4, 30)
+      && isValidStr(data.assignedEmployeeUid, 0, 128)
+      && isValidStr(data.assignedEmployeeName, 0, 100)
+      && isValidStr(data.additionalRemarks, 0, 1000)
+      && (!('employeeLocked' in data) || data.employeeLocked is bool)
+      && (!('tmaLocked' in data) || data.tmaLocked is bool)
+      && (!('practicalLocked' in data) || data.practicalLocked is bool)
+      && (!('onlineClassesLocked' in data) || data.onlineClassesLocked is bool)
+      && (!('admissionLocked' in data) || data.admissionLocked is bool)
+      && (!('lockedByUid' in data) || isValidStr(data.lockedByUid, 0, 128))
+      && (!('lockedByName' in data) || isValidStr(data.lockedByName, 0, 100))
+      && (!('superAdminAccessGranted' in data) || data.superAdminAccessGranted is bool)
+      && (!('extraColumns' in data) || (data.extraColumns is map && data.extraColumns.size() <= 35))
+      && isValidStr(data.createdBy, 1, 128)
+      && data.createdAt is timestamp
+      && isValidStr(data.updatedBy, 1, 128)
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidFeeRecovery(data) {
+      return data.keys().hasAll([
+        'studentId', 'studentName', 'mobileNumber', 'centreId', 'recoveryStatus',
+        'followUpStatus', 'totalFee', 'paidAmount', 'pendingAmount',
+        'assignedEmployeeUid', 'assignedEmployeeName', 'followUpNotes',
+        'lastContactDate', 'nextFollowUpDate', 'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
+      ]) && data.keys().hasOnly([
+        'studentId', 'studentName', 'mobileNumber', 'centreId', 'recoveryStatus',
+        'followUpStatus', 'totalFee', 'paidAmount', 'pendingAmount',
+        'assignedEmployeeUid', 'assignedEmployeeName', 'followUpNotes',
+        'lastContactDate', 'nextFollowUpDate', 'employeeLocked', 'lockedByUid', 'lockedByName',
+        'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
+      ])
+      && isValidId(data.studentId)
+      && isValidStr(data.studentName, 2, 120)
+      && isValidStr(data.mobileNumber, 7, 20)
+      && isValidId(data.centreId)
+      && data.recoveryStatus in ['Paid', 'Partial', 'Pending', 'Overdue']
+      && data.followUpStatus in ['Scheduled', 'Contacted', 'Promise to Pay', 'Closed']
+      && data.totalFee is number && data.totalFee >= 0
+      && data.paidAmount is number && data.paidAmount >= 0
+      && data.pendingAmount is number && data.pendingAmount >= 0
+      && isValidStr(data.assignedEmployeeUid, 0, 128)
+      && isValidStr(data.assignedEmployeeName, 0, 100)
+      && isValidStr(data.followUpNotes, 0, 1000)
+      && isValidStr(data.lastContactDate, 0, 30)
+      && isValidStr(data.nextFollowUpDate, 0, 30)
+      && (!('employeeLocked' in data) || data.employeeLocked is bool)
+      && (!('lockedByUid' in data) || isValidStr(data.lockedByUid, 0, 128))
+      && (!('lockedByName' in data) || isValidStr(data.lockedByName, 0, 100))
+      && isValidStr(data.createdBy, 1, 128)
+      && data.createdAt is timestamp
+      && isValidStr(data.updatedBy, 1, 128)
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidPracticalRecord(data) {
+      return data.keys().hasAll([
+        'studentId', 'studentName', 'centreId', 'practicalStatus', 'submissionStatus',
+        'completionPercentage', 'assignedEmployeeUid', 'assignedEmployeeName', 'remarks',
+        'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
+      ]) && data.keys().hasOnly([
+        'studentId', 'studentName', 'centreId', 'practicalStatus', 'submissionStatus',
+        'completionPercentage', 'assignedEmployeeUid', 'assignedEmployeeName', 'remarks',
+        'employeeLocked', 'lockedByUid', 'lockedByName',
+        'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
+      ])
+      && isValidId(data.studentId)
+      && isValidStr(data.studentName, 2, 120)
+      && isValidId(data.centreId)
+      && data.practicalStatus in ['Completed', 'Not Completed', 'Pending']
+      && data.submissionStatus in ['Submitted', 'Not Submitted', 'Under Review']
+      && data.completionPercentage is number && data.completionPercentage >= 0 && data.completionPercentage <= 100
+      && isValidStr(data.assignedEmployeeUid, 0, 128)
+      && isValidStr(data.assignedEmployeeName, 0, 100)
+      && isValidStr(data.remarks, 0, 1000)
+      && (!('employeeLocked' in data) || data.employeeLocked is bool)
+      && (!('lockedByUid' in data) || isValidStr(data.lockedByUid, 0, 128))
+      && (!('lockedByName' in data) || isValidStr(data.lockedByName, 0, 100))
+      && isValidStr(data.createdBy, 1, 128)
+      && data.createdAt is timestamp
+      && isValidStr(data.updatedBy, 1, 128)
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidTmaRecord(data) {
+      return data.keys().hasAll([
+        'studentId', 'studentName', 'centreId', 'tmaStatus', 'subjectsSubmittedCount',
+        'totalSubjectsCount', 'submissionDate', 'assignedEmployeeUid', 'assignedEmployeeName',
+        'remarks', 'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
+      ]) && data.keys().hasOnly([
+        'studentId', 'studentName', 'centreId', 'tmaStatus', 'subjectsSubmittedCount',
+        'totalSubjectsCount', 'submissionDate', 'assignedEmployeeUid', 'assignedEmployeeName',
+        'remarks', 'employeeLocked', 'lockedByUid', 'lockedByName',
+        'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
+      ])
+      && isValidId(data.studentId)
+      && isValidStr(data.studentName, 2, 120)
+      && isValidId(data.centreId)
+      && data.tmaStatus in ['Submitted', 'Not Submitted', 'Pending']
+      && data.subjectsSubmittedCount is number && data.subjectsSubmittedCount >= 0 && data.subjectsSubmittedCount <= 20
+      && data.totalSubjectsCount is number && data.totalSubjectsCount >= 1 && data.totalSubjectsCount <= 20
+      && isValidStr(data.submissionDate, 0, 30)
+      && isValidStr(data.assignedEmployeeUid, 0, 128)
+      && isValidStr(data.assignedEmployeeName, 0, 100)
+      && isValidStr(data.remarks, 0, 1000)
+      && (!('employeeLocked' in data) || data.employeeLocked is bool)
+      && (!('lockedByUid' in data) || isValidStr(data.lockedByUid, 0, 128))
+      && (!('lockedByName' in data) || isValidStr(data.lockedByName, 0, 100))
+      && isValidStr(data.createdBy, 1, 128)
+      && data.createdAt is timestamp
+      && isValidStr(data.updatedBy, 1, 128)
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidOnlineClassRecord(data) {
+      return data.keys().hasAll([
+        'studentId', 'studentName', 'centreId', 'attendanceStatus', 'participationLevel',
+        'attendancePercentage', 'lastAttendanceUpdate', 'followUpNotes',
+        'assignedEmployeeUid', 'assignedEmployeeName', 'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
+      ]) && data.keys().hasOnly([
+        'studentId', 'studentName', 'centreId', 'attendanceStatus', 'participationLevel',
+        'attendancePercentage', 'lastAttendanceUpdate', 'followUpNotes',
+        'assignedEmployeeUid', 'assignedEmployeeName', 'employeeLocked', 'lockedByUid', 'lockedByName',
+        'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
+      ])
+      && isValidId(data.studentId)
+      && isValidStr(data.studentName, 2, 120)
+      && isValidId(data.centreId)
+      && data.attendanceStatus in ['Regular', 'Irregular', 'Not Attending']
+      && data.participationLevel in ['High', 'Moderate', 'Low', 'Inactive']
+      && data.attendancePercentage is number && data.attendancePercentage >= 0 && data.attendancePercentage <= 100
+      && isValidStr(data.lastAttendanceUpdate, 0, 30)
+      && isValidStr(data.followUpNotes, 0, 1000)
+      && isValidStr(data.assignedEmployeeUid, 0, 128)
+      && isValidStr(data.assignedEmployeeName, 0, 100)
+      && (!('employeeLocked' in data) || data.employeeLocked is bool)
+      && (!('lockedByUid' in data) || isValidStr(data.lockedByUid, 0, 128))
+      && (!('lockedByName' in data) || isValidStr(data.lockedByName, 0, 100))
+      && isValidStr(data.createdBy, 1, 128)
+      && data.createdAt is timestamp
+      && isValidStr(data.updatedBy, 1, 128)
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidAdmissionRecord(data) {
+      return data.keys().hasAll([
+        'studentId', 'studentName', 'centreId', 'admissionStatus', 'stream',
+        'niosPurpose', 'academicBackground', 'followUpStatus', 'assignedEmployeeUid',
+        'assignedEmployeeName', 'remarks', 'admissionDate', 'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
+      ]) && data.keys().hasOnly([
+        'studentId', 'studentName', 'centreId', 'admissionStatus', 'stream',
+        'niosPurpose', 'academicBackground', 'followUpStatus', 'assignedEmployeeUid',
+        'assignedEmployeeName', 'remarks', 'admissionDate', 'employeeLocked', 'lockedByUid', 'lockedByName',
+        'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
+      ])
+      && isValidId(data.studentId)
+      && isValidStr(data.studentName, 2, 120)
+      && isValidId(data.centreId)
+      && data.admissionStatus in ['Confirmed', 'Provisional', 'Pending Verification', 'Cancelled']
+      && isValidStr(data.stream, 1, 80)
+      && isValidStr(data.niosPurpose, 0, 1000)
+      && isValidStr(data.academicBackground, 0, 1000)
+      && data.followUpStatus in ['Completed', 'Pending Follow-up', 'Document Due']
+      && isValidStr(data.assignedEmployeeUid, 0, 128)
+      && isValidStr(data.assignedEmployeeName, 0, 100)
+      && isValidStr(data.remarks, 0, 1000)
+      && isValidStr(data.admissionDate, 4, 30)
+      && (!('employeeLocked' in data) || data.employeeLocked is bool)
+      && (!('lockedByUid' in data) || isValidStr(data.lockedByUid, 0, 128))
+      && (!('lockedByName' in data) || isValidStr(data.lockedByName, 0, 100))
+      && isValidStr(data.createdBy, 1, 128)
+      && data.createdAt is timestamp
+      && isValidStr(data.updatedBy, 1, 128)
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidEmployeeAssignment(data) {
+      return data.keys().hasAll(['uid', 'employeeName', 'centreId', 'department', 'assignedBy', 'status', 'createdAt', 'updatedAt'])
+      && data.keys().hasOnly(['uid', 'employeeName', 'centreId', 'department', 'assignedBy', 'status', 'createdAt', 'updatedAt'])
+      && isValidId(data.uid)
+      && isValidStr(data.employeeName, 2, 100)
+      && isValidId(data.centreId)
+      && data.department in ['fee_recovery', 'practical', 'tma', 'online_classes', 'admission', 'hr']
+      && isValidStr(data.assignedBy, 1, 128)
+      && data.status in ['Active', 'Inactive']
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidCentreAssignment(data) {
+      return data.keys().hasAll(['centreId', 'centreName', 'headUid', 'headName', 'headEmail', 'assignedBy', 'createdAt', 'updatedAt'])
+      && data.keys().hasOnly(['centreId', 'centreName', 'headUid', 'headName', 'headEmail', 'assignedBy', 'createdAt', 'updatedAt'])
+      && isValidId(data.centreId)
+      && isValidStr(data.centreName, 2, 120)
+      && isValidId(data.headUid)
+      && isValidStr(data.headName, 2, 100)
+      && isValidStr(data.headEmail, 5, 160)
+      && isValidStr(data.assignedBy, 1, 128)
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidActivityLog(data) {
+      return data.keys().hasAll([
+        'actorUid', 'actorName', 'actorEmail', 'actorRole', 'centreId',
+        'department', 'action', 'targetCollection', 'targetId', 'details', 'locationVerified', 'createdAt'
+      ]) && data.keys().hasOnly([
+        'actorUid', 'actorName', 'actorEmail', 'actorRole', 'centreId',
+        'department', 'action', 'targetCollection', 'targetId', 'details', 'locationVerified', 'createdAt'
+      ])
+      && isValidId(data.actorUid)
+      && isValidStr(data.actorName, 1, 100)
+      && isValidStr(data.actorEmail, 3, 160)
+      && data.actorRole in ['super_admin', 'centre_head', 'employee']
+      && isValidStr(data.centreId, 1, 64)
+      && isValidStr(data.department, 1, 40)
+      && isValidStr(data.action, 2, 100)
+      && isValidStr(data.targetCollection, 1, 64)
+      && isValidStr(data.targetId, 1, 128)
+      && isValidStr(data.details, 0, 1000)
+      && data.locationVerified is bool
+      && data.createdAt is timestamp;
+    }
+
+    function isValidLocationVerification(data) {
+      return data.keys().hasAll([
+        'uid', 'userEmail', 'role', 'centreId', 'latitude', 'longitude',
+        'accuracyMeters', 'distanceMeters', 'radiusMeters', 'verified', 'overrideApplied',
+        'operation', 'nonce', 'createdAt'
+      ]) && data.keys().hasOnly([
+        'uid', 'userEmail', 'role', 'centreId', 'latitude', 'longitude',
+        'accuracyMeters', 'distanceMeters', 'radiusMeters', 'verified', 'overrideApplied',
+        'operation', 'nonce', 'createdAt'
+      ])
+      && isValidId(data.uid)
+      && isValidStr(data.userEmail, 3, 160)
+      && data.role in ['super_admin', 'centre_head', 'employee']
+      && isValidId(data.centreId)
+      && data.latitude is number
+      && data.longitude is number
+      && data.accuracyMeters is number
+      && data.distanceMeters is number
+      && data.radiusMeters is number
+      && data.verified is bool
+      && data.overrideApplied is bool
+      && isValidStr(data.operation, 2, 120)
+      && isValidStr(data.nonce, 4, 128)
+      && data.createdAt is timestamp;
+    }
+
+    function isValidSystemSettings(data) {
+      return data.keys().hasAll([
+        'superAdminEmail', 'superAdminUid', 'geofenceEnabled',
+        'emergencyOverrideActive', 'sessionTimeoutMinutes', 'maxGpsAccuracyMeters',
+        'updatedAt', 'updatedBy'
+      ]) && data.keys().hasOnly([
+        'superAdminEmail', 'superAdminUid', 'geofenceEnabled',
+        'emergencyOverrideActive', 'sessionTimeoutMinutes', 'maxGpsAccuracyMeters',
+        'updatedAt', 'updatedBy'
+      ])
+      && isValidStr(data.superAdminEmail, 5, 160)
+      && isValidId(data.superAdminUid)
+      && data.geofenceEnabled is bool
+      && data.emergencyOverrideActive is bool
+      && data.sessionTimeoutMinutes is number && data.sessionTimeoutMinutes >= 5 && data.sessionTimeoutMinutes <= 1440
+      && data.maxGpsAccuracyMeters is number && data.maxGpsAccuracyMeters >= 20 && data.maxGpsAccuracyMeters <= 5000
+      && data.updatedAt is timestamp
+      && isValidStr(data.updatedBy, 1, 128);
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['recipientUid', 'centreId', 'title', 'message', 'type', 'read', 'createdAt'])
+      && data.keys().hasOnly(['recipientUid', 'centreId', 'title', 'message', 'type', 'read', 'createdAt'])
+      && isValidStr(data.recipientUid, 1, 128)
+      && isValidStr(data.centreId, 1, 64)
+      && isValidStr(data.title, 1, 120)
+      && isValidStr(data.message, 1, 500)
+      && data.type in ['info', 'warning', 'security']
+      && data.read is bool
+      && data.createdAt is timestamp;
+    }
+
+    function isValidStaffInvite(data) {
+      return data.keys().hasAll([
+        'inviteId', 'fullName', 'email', 'mobileNumber', 'role', 'centreId', 'centreName',
+        'department', 'joiningDate', 'status', 'claimedUid', 'invitedBy', 'invitedByName',
+        'createdAt', 'updatedAt'
+      ]) && data.keys().hasOnly([
+        'inviteId', 'fullName', 'email', 'mobileNumber', 'role', 'centreId', 'centreName',
+        'department', 'joiningDate', 'status', 'claimedUid', 'invitedBy', 'invitedByName',
+        'createdAt', 'updatedAt'
+      ])
+      && isValidId(data.inviteId)
+      && isValidStr(data.fullName, 2, 100)
+      && isValidStr(data.email, 5, 160)
+      && isValidStr(data.mobileNumber, 0, 20)
+      && data.role in ['centre_head', 'employee']
+      && isValidId(data.centreId)
+      && isValidStr(data.centreName, 2, 120)
+      && data.department in ['all', 'fee_recovery', 'practical', 'tma', 'online_classes', 'admission', 'hr']
+      && isValidStr(data.joiningDate, 4, 30)
+      && data.status in ['Pending', 'Claimed']
+      && isValidStr(data.claimedUid, 0, 128)
+      && isValidStr(data.invitedBy, 1, 128)
+      && isValidStr(data.invitedByName, 1, 100)
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidEmployeeReport(data) {
+      return data.keys().hasAll([
+        'reportId', 'employeeUid', 'employeeName', 'employeeEmail', 'role', 'centreId', 'centreName',
+        'department', 'reportDate', 'title', 'summary', 'tasksCompleted', 'studentsHandled',
+        'pendingIssues', 'status', 'reviewerName', 'reviewerNote', 'createdAt', 'updatedAt'
+      ]) && data.keys().hasOnly([
+        'reportId', 'employeeUid', 'employeeName', 'employeeEmail', 'role', 'centreId', 'centreName',
+        'department', 'reportDate', 'title', 'summary', 'tasksCompleted', 'studentsHandled',
+        'pendingIssues', 'status', 'reviewerName', 'reviewerNote', 'createdAt', 'updatedAt'
+      ])
+      && isValidId(data.reportId)
+      && isValidId(data.employeeUid)
+      && isValidStr(data.employeeName, 2, 100)
+      && isValidStr(data.employeeEmail, 5, 160)
+      && data.role in ['super_admin', 'centre_head', 'employee']
+      && isValidId(data.centreId)
+      && isValidStr(data.centreName, 2, 120)
+      && data.department in ['all', 'fee_recovery', 'practical', 'tma', 'online_classes', 'admission', 'hr']
+      && isValidStr(data.reportDate, 4, 30)
+      && isValidStr(data.title, 3, 160)
+      && isValidStr(data.summary, 5, 2000)
+      && data.tasksCompleted is number && data.tasksCompleted >= 0 && data.tasksCompleted <= 10000
+      && data.studentsHandled is number && data.studentsHandled >= 0 && data.studentsHandled <= 10000
+      && isValidStr(data.pendingIssues, 0, 1000)
+      && data.status in ['Submitted', 'Reviewed', 'Approved']
+      && isValidStr(data.reviewerName, 0, 100)
+      && isValidStr(data.reviewerNote, 0, 1000)
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidHrRecord(data) {
+      return data.keys().hasAll([
+        'recordId', 'staffUid', 'staffName', 'staffEmail', 'staffDepartment', 'centreId',
+        'recordMonth', 'attendanceStatus', 'onboardingStatus', 'payrollStatus',
+        'leaveDaysCount', 'remarks', 'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
+      ]) && data.keys().hasOnly([
+        'recordId', 'staffUid', 'staffName', 'staffEmail', 'staffDepartment', 'centreId',
+        'recordMonth', 'attendanceStatus', 'onboardingStatus', 'payrollStatus',
+        'leaveDaysCount', 'remarks', 'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
+      ])
+      && isValidId(data.recordId)
+      && isValidId(data.staffUid)
+      && isValidStr(data.staffName, 2, 100)
+      && isValidStr(data.staffEmail, 5, 160)
+      && data.staffDepartment in ['all', 'fee_recovery', 'practical', 'tma', 'online_classes', 'admission', 'hr']
+      && isValidId(data.centreId)
+      && isValidStr(data.recordMonth, 4, 20)
+      && data.attendanceStatus in ['Present', 'Leave', 'Half Day', 'Absent']
+      && data.onboardingStatus in ['Verified', 'Pending Documents', 'Completed']
+      && data.payrollStatus in ['Processed', 'Pending', 'On Hold']
+      && data.leaveDaysCount is number && data.leaveDaysCount >= 0 && data.leaveDaysCount <= 31
+      && isValidStr(data.remarks, 0, 1000)
+      && isValidStr(data.createdBy, 1, 128)
+      && data.createdAt is timestamp
+      && isValidStr(data.updatedBy, 1, 128)
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidEditRequest(data) {
+      return data.keys().hasAll([
+        'requestId', 'studentId', 'studentName', 'serialNumber', 'centreId', 'department',
+        'requesterUid', 'requesterName', 'requesterEmail', 'reason', 'status',
+        'reviewedByUid', 'reviewedByName', 'reviewerNote', 'createdAt', 'updatedAt'
+      ]) && data.keys().hasOnly([
+        'requestId', 'studentId', 'studentName', 'serialNumber', 'centreId', 'department',
+        'requesterUid', 'requesterName', 'requesterEmail', 'reason', 'status',
+        'reviewedByUid', 'reviewedByName', 'reviewerNote', 'createdAt', 'updatedAt'
+      ])
+      && isValidId(data.requestId)
+      && isValidId(data.studentId)
+      && isValidStr(data.studentName, 2, 120)
+      && data.serialNumber is number && data.serialNumber >= 1
+      && isValidId(data.centreId)
+      && data.department in ['fee_recovery', 'practical', 'tma', 'online_classes', 'admission', 'hr']
+      && isValidId(data.requesterUid)
+      && isValidStr(data.requesterName, 1, 100)
+      && isValidStr(data.requesterEmail, 3, 160)
+      && isValidStr(data.reason, 3, 500)
+      && data.status in ['Pending', 'Approved', 'Rejected']
+      && isValidStr(data.reviewedByUid, 0, 128)
+      && isValidStr(data.reviewedByName, 0, 100)
+      && isValidStr(data.reviewerNote, 0, 500)
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidDirectMessage(data) {
+      return data.keys().hasAll([
+        'messageId', 'staffUid', 'staffName', 'staffEmail', 'staffRole',
+        'centreId', 'department', 'senderUid', 'senderName', 'senderRole',
+        'messageType', 'text', 'readByStaff', 'readByAdmin', 'createdAt'
+      ]) && data.keys().hasOnly([
+        'messageId', 'staffUid', 'staffName', 'staffEmail', 'staffRole',
+        'centreId', 'department', 'senderUid', 'senderName', 'senderRole',
+        'messageType', 'text', 'readByStaff', 'readByAdmin', 'createdAt'
+      ])
+      && isValidId(data.messageId)
+      && isValidId(data.staffUid)
+      && isValidStr(data.staffName, 1, 100)
+      && isValidStr(data.staffEmail, 3, 160)
+      && data.staffRole in ['centre_head', 'employee']
+      && data.centreId in ['vp_lookerganj', 'vp_civillines', 'xis_varanasi', 'xis_jaunpur']
+      && data.department in ['all', 'fee_recovery', 'practical', 'tma', 'online_classes', 'admission', 'hr']
+      && isValidId(data.senderUid)
+      && isValidStr(data.senderName, 1, 100)
+      && data.senderRole in ['super_admin', 'centre_head', 'employee']
+      && data.messageType in ['text', 'walkie_log']
+      && isValidStr(data.text, 1, 1500)
+      && data.readByStaff is bool
+      && data.readByAdmin is bool
+      && data.createdAt is timestamp;
+    }
+
+    function isValidInviteClaim(uid) {
+      let invPath = /databases/$(database)/documents/staff_invites/$(incoming().createdBy);
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.uid == uid
+        && incoming().uid == uid
+        && incoming().status == 'Active'
+        && isValidId(incoming().createdBy)
+        && exists(invPath)
+        && get(invPath).data.status == 'Pending'
+        && get(invPath).data.email == request.auth.token.email.lower()
+        && incoming().email.lower() == get(invPath).data.email
+        && incoming().role == get(invPath).data.role
+        && incoming().centreId == get(invPath).data.centreId
+        && incoming().department == get(invPath).data.department
+        && getAfter(invPath).data.status == 'Claimed'
+        && getAfter(invPath).data.claimedUid == request.auth.uid;
+    }
+
+    function isCentreHeadClaimUpdate(centreId) {
+      return isVerifiedUser()
+        && incoming().diff(existing()).affectedKeys().hasOnly(['headUid', 'headName', 'updatedAt', 'updatedBy'])
+        && incoming().headUid == request.auth.uid
+        && incoming().updatedBy == request.auth.uid
+        && existsAfter(/databases/$(database)/documents/users/$(request.auth.uid))
+        && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'centre_head'
+        && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.centreId == centreId;
+    }
+
+    // 4. Collection Rules
+    match /centres/{centreId} {
+      allow get: if isValidId(centreId) && (isSuperAdmin() || (isActiveUser() && userDoc().centreId == centreId));
+      allow list: if isSuperAdmin() || (isActiveUser() && resource.data.id == userDoc().centreId);
+      allow create: if isValidId(centreId) && isSuperAdmin() && isValidCentre(incoming()) && incoming().id == centreId && incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isValidId(centreId) && isValidCentre(incoming()) && incoming().id == existing().id && incoming().createdAt == existing().createdAt && incoming().updatedAt == request.time && (isSuperAdmin() || isCentreHeadClaimUpdate(centreId));
+      allow delete: if false;
+    }
+
+    match /users/{uid} {
+      allow get: if isValidId(uid) && isSignedIn() && (request.auth.uid == uid || isSuperAdmin() || (isActiveUser() && (userDoc().role == 'centre_head' || userDoc().department == 'hr') && resource.data.centreId == userDoc().centreId));
+      allow list: if isSuperAdmin() || (isActiveUser() && (userDoc().role == 'centre_head' || userDoc().department == 'hr') && resource.data.centreId == userDoc().centreId);
+      allow create: if isValidId(uid) && isVerifiedUser() && isValidUser(incoming()) && incoming().uid == uid && incoming().createdAt == request.time && incoming().updatedAt == request.time && (
+        isSuperAdmin() ||
+        isValidInviteClaim(uid) ||
+        (isActiveUser() && userDoc().role == 'centre_head' && incoming().role == 'employee' && incoming().centreId == userDoc().centreId && incoming().department != 'all' && incoming().createdBy == request.auth.uid)
+      );
+      allow update: if isValidId(uid) && isVerifiedUser() && isValidUser(incoming()) && incoming().uid == existing().uid && incoming().createdAt == existing().createdAt && incoming().createdBy == existing().createdBy && incoming().updatedAt == request.time && (
+        isSuperAdmin() ||
+        (isActiveUser() && userDoc().role == 'centre_head' && existing().role == 'employee' && incoming().role == 'employee' && existing().centreId == userDoc().centreId && incoming().centreId == userDoc().centreId && incoming().department != 'all' && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'mobileNumber', 'department', 'status', 'updatedBy', 'updatedAt'])) ||
+        (request.auth.uid == uid && isActiveUser() && incoming().role == existing().role && incoming().centreId == existing().centreId && incoming().department == existing().department && incoming().status == existing().status && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'mobileNumber', 'updatedBy', 'updatedAt']))
+      );
+      allow delete: if isValidId(uid) && isSuperAdmin() && uid != request.auth.uid;
+    }
+
+    match /students/{studentId} {
+      allow get: if isValidId(studentId) && (isSuperAdmin() || (isActiveUser() && resource.data.centreId == userDoc().centreId));
+      allow list: if isSuperAdmin() || (isActiveUser() && resource.data.centreId == userDoc().centreId);
+      allow create: if isValidId(studentId) && isActiveUser() && isValidStudent(incoming()) && incoming().studentId == studentId && incoming().createdAt == request.time && incoming().updatedAt == request.time && exists(/databases/$(database)/documents/centres/$(incoming().centreId)) && (
+        isSuperAdmin() ||
+        (isCentreHeadOf(incoming().centreId) && incoming().createdBy == request.auth.uid) ||
+        (isEmployeeOf(incoming().centreId, 'admission') && incoming().createdBy == request.auth.uid && incoming().admissionLocked == true && incoming().lockedByUid == request.auth.uid && (!('tmaLocked' in incoming()) || incoming().tmaLocked == false) && (!('practicalLocked' in incoming()) || incoming().practicalLocked == false) && (!('onlineClassesLocked' in incoming()) || incoming().onlineClassesLocked == false))
+      );
+      allow update: if isValidId(studentId) && isActiveUser() && isValidStudent(incoming()) && incoming().studentId == existing().studentId && incoming().serialNumber == existing().serialNumber && incoming().createdAt == existing().createdAt && incoming().createdBy == existing().createdBy && incoming().updatedAt == request.time && (
+        isSuperAdmin() ||
+        (isCentreHeadOf(existing().centreId) && incoming().centreId == existing().centreId) ||
+        (isEmployeeOf(existing().centreId, 'tma') && incoming().centreId == existing().centreId && (!('tmaLocked' in existing()) || existing().tmaLocked == false) && incoming().tmaLocked == true && incoming().updatedBy == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['tmaStatus', 'tmaLocked', 'lockedByUid', 'lockedByName', 'updatedBy', 'updatedAt'])) ||
+        (isEmployeeOf(existing().centreId, 'practical') && incoming().centreId == existing().centreId && (!('practicalLocked' in existing()) || existing().practicalLocked == false) && incoming().practicalLocked == true && incoming().updatedBy == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['practicalStatus', 'practicalLocked', 'lockedByUid', 'lockedByName', 'updatedBy', 'updatedAt'])) ||
+        (isEmployeeOf(existing().centreId, 'online_classes') && incoming().centreId == existing().centreId && (!('onlineClassesLocked' in existing()) || existing().onlineClassesLocked == false) && incoming().onlineClassesLocked == true && incoming().updatedBy == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['classAttendanceStatus', 'onlineClassesLocked', 'lockedByUid', 'lockedByName', 'updatedBy', 'updatedAt'])) ||
+        (isEmployeeOf(existing().centreId, 'admission') && incoming().centreId == existing().centreId && (!('admissionLocked' in existing()) || existing().admissionLocked == false) && incoming().admissionLocked == true && incoming().updatedBy == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['studentName', 'mobileNumber', 'subject', 'tcStatus', 'bookStatus', 'whyNios', 'currentEducationStatus', 'futurePlanning', 'examinationStatus', 'admissionDate', 'assignedEmployeeUid', 'assignedEmployeeName', 'additionalRemarks', 'admissionLocked', 'lockedByUid', 'lockedByName', 'updatedBy', 'updatedAt']))
+      );
+      allow delete: if isValidId(studentId) && isSuperAdmin();
+    }
+
+    match /fee_recovery/{studentId} {
+      allow get: if isValidId(studentId) && (isSuperAdmin() || isCentreHeadOf(resource.data.centreId) || isEmployeeOf(resource.data.centreId, 'fee_recovery'));
+      allow list: if isSuperAdmin() || (isActiveUser() && resource.data.centreId == userDoc().centreId && (userDoc().role == 'centre_head' || userDoc().department == 'fee_recovery'));
+      allow create: if isValidId(studentId) && isActiveUser() && isValidFeeRecovery(incoming()) && incoming().studentId == studentId && incoming().createdAt == request.time && incoming().updatedAt == request.time && exists(/databases/$(database)/documents/students/$(studentId)) && (
+        isSuperAdmin() ||
+        (isCentreHeadOf(incoming().centreId) && incoming().createdBy == request.auth.uid) ||
+        (isEmployeeOf(incoming().centreId, 'fee_recovery') && incoming().createdBy == request.auth.uid && incoming().employeeLocked == true && incoming().lockedByUid == request.auth.uid)
+      );
+      allow update: if isValidId(studentId) && isActiveUser() && isValidFeeRecovery(incoming()) && incoming().studentId == existing().studentId && incoming().createdAt == existing().createdAt && incoming().createdBy == existing().createdBy && incoming().updatedAt == request.time && (
+        isSuperAdmin() ||
+        (incoming().centreId == existing().centreId && isCentreHeadOf(existing().centreId)) ||
+        (incoming().centreId == existing().centreId && isEmployeeOf(existing().centreId, 'fee_recovery') && (!('employeeLocked' in existing()) || existing().employeeLocked == false) && incoming().employeeLocked == true && incoming().lockedByUid == request.auth.uid && incoming().updatedBy == request.auth.uid)
+      );
+      allow delete: if isValidId(studentId) && isSuperAdmin();
+    }
+
+    match /practical_records/{studentId} {
+      allow get: if isValidId(studentId) && (isSuperAdmin() || isCentreHeadOf(resource.data.centreId) || isEmployeeOf(resource.data.centreId, 'practical'));
+      allow list: if isSuperAdmin() || (isActiveUser() && resource.data.centreId == userDoc().centreId && (userDoc().role == 'centre_head' || userDoc().department == 'practical'));
+      allow create: if isValidId(studentId) && isActiveUser() && isValidPracticalRecord(incoming()) && incoming().studentId == studentId && incoming().createdAt == request.time && incoming().updatedAt == request.time && exists(/databases/$(database)/documents/students/$(studentId)) && (
+        isSuperAdmin() ||
+        (isCentreHeadOf(incoming().centreId) && incoming().createdBy == request.auth.uid) ||
+        (isEmployeeOf(incoming().centreId, 'practical') && incoming().createdBy == request.auth.uid && incoming().employeeLocked == true && incoming().lockedByUid == request.auth.uid)
+      );
+      allow update: if isValidId(studentId) && isActiveUser() && isValidPracticalRecord(incoming()) && incoming().studentId == existing().studentId && incoming().createdAt == existing().createdAt && incoming().createdBy == existing().createdBy && incoming().updatedAt == request.time && (
+        isSuperAdmin() ||
+        (incoming().centreId == existing().centreId && isCentreHeadOf(existing().centreId)) ||
+        (incoming().centreId == existing().centreId && isEmployeeOf(existing().centreId, 'practical') && (!('employeeLocked' in existing()) || existing().employeeLocked == false) && incoming().employeeLocked == true && incoming().lockedByUid == request.auth.uid && incoming().updatedBy == request.auth.uid)
+      );
+      allow delete: if isValidId(studentId) && isSuperAdmin();
+    }
+
+    match /tma_records/{studentId} {
+      allow get: if isValidId(studentId) && (isSuperAdmin() || isCentreHeadOf(resource.data.centreId) || isEmployeeOf(resource.data.centreId, 'tma'));
+      allow list: if isSuperAdmin() || (isActiveUser() && resource.data.centreId == userDoc().centreId && (userDoc().role == 'centre_head' || userDoc().department == 'tma'));
+      allow create: if isValidId(studentId) && isActiveUser() && isValidTmaRecord(incoming()) && incoming().studentId == studentId && incoming().createdAt == request.time && incoming().updatedAt == request.time && exists(/databases/$(database)/documents/students/$(studentId)) && (
+        isSuperAdmin() ||
+        (isCentreHeadOf(incoming().centreId) && incoming().createdBy == request.auth.uid) ||
+        (isEmployeeOf(incoming().centreId, 'tma') && incoming().createdBy == request.auth.uid && incoming().employeeLocked == true && incoming().lockedByUid == request.auth.uid)
+      );
+      allow update: if isValidId(studentId) && isActiveUser() && isValidTmaRecord(incoming()) && incoming().studentId == existing().studentId && incoming().createdAt == existing().createdAt && incoming().createdBy == existing().createdBy && incoming().updatedAt == request.time && (
+        isSuperAdmin() ||
+        (incoming().centreId == existing().centreId && isCentreHeadOf(existing().centreId)) ||
+        (incoming().centreId == existing().centreId && isEmployeeOf(existing().centreId, 'tma') && (!('employeeLocked' in existing()) || existing().employeeLocked == false) && incoming().employeeLocked == true && incoming().lockedByUid == request.auth.uid && incoming().updatedBy == request.auth.uid)
+      );
+      allow delete: if isValidId(studentId) && isSuperAdmin();
+    }
+
+    match /online_class_records/{studentId} {
+      allow get: if isValidId(studentId) && (isSuperAdmin() || isCentreHeadOf(resource.data.centreId) || isEmployeeOf(resource.data.centreId, 'online_classes'));
+      allow list: if isSuperAdmin() || (isActiveUser() && resource.data.centreId == userDoc().centreId && (userDoc().role == 'centre_head' || userDoc().department == 'online_classes'));
+      allow create: if isValidId(studentId) && isActiveUser() && isValidOnlineClassRecord(incoming()) && incoming().studentId == studentId && incoming().createdAt == request.time && incoming().updatedAt == request.time && exists(/databases/$(database)/documents/students/$(studentId)) && (
+        isSuperAdmin() ||
+        (isCentreHeadOf(incoming().centreId) && incoming().createdBy == request.auth.uid) ||
+        (isEmployeeOf(incoming().centreId, 'online_classes') && incoming().createdBy == request.auth.uid && incoming().employeeLocked == true && incoming().lockedByUid == request.auth.uid)
+      );
+      allow update: if isValidId(studentId) && isActiveUser() && isValidOnlineClassRecord(incoming()) && incoming().studentId == existing().studentId && incoming().createdAt == existing().createdAt && incoming().createdBy == existing().createdBy && incoming().updatedAt == request.time && (
+        isSuperAdmin() ||
+        (incoming().centreId == existing().centreId && isCentreHeadOf(existing().centreId)) ||
+        (incoming().centreId == existing().centreId && isEmployeeOf(existing().centreId, 'online_classes') && (!('employeeLocked' in existing()) || existing().employeeLocked == false) && incoming().employeeLocked == true && incoming().lockedByUid == request.auth.uid && incoming().updatedBy == request.auth.uid)
+      );
+      allow delete: if isValidId(studentId) && isSuperAdmin();
+    }
+
+    match /admission_records/{studentId} {
+      allow get: if isValidId(studentId) && (isSuperAdmin() || isCentreHeadOf(resource.data.centreId) || isEmployeeOf(resource.data.centreId, 'admission'));
+      allow list: if isSuperAdmin() || (isActiveUser() && resource.data.centreId == userDoc().centreId && (userDoc().role == 'centre_head' || userDoc().department == 'admission'));
+      allow create: if isValidId(studentId) && isActiveUser() && isValidAdmissionRecord(incoming()) && incoming().studentId == studentId && incoming().createdAt == request.time && incoming().updatedAt == request.time && exists(/databases/$(database)/documents/students/$(studentId)) && (
+        isSuperAdmin() ||
+        (isCentreHeadOf(incoming().centreId) && incoming().createdBy == request.auth.uid) ||
+        (isEmployeeOf(incoming().centreId, 'admission') && incoming().createdBy == request.auth.uid && incoming().employeeLocked == true && incoming().lockedByUid == request.auth.uid)
+      );
+      allow update: if isValidId(studentId) && isActiveUser() && isValidAdmissionRecord(incoming()) && incoming().studentId == existing().studentId && incoming().createdAt == existing().createdAt && incoming().createdBy == existing().createdBy && incoming().updatedAt == request.time && (
+        isSuperAdmin() ||
+        (incoming().centreId == existing().centreId && isCentreHeadOf(existing().centreId)) ||
+        (incoming().centreId == existing().centreId && isEmployeeOf(existing().centreId, 'admission') && (!('employeeLocked' in existing()) || existing().employeeLocked == false) && incoming().employeeLocked == true && incoming().lockedByUid == request.auth.uid && incoming().updatedBy == request.auth.uid)
+      );
+      allow delete: if isValidId(studentId) && isSuperAdmin();
+    }
+
+    match /employee_assignments/{assignmentId} {
+      allow get: if isValidId(assignmentId) && (isSuperAdmin() || isCentreHeadOf(resource.data.centreId) || (isActiveUser() && resource.data.uid == request.auth.uid));
+      allow list: if isSuperAdmin() || (isActiveUser() && ((userDoc().role == 'centre_head' && resource.data.centreId == userDoc().centreId) || resource.data.uid == request.auth.uid));
+      allow create: if isValidId(assignmentId) && isVerifiedUser() && isValidEmployeeAssignment(incoming()) && incoming().createdAt == request.time && incoming().updatedAt == request.time && (
+        isSuperAdmin() ||
+        isCentreHeadOf(incoming().centreId) ||
+        (assignmentId == request.auth.uid && incoming().uid == request.auth.uid && existsAfter(/databases/$(database)/documents/users/$(request.auth.uid)) && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'employee' && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.centreId == incoming().centreId && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.department == incoming().department)
+      );
+      allow update: if isValidId(assignmentId) && isActiveUser() && isValidEmployeeAssignment(incoming()) && incoming().createdAt == existing().createdAt && incoming().updatedAt == request.time && (isSuperAdmin() || (incoming().centreId == existing().centreId && isCentreHeadOf(existing().centreId)));
+      allow delete: if isValidId(assignmentId) && isSuperAdmin();
+    }
+
+    match /centre_assignments/{centreId} {
+      allow get: if isValidId(centreId) && (isSuperAdmin() || (isActiveUser() && resource.data.centreId == userDoc().centreId));
+      allow list: if isSuperAdmin() || (isActiveUser() && resource.data.centreId == userDoc().centreId);
+      allow create: if isValidId(centreId) && isVerifiedUser() && isValidCentreAssignment(incoming()) && incoming().centreId == centreId && incoming().createdAt == request.time && incoming().updatedAt == request.time && (
+        isSuperAdmin() ||
+        (incoming().headUid == request.auth.uid && existsAfter(/databases/$(database)/documents/users/$(request.auth.uid)) && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'centre_head' && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.centreId == centreId)
+      );
+      allow update: if isValidId(centreId) && isVerifiedUser() && isValidCentreAssignment(incoming()) && incoming().centreId == existing().centreId && incoming().createdAt == existing().createdAt && incoming().updatedAt == request.time && (
+        isSuperAdmin() ||
+        (incoming().headUid == request.auth.uid && existsAfter(/databases/$(database)/documents/users/$(request.auth.uid)) && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'centre_head' && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.centreId == centreId)
+      );
+      allow delete: if isValidId(centreId) && isSuperAdmin();
+    }
+
+    match /activity_logs/{logId} {
+      allow get: if isValidId(logId) && (isSuperAdmin() || isCentreHeadOf(resource.data.centreId) || (isActiveUser() && resource.data.actorUid == request.auth.uid));
+      allow list: if isSuperAdmin() || (isActiveUser() && ((userDoc().role == 'centre_head' && resource.data.centreId == userDoc().centreId) || resource.data.actorUid == request.auth.uid));
+      allow create: if isValidId(logId) && isVerifiedUser() && isValidActivityLog(incoming()) && incoming().actorUid == request.auth.uid && incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    match /location_verifications/{verificationId} {
+      allow get: if isValidId(verificationId) && (isSuperAdmin() || isCentreHeadOf(resource.data.centreId) || (isActiveUser() && resource.data.uid == request.auth.uid));
+      allow list: if isSuperAdmin() || (isActiveUser() && ((userDoc().role == 'centre_head' && resource.data.centreId == userDoc().centreId) || resource.data.uid == request.auth.uid));
+      allow create: if isValidId(verificationId) && isVerifiedUser() && isValidLocationVerification(incoming()) && incoming().uid == request.auth.uid && incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    match /system_settings/{settingId} {
+      allow get: if isValidId(settingId) && (isSuperAdmin() || isActiveUser());
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(settingId) && isSuperAdmin() && isValidSystemSettings(incoming()) && incoming().updatedAt == request.time;
+      allow update: if isValidId(settingId) && isSuperAdmin() && isValidSystemSettings(incoming()) && incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    match /notifications/{notificationId} {
+      allow get: if isValidId(notificationId) && (isSuperAdmin() || (isActiveUser() && (resource.data.recipientUid == request.auth.uid || (userDoc().role == 'centre_head' && resource.data.centreId == userDoc().centreId))));
+      allow list: if isSuperAdmin() || (isActiveUser() && (resource.data.recipientUid == request.auth.uid || (userDoc().role == 'centre_head' && resource.data.centreId == userDoc().centreId)));
+      allow create: if isValidId(notificationId) && isActiveUser() && isValidNotification(incoming()) && incoming().createdAt == request.time;
+      allow update: if isValidId(notificationId) && isActiveUser() && isValidNotification(incoming()) && incoming().createdAt == existing().createdAt && incoming().diff(existing()).affectedKeys().hasOnly(['read']) && (isSuperAdmin() || existing().recipientUid == request.auth.uid || isCentreHeadOf(existing().centreId));
+      allow delete: if isValidId(notificationId) && isSuperAdmin();
+    }
+
+    match /staff_invites/{inviteId} {
+      allow get: if isValidId(inviteId) && (
+        isSuperAdmin() ||
+        (isSignedIn() && request.auth.token.email_verified == true && resource.data.email == request.auth.token.email.lower()) ||
+        (isActiveUser() && userDoc().role == 'centre_head' && resource.data.centreId == userDoc().centreId)
+      );
+      allow list: if isSuperAdmin() || (
+        isSignedIn() && (
+          (request.auth.token.email_verified == true && resource.data.email == request.auth.token.email.lower()) ||
+          (hasUserDoc() && userDoc().status == 'Active' && userDoc().role == 'centre_head' && resource.data.centreId == userDoc().centreId)
+        )
+      );
+      allow create: if isValidId(inviteId) && isVerifiedUser() && isValidStaffInvite(incoming()) && incoming().inviteId == inviteId && incoming().status == 'Pending' && incoming().claimedUid == '' && incoming().createdAt == request.time && incoming().updatedAt == request.time && (
+        isSuperAdmin() ||
+        (isActiveUser() && userDoc().role == 'centre_head' && incoming().role == 'employee' && incoming().centreId == userDoc().centreId && incoming().department != 'all' && incoming().invitedBy == request.auth.uid)
+      );
+      allow update: if isValidId(inviteId) && isVerifiedUser() && isValidStaffInvite(incoming()) && incoming().inviteId == existing().inviteId && incoming().email == existing().email && incoming().createdAt == existing().createdAt && incoming().updatedAt == request.time && (
+        isSuperAdmin() ||
+        (isActiveUser() && userDoc().role == 'centre_head' && existing().role == 'employee' && incoming().role == 'employee' && existing().centreId == userDoc().centreId && incoming().centreId == userDoc().centreId && incoming().department != 'all') ||
+        (request.auth.token.email_verified == true && existing().status == 'Pending' && existing().email == request.auth.token.email.lower() && incoming().role == existing().role && incoming().centreId == existing().centreId && incoming().department == existing().department && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'claimedUid', 'updatedAt']) && incoming().status == 'Claimed' && incoming().claimedUid == request.auth.uid)
+      );
+      allow delete: if isValidId(inviteId) && (
+        isSuperAdmin() ||
+        (isActiveUser() && userDoc().role == 'centre_head' && existing().role == 'employee' && existing().centreId == userDoc().centreId)
+      );
+    }
+
+    match /employee_reports/{reportId} {
+      allow get: if isValidId(reportId) && (
+        isSuperAdmin() ||
+        isCentreHeadOf(resource.data.centreId) ||
+        (isActiveUser() && resource.data.employeeUid == request.auth.uid)
+      );
+      allow list: if isSuperAdmin() || (
+        isActiveUser() && (
+          (userDoc().role == 'centre_head' && resource.data.centreId == userDoc().centreId) ||
+          resource.data.employeeUid == request.auth.uid
+        )
+      );
+      allow create: if isValidId(reportId) && isActiveUser() && isValidEmployeeReport(incoming()) && incoming().reportId == reportId && incoming().employeeUid == request.auth.uid && incoming().status == 'Submitted' && incoming().createdAt == request.time && incoming().updatedAt == request.time && (
+        isSuperAdmin() ||
+        (incoming().centreId == userDoc().centreId && (userDoc().role == 'centre_head' || incoming().department == userDoc().department))
+      );
+      allow update: if isValidId(reportId) && isActiveUser() && isValidEmployeeReport(incoming()) && incoming().reportId == existing().reportId && incoming().employeeUid == existing().employeeUid && incoming().centreId == existing().centreId && incoming().department == existing().department && incoming().createdAt == existing().createdAt && incoming().updatedAt == request.time && (
+        ((isSuperAdmin() || isCentreHeadOf(existing().centreId)) && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'reviewerName', 'reviewerNote', 'updatedAt'])) ||
+        (existing().employeeUid == request.auth.uid && existing().status == 'Submitted' && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'summary', 'tasksCompleted', 'studentsHandled', 'pendingIssues', 'updatedAt']))
+      );
+      allow delete: if isValidId(reportId) && isSuperAdmin();
+    }
+
+    match /hr_records/{recordId} {
+      allow get: if isValidId(recordId) && (
+        isSuperAdmin() ||
+        isCentreHeadOf(resource.data.centreId) ||
+        isEmployeeOf(resource.data.centreId, 'hr')
+      );
+      allow list: if isSuperAdmin() || (
+        isActiveUser() && resource.data.centreId == userDoc().centreId && (userDoc().role == 'centre_head' || userDoc().department == 'hr')
+      );
+      allow create: if isValidId(recordId) && isActiveUser() && isValidHrRecord(incoming()) && incoming().recordId == recordId && incoming().createdAt == request.time && incoming().updatedAt == request.time && (
+        isSuperAdmin() ||
+        ((isCentreHeadOf(incoming().centreId) || isEmployeeOf(incoming().centreId, 'hr')) && incoming().createdBy == request.auth.uid)
+      );
+      allow update: if isValidId(recordId) && isActiveUser() && isValidHrRecord(incoming()) && incoming().recordId == existing().recordId && incoming().createdAt == existing().createdAt && incoming().createdBy == existing().createdBy && incoming().updatedAt == request.time && (
+        isSuperAdmin() ||
+        (incoming().centreId == existing().centreId && (isCentreHeadOf(existing().centreId) || isEmployeeOf(existing().centreId, 'hr')))
+      );
+      allow delete: if isValidId(recordId) && isSuperAdmin();
+    }
+
+    match /edit_requests/{requestId} {
+      allow get: if isValidId(requestId) && (
+        isSuperAdmin() ||
+        isCentreHeadOf(resource.data.centreId) ||
+        (isActiveUser() && resource.data.requesterUid == request.auth.uid)
+      );
+      allow list: if isSuperAdmin() || (
+        isActiveUser() && (
+          (userDoc().role == 'centre_head' && resource.data.centreId == userDoc().centreId) ||
+          resource.data.requesterUid == request.auth.uid
+        )
+      );
+      allow create: if isValidId(requestId) && isActiveUser() && isValidEditRequest(incoming())
+        && incoming().requestId == requestId
+        && incoming().requesterUid == request.auth.uid
+        && incoming().centreId == userDoc().centreId
+        && userDoc().role == 'employee'
+        && incoming().department == userDoc().department
+        && incoming().status == 'Pending'
+        && incoming().reviewedByUid == ''
+        && incoming().reviewedByName == ''
+        && incoming().reviewerNote == ''
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/students/$(incoming().studentId));
+      allow update: if isValidId(requestId) && isActiveUser() && isValidEditRequest(incoming())
+        && (isSuperAdmin() || isCentreHeadOf(existing().centreId))
+        && existing().status == 'Pending'
+        && incoming().status in ['Approved', 'Rejected']
+        && incoming().requestId == existing().requestId
+        && incoming().studentId == existing().studentId
+        && incoming().centreId == existing().centreId
+        && incoming().department == existing().department
+        && incoming().requesterUid == existing().requesterUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'reviewedByUid', 'reviewedByName', 'reviewerNote', 'updatedAt']);
+      allow delete: if isValidId(requestId) && isSuperAdmin();
+    }
+
+    match /direct_messages/{messageId} {
+      allow get: if isValidId(messageId) && (
+        isSuperAdmin() ||
+        (isActiveUser() && resource.data.staffUid == request.auth.uid)
+      );
+      allow list: if isSuperAdmin() || (
+        isActiveUser() && resource.data.staffUid == request.auth.uid
+      );
+      allow create: if isValidId(messageId) && isActiveUser() && isValidDirectMessage(incoming())
+        && incoming().messageId == messageId
+        && incoming().senderUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && exists(/databases/$(database)/documents/users/$(incoming().staffUid))
+        && (
+          (isSuperAdmin() && incoming().senderRole == 'super_admin' && incoming().readByAdmin == true) ||
+          (
+            !isSuperAdmin()
+            && incoming().staffUid == request.auth.uid
+            && incoming().senderRole == userDoc().role
+            && incoming().staffRole == userDoc().role
+            && incoming().centreId == userDoc().centreId
+            && incoming().readByStaff == true
+            && incoming().readByAdmin == false
+          )
+        );
+      allow update: if isValidId(messageId) && isActiveUser() && isValidDirectMessage(incoming())
+        && incoming().messageId == existing().messageId
+        && incoming().staffUid == existing().staffUid
+        && incoming().staffName == existing().staffName
+        && incoming().staffEmail == existing().staffEmail
+        && incoming().staffRole == existing().staffRole
+        && incoming().centreId == existing().centreId
+        && incoming().department == existing().department
+        && incoming().senderUid == existing().senderUid
+        && incoming().senderName == existing().senderName
+        && incoming().senderRole == existing().senderRole
+        && incoming().messageType == existing().messageType
+        && incoming().text == existing().text
+        && incoming().createdAt == existing().createdAt
+        && (
+          (isSuperAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['readByAdmin'])) ||
+          (!isSuperAdmin() && existing().staffUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['readByStaff']) && incoming().readByStaff == true)
+        );
+      allow delete: if isValidId(messageId) && isSuperAdmin();
+    }
+  }
+}

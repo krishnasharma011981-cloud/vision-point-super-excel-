@@ -1,0 +1,214 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-display: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    --font-sans: 'Public Sans', system-ui, -apple-system, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: #f4f7fc;
+    color: #0f172a;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: var(--font-display);
+  }
+
+  .font-mono, .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .font-mono {
+    font-family: var(--font-mono);
+  }
+}
+
+.light-grid-bg {
+  background-color: #f4f7fc;
+  background-image:
+    radial-gradient(circle at 8% 8%, rgba(220, 38, 38, 0.055), transparent 34%),
+    radial-gradient(circle at 92% 88%, rgba(37, 99, 235, 0.075), transparent 38%),
+    linear-gradient(to right, rgba(15, 23, 42, 0.03) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(15, 23, 42, 0.03) 1px, transparent 1px);
+  background-size: auto, auto, 44px 44px, 44px 44px;
+}
+
+.cosmic-blue-bg,
+.nasa-dark-grid {
+  background-color: #0a142d;
+  background-image:
+    radial-gradient(circle at 14% 18%, rgba(220, 38, 38, 0.24), transparent 44%),
+    radial-gradient(circle at 86% 78%, rgba(37, 99, 235, 0.28), transparent 48%),
+    linear-gradient(135deg, rgba(11, 20, 44, 0.96) 0%, rgba(19, 30, 62, 0.94) 55%, rgba(28, 12, 26, 0.95) 100%),
+    linear-gradient(to right, rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+  background-size: auto, auto, auto, 44px 44px, 44px 44px;
+}
+
+/* Deep Obsidian-Crimson Glass Sidebar matching dashboard reference */
+.glass-sidebar {
+  background:
+    radial-gradient(circle at 85% 8%, rgba(220, 38, 38, 0.24), transparent 40%),
+    radial-gradient(circle at 15% 88%, rgba(185, 28, 28, 0.22), transparent 42%),
+    linear-gradient(180deg, #0b1021 0%, #110c1b 52%, #190a15 100%);
+  backdrop-filter: blur(22px);
+  -webkit-backdrop-filter: blur(22px);
+  border-right: 1px solid rgba(248, 113, 113, 0.16);
+}
+
+.glass-login-card,
+.liquid-glass-portal {
+  background:
+    radial-gradient(circle at 86% 10%, rgba(255, 23, 57, 0.22), transparent 36%),
+    radial-gradient(circle at 12% 14%, rgba(165, 216, 255, 0.16), transparent 38%),
+    radial-gradient(circle at 88% 92%, rgba(255, 23, 57, 0.18), transparent 40%),
+    linear-gradient(155deg, rgba(16, 28, 56, 0.62) 0%, rgba(11, 20, 42, 0.68) 55%, rgba(24, 15, 34, 0.64) 100%);
+  backdrop-filter: blur(28px) saturate(135%);
+  -webkit-backdrop-filter: blur(28px) saturate(135%);
+  border: 1.5px solid rgba(214, 236, 255, 0.56);
+  box-shadow:
+    0 28px 70px -14px rgba(2, 8, 22, 0.84),
+    0 0 42px -8px rgba(65, 169, 255, 0.24),
+    0 0 34px -10px rgba(255, 23, 57, 0.32),
+    inset 0 1.5px 1.5px rgba(255, 255, 255, 0.52),
+    inset 0 -1.5px 2px rgba(65, 169, 255, 0.2);
+}
+
+.hero-silver-title {
+  background: linear-gradient(180deg, #ffffff 0%, #f1f5f9 58%, #cbd5e1 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.65));
+}
+
+.super-excel-ribbon {
+  background: linear-gradient(135deg, #ff2a48 0%, #ff1739 28%, #c90021 68%, #7f0015 100%);
+  border: 1px solid rgba(255, 190, 200, 0.48);
+  box-shadow:
+    0 12px 34px -4px rgba(255, 23, 57, 0.68),
+    0 0 22px rgba(255, 23, 57, 0.42),
+    inset 0 1.5px 1px rgba(255, 255, 255, 0.44);
+}
+
+.glass-dark-panel {
+  background: linear-gradient(145deg, rgba(13, 24, 52, 0.82) 0%, rgba(22, 13, 30, 0.86) 100%);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(248, 113, 113, 0.22);
+  box-shadow: 0 20px 45px -18px rgba(4, 10, 26, 0.58), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+
+.glass-dark-card {
+  background: rgba(13, 24, 52, 0.62);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(147, 197, 253, 0.2);
+}
+
+.glass-light-card {
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(226, 232, 240, 0.95);
+  box-shadow: 0 10px 28px -14px rgba(15, 23, 42, 0.12);
+}
+
+.btn-crimson-gloss {
+  background: linear-gradient(180deg, #ff304e 0%, #ff1739 32%, #9a001b 100%);
+  border: 1px solid rgba(255, 190, 200, 0.52);
+  box-shadow:
+    0 10px 28px -5px rgba(255, 23, 57, 0.62),
+    inset 0 1.5px 0 rgba(255, 255, 255, 0.38);
+}
+
+.btn-crimson-gloss:hover {
+  background: linear-gradient(180deg, #ff4b65 0%, #ff1739 38%, #b30020 100%);
+  box-shadow:
+    0 14px 34px -4px rgba(255, 23, 57, 0.78),
+    inset 0 1.5px 0 rgba(255, 255, 255, 0.48);
+}
+
+.glass-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.glass-scrollbar::-webkit-scrollbar-track {
+  background: rgba(12, 16, 32, 0.4);
+}
+
+.glass-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(248, 113, 113, 0.34);
+  border-radius: 999px;
+}
+
+.glass-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(248, 113, 113, 0.56);
+}
+
+/* Authentic Excel Spreadsheet Grid */
+.excel-sheet-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+
+.excel-sheet-table th,
+.excel-sheet-table td {
+  border: 1px solid #cbd5e1;
+}
+
+.excel-col-letters th {
+  background: linear-gradient(180deg, #eef2f9 0%, #dfe7f3 100%);
+  color: #1e293b;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+  padding: 3px 6px;
+  user-select: none;
+}
+
+.excel-col-header th {
+  background: linear-gradient(180deg, #121c38 0%, #1a0f22 100%);
+  color: #f8fafc;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 8px 10px;
+  border-color: #2c3552;
+}
+
+.excel-row:nth-child(even) {
+  background-color: #f8fafd;
+}
+
+.excel-row:nth-child(odd) {
+  background-color: #ffffff;
+}
+
+.excel-row:hover {
+  background-color: #fff1f2;
+}
+
+@media print {
+  aside,
+  header,
+  .no-print {
+    display: none !important;
+  }
+  main {
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+  }
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "Remix VISION POINT SUPER EXCEL",
+  "description": "Enterprise Multi-Branch Student Management \u0026 Data Security Platform — One Platform. Four Centres. Complete Control.",
+  "requestFramePermissions": [
+    "geolocation",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

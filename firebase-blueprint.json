@@ -1,0 +1,530 @@
+{
+  "entities": {
+    "Centre": {
+      "title": "Centre",
+      "description": "Educational branch centre with verified GPS coordinates and geofence radius",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 3, "maxLength": 120 },
+        "city": { "type": "string", "minLength": 2, "maxLength": 60 },
+        "code": { "type": "string", "minLength": 2, "maxLength": 20 },
+        "address": { "type": "string", "maxLength": 250 },
+        "latitude": { "type": "number" },
+        "longitude": { "type": "number" },
+        "geofenceRadiusMeters": { "type": "number" },
+        "headUid": { "type": "string", "maxLength": 128 },
+        "headName": { "type": "string", "maxLength": 100 },
+        "status": { "type": "string", "enum": ["Active", "Inactive"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "updatedBy": { "type": "string", "maxLength": 128 }
+      },
+      "required": ["id", "name", "city", "code", "latitude", "longitude", "geofenceRadiusMeters", "status", "createdAt", "updatedAt", "updatedBy"]
+    },
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Authorized platform user with RBAC role, assigned centre, and single department assignment",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "mobileNumber": { "type": "string", "maxLength": 20 },
+        "role": { "type": "string", "enum": ["super_admin", "centre_head", "employee"] },
+        "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "centreName": { "type": "string", "maxLength": 120 },
+        "department": { "type": "string", "enum": ["all", "fee_recovery", "practical", "tma", "online_classes", "admission", "hr"] },
+        "status": { "type": "string", "enum": ["Active", "Inactive"] },
+        "joiningDate": { "type": "string", "maxLength": 30 },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "fullName", "email", "mobileNumber", "role", "centreId", "centreName", "department", "status", "joiningDate", "createdBy", "createdAt", "updatedBy", "updatedAt"]
+    },
+    "Student": {
+      "title": "Student",
+      "description": "Central student profile shared across all five departments with no duplicate profiles",
+      "type": "object",
+      "properties": {
+        "serialNumber": { "type": "number" },
+        "studentId": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "studentName": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "mobileNumber": { "type": "string", "minLength": 7, "maxLength": 20 },
+        "subject": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "tcStatus": { "type": "string", "enum": ["Received", "Not Received", "Not Applicable"] },
+        "bookStatus": { "type": "string", "enum": ["Received", "Not Received", "Pending"] },
+        "classAttendanceStatus": { "type": "string", "enum": ["Regular", "Irregular", "Not Attending"] },
+        "whyNios": { "type": "string", "maxLength": 1000 },
+        "currentEducationStatus": { "type": "string", "maxLength": 1000 },
+        "futurePlanning": { "type": "string", "maxLength": 1000 },
+        "tmaStatus": { "type": "string", "enum": ["Submitted", "Not Submitted", "Pending"] },
+        "practicalStatus": { "type": "string", "enum": ["Completed", "Not Completed", "Pending"] },
+        "examinationStatus": { "type": "string", "enum": ["Completed", "Not Completed", "Partially Completed"] },
+        "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "centreName": { "type": "string", "maxLength": 120 },
+        "admissionDate": { "type": "string", "maxLength": 30 },
+        "assignedEmployeeUid": { "type": "string", "maxLength": 128 },
+        "assignedEmployeeName": { "type": "string", "maxLength": 100 },
+        "additionalRemarks": { "type": "string", "maxLength": 1000 },
+        "employeeLocked": { "type": "boolean" },
+        "tmaLocked": { "type": "boolean" },
+        "practicalLocked": { "type": "boolean" },
+        "onlineClassesLocked": { "type": "boolean" },
+        "admissionLocked": { "type": "boolean" },
+        "lockedByUid": { "type": "string", "maxLength": 128 },
+        "lockedByName": { "type": "string", "maxLength": 100 },
+        "superAdminAccessGranted": { "type": "boolean" },
+        "extraColumns": { "type": "object", "description": "Preserved extra columns imported from Excel/CSV workbooks" },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "serialNumber", "studentId", "studentName", "mobileNumber", "subject",
+        "tcStatus", "bookStatus", "classAttendanceStatus", "whyNios",
+        "currentEducationStatus", "futurePlanning", "tmaStatus", "practicalStatus",
+        "examinationStatus", "centreId", "centreName", "admissionDate",
+        "assignedEmployeeUid", "assignedEmployeeName", "additionalRemarks",
+        "createdBy", "createdAt", "updatedBy", "updatedAt"
+      ]
+    },
+    "FeeRecoveryRecord": {
+      "title": "FeeRecoveryRecord",
+      "description": "Department-specific fee recovery tracking linked to a central student",
+      "type": "object",
+      "properties": {
+        "studentId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "studentName": { "type": "string", "maxLength": 120 },
+        "mobileNumber": { "type": "string", "maxLength": 20 },
+        "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recoveryStatus": { "type": "string", "enum": ["Paid", "Partial", "Pending", "Overdue"] },
+        "followUpStatus": { "type": "string", "enum": ["Scheduled", "Contacted", "Promise to Pay", "Closed"] },
+        "totalFee": { "type": "number" },
+        "paidAmount": { "type": "number" },
+        "pendingAmount": { "type": "number" },
+        "assignedEmployeeUid": { "type": "string", "maxLength": 128 },
+        "assignedEmployeeName": { "type": "string", "maxLength": 100 },
+        "followUpNotes": { "type": "string", "maxLength": 1000 },
+        "lastContactDate": { "type": "string", "maxLength": 30 },
+        "nextFollowUpDate": { "type": "string", "maxLength": 30 },
+        "employeeLocked": { "type": "boolean" },
+        "lockedByUid": { "type": "string", "maxLength": 128 },
+        "lockedByName": { "type": "string", "maxLength": 100 },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["studentId", "studentName", "mobileNumber", "centreId", "recoveryStatus", "followUpStatus", "totalFee", "paidAmount", "pendingAmount", "assignedEmployeeUid", "assignedEmployeeName", "followUpNotes", "lastContactDate", "nextFollowUpDate", "createdBy", "createdAt", "updatedBy", "updatedAt"]
+    },
+    "PracticalRecord": {
+      "title": "PracticalRecord",
+      "description": "Department-specific practical tracking linked to a central student",
+      "type": "object",
+      "properties": {
+        "studentId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "studentName": { "type": "string", "maxLength": 120 },
+        "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "practicalStatus": { "type": "string", "enum": ["Completed", "Not Completed", "Pending"] },
+        "submissionStatus": { "type": "string", "enum": ["Submitted", "Not Submitted", "Under Review"] },
+        "completionPercentage": { "type": "number" },
+        "assignedEmployeeUid": { "type": "string", "maxLength": 128 },
+        "assignedEmployeeName": { "type": "string", "maxLength": 100 },
+        "remarks": { "type": "string", "maxLength": 1000 },
+        "employeeLocked": { "type": "boolean" },
+        "lockedByUid": { "type": "string", "maxLength": 128 },
+        "lockedByName": { "type": "string", "maxLength": 100 },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["studentId", "studentName", "centreId", "practicalStatus", "submissionStatus", "completionPercentage", "assignedEmployeeUid", "assignedEmployeeName", "remarks", "createdBy", "createdAt", "updatedBy", "updatedAt"]
+    },
+    "TmaRecord": {
+      "title": "TmaRecord",
+      "description": "Department-specific TMA tracking linked to a central student",
+      "type": "object",
+      "properties": {
+        "studentId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "studentName": { "type": "string", "maxLength": 120 },
+        "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tmaStatus": { "type": "string", "enum": ["Submitted", "Not Submitted", "Pending"] },
+        "subjectsSubmittedCount": { "type": "number" },
+        "totalSubjectsCount": { "type": "number" },
+        "submissionDate": { "type": "string", "maxLength": 30 },
+        "assignedEmployeeUid": { "type": "string", "maxLength": 128 },
+        "assignedEmployeeName": { "type": "string", "maxLength": 100 },
+        "remarks": { "type": "string", "maxLength": 1000 },
+        "employeeLocked": { "type": "boolean" },
+        "lockedByUid": { "type": "string", "maxLength": 128 },
+        "lockedByName": { "type": "string", "maxLength": 100 },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["studentId", "studentName", "centreId", "tmaStatus", "subjectsSubmittedCount", "totalSubjectsCount", "submissionDate", "assignedEmployeeUid", "assignedEmployeeName", "remarks", "createdBy", "createdAt", "updatedBy", "updatedAt"]
+    },
+    "OnlineClassRecord": {
+      "title": "OnlineClassRecord",
+      "description": "Department-specific online class attendance tracking linked to a central student",
+      "type": "object",
+      "properties": {
+        "studentId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "studentName": { "type": "string", "maxLength": 120 },
+        "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "attendanceStatus": { "type": "string", "enum": ["Regular", "Irregular", "Not Attending"] },
+        "participationLevel": { "type": "string", "enum": ["High", "Moderate", "Low", "Inactive"] },
+        "attendancePercentage": { "type": "number" },
+        "lastAttendanceUpdate": { "type": "string", "maxLength": 30 },
+        "followUpNotes": { "type": "string", "maxLength": 1000 },
+        "assignedEmployeeUid": { "type": "string", "maxLength": 128 },
+        "assignedEmployeeName": { "type": "string", "maxLength": 100 },
+        "employeeLocked": { "type": "boolean" },
+        "lockedByUid": { "type": "string", "maxLength": 128 },
+        "lockedByName": { "type": "string", "maxLength": 100 },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["studentId", "studentName", "centreId", "attendanceStatus", "participationLevel", "attendancePercentage", "lastAttendanceUpdate", "followUpNotes", "assignedEmployeeUid", "assignedEmployeeName", "createdBy", "createdAt", "updatedBy", "updatedAt"]
+    },
+    "AdmissionRecord": {
+      "title": "AdmissionRecord",
+      "description": "Department-specific admission workflow linked to a central student",
+      "type": "object",
+      "properties": {
+        "studentId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "studentName": { "type": "string", "maxLength": 120 },
+        "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "admissionStatus": { "type": "string", "enum": ["Confirmed", "Provisional", "Pending Verification", "Cancelled"] },
+        "stream": { "type": "string", "maxLength": 80 },
+        "niosPurpose": { "type": "string", "maxLength": 1000 },
+        "academicBackground": { "type": "string", "maxLength": 1000 },
+        "followUpStatus": { "type": "string", "enum": ["Completed", "Pending Follow-up", "Document Due"] },
+        "assignedEmployeeUid": { "type": "string", "maxLength": 128 },
+        "assignedEmployeeName": { "type": "string", "maxLength": 100 },
+        "remarks": { "type": "string", "maxLength": 1000 },
+        "admissionDate": { "type": "string", "maxLength": 30 },
+        "employeeLocked": { "type": "boolean" },
+        "lockedByUid": { "type": "string", "maxLength": 128 },
+        "lockedByName": { "type": "string", "maxLength": 100 },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["studentId", "studentName", "centreId", "admissionStatus", "stream", "niosPurpose", "academicBackground", "followUpStatus", "assignedEmployeeUid", "assignedEmployeeName", "remarks", "admissionDate", "createdBy", "createdAt", "updatedBy", "updatedAt"]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "Immutable security and operational audit trail",
+      "type": "object",
+      "properties": {
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "actorName": { "type": "string", "maxLength": 100 },
+        "actorEmail": { "type": "string", "maxLength": 160 },
+        "actorRole": { "type": "string", "enum": ["super_admin", "centre_head", "employee"] },
+        "centreId": { "type": "string", "maxLength": 64 },
+        "department": { "type": "string", "maxLength": 40 },
+        "action": { "type": "string", "maxLength": 100 },
+        "targetCollection": { "type": "string", "maxLength": 64 },
+        "targetId": { "type": "string", "maxLength": 128 },
+        "details": { "type": "string", "maxLength": 1000 },
+        "locationVerified": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["actorUid", "actorName", "actorEmail", "actorRole", "centreId", "department", "action", "targetCollection", "targetId", "details", "locationVerified", "createdAt"]
+    },
+    "LocationVerification": {
+      "title": "LocationVerification",
+      "description": "Recorded GPS geofence verification attempt with distance and anti-replay nonce",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "userEmail": { "type": "string", "maxLength": 160 },
+        "role": { "type": "string", "enum": ["super_admin", "centre_head", "employee"] },
+        "centreId": { "type": "string", "maxLength": 64 },
+        "latitude": { "type": "number" },
+        "longitude": { "type": "number" },
+        "accuracyMeters": { "type": "number" },
+        "distanceMeters": { "type": "number" },
+        "radiusMeters": { "type": "number" },
+        "verified": { "type": "boolean" },
+        "overrideApplied": { "type": "boolean" },
+        "operation": { "type": "string", "maxLength": 120 },
+        "nonce": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "userEmail", "role", "centreId", "latitude", "longitude", "accuracyMeters", "distanceMeters", "radiusMeters", "verified", "overrideApplied", "operation", "nonce", "createdAt"]
+    },
+    "SystemSettings": {
+      "title": "SystemSettings",
+      "description": "Global platform configuration and Super Admin security override flags",
+      "type": "object",
+      "properties": {
+        "superAdminEmail": { "type": "string", "format": "email", "maxLength": 160 },
+        "superAdminUid": { "type": "string", "maxLength": 128 },
+        "geofenceEnabled": { "type": "boolean" },
+        "emergencyOverrideActive": { "type": "boolean" },
+        "sessionTimeoutMinutes": { "type": "number" },
+        "maxGpsAccuracyMeters": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "updatedBy": { "type": "string", "maxLength": 128 }
+      },
+      "required": ["superAdminEmail", "superAdminUid", "geofenceEnabled", "emergencyOverrideActive", "sessionTimeoutMinutes", "maxGpsAccuracyMeters", "updatedAt", "updatedBy"]
+    },
+    "EmployeeAssignment": {
+      "title": "EmployeeAssignment",
+      "description": "Tracks employee assignment to a centre and single department",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "employeeName": { "type": "string", "maxLength": 100 },
+        "centreId": { "type": "string", "maxLength": 64 },
+        "department": { "type": "string", "enum": ["fee_recovery", "practical", "tma", "online_classes", "admission", "hr"] },
+        "assignedBy": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["Active", "Inactive"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "employeeName", "centreId", "department", "assignedBy", "status", "createdAt", "updatedAt"]
+    },
+    "CentreAssignment": {
+      "title": "CentreAssignment",
+      "description": "Tracks Centre Head assignment to an educational centre",
+      "type": "object",
+      "properties": {
+        "centreId": { "type": "string", "maxLength": 64 },
+        "centreName": { "type": "string", "maxLength": 120 },
+        "headUid": { "type": "string", "maxLength": 128 },
+        "headName": { "type": "string", "maxLength": 100 },
+        "headEmail": { "type": "string", "maxLength": 160 },
+        "assignedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["centreId", "centreName", "headUid", "headName", "headEmail", "assignedBy", "createdAt", "updatedAt"]
+    },
+    "NotificationItem": {
+      "title": "NotificationItem",
+      "description": "System and security alert notifications scoped by centre or recipient",
+      "type": "object",
+      "properties": {
+        "recipientUid": { "type": "string", "maxLength": 128 },
+        "centreId": { "type": "string", "maxLength": 64 },
+        "title": { "type": "string", "maxLength": 120 },
+        "message": { "type": "string", "maxLength": 500 },
+        "type": { "type": "string", "enum": ["info", "warning", "security"] },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recipientUid", "centreId", "title", "message", "type", "read", "createdAt"]
+    },
+    "StaffInvite": {
+      "title": "StaffInvite",
+      "description": "Pre-authorized Centre Head or Employee invite claimed atomically upon verified Google Sign-In",
+      "type": "object",
+      "properties": {
+        "inviteId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "mobileNumber": { "type": "string", "maxLength": 20 },
+        "role": { "type": "string", "enum": ["centre_head", "employee"] },
+        "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "centreName": { "type": "string", "maxLength": 120 },
+        "department": { "type": "string", "enum": ["all", "fee_recovery", "practical", "tma", "online_classes", "admission", "hr"] },
+        "joiningDate": { "type": "string", "maxLength": 30 },
+        "status": { "type": "string", "enum": ["Pending", "Claimed"] },
+        "claimedUid": { "type": "string", "maxLength": 128 },
+        "invitedBy": { "type": "string", "maxLength": 128 },
+        "invitedByName": { "type": "string", "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["inviteId", "fullName", "email", "mobileNumber", "role", "centreId", "centreName", "department", "joiningDate", "status", "claimedUid", "invitedBy", "invitedByName", "createdAt", "updatedAt"]
+    },
+    "EmployeeReport": {
+      "title": "EmployeeReport",
+      "description": "Daily or periodic operational report submitted by employees to Centre Head and Super Admin",
+      "type": "object",
+      "properties": {
+        "reportId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "employeeUid": { "type": "string", "maxLength": 128 },
+        "employeeName": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "employeeEmail": { "type": "string", "format": "email", "maxLength": 160 },
+        "role": { "type": "string", "enum": ["super_admin", "centre_head", "employee"] },
+        "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "centreName": { "type": "string", "maxLength": 120 },
+        "department": { "type": "string", "enum": ["all", "fee_recovery", "practical", "tma", "online_classes", "admission", "hr"] },
+        "reportDate": { "type": "string", "maxLength": 30 },
+        "title": { "type": "string", "minLength": 3, "maxLength": 160 },
+        "summary": { "type": "string", "minLength": 5, "maxLength": 2000 },
+        "tasksCompleted": { "type": "number" },
+        "studentsHandled": { "type": "number" },
+        "pendingIssues": { "type": "string", "maxLength": 1000 },
+        "status": { "type": "string", "enum": ["Submitted", "Reviewed", "Approved"] },
+        "reviewerName": { "type": "string", "maxLength": 100 },
+        "reviewerNote": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["reportId", "employeeUid", "employeeName", "employeeEmail", "role", "centreId", "centreName", "department", "reportDate", "title", "summary", "tasksCompleted", "studentsHandled", "pendingIssues", "status", "reviewerName", "reviewerNote", "createdAt", "updatedAt"]
+    },
+    "HrRecord": {
+      "title": "HrRecord",
+      "description": "HR department attendance, onboarding, leave, and payroll tracking record per staff member",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "staffUid": { "type": "string", "maxLength": 128 },
+        "staffName": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "staffEmail": { "type": "string", "format": "email", "maxLength": 160 },
+        "staffDepartment": { "type": "string", "enum": ["all", "fee_recovery", "practical", "tma", "online_classes", "admission", "hr"] },
+        "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordMonth": { "type": "string", "maxLength": 20 },
+        "attendanceStatus": { "type": "string", "enum": ["Present", "Leave", "Half Day", "Absent"] },
+        "onboardingStatus": { "type": "string", "enum": ["Verified", "Pending Documents", "Completed"] },
+        "payrollStatus": { "type": "string", "enum": ["Processed", "Pending", "On Hold"] },
+        "leaveDaysCount": { "type": "number" },
+        "remarks": { "type": "string", "maxLength": 1000 },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recordId", "staffUid", "staffName", "staffEmail", "staffDepartment", "centreId", "recordMonth", "attendanceStatus", "onboardingStatus", "payrollStatus", "leaveDaysCount", "remarks", "createdBy", "createdAt", "updatedBy", "updatedAt"]
+    },
+    "EditRequest": {
+      "title": "EditRequest",
+      "description": "Employee request to Centre Head for 1-time correction permission on a locked department record",
+      "type": "object",
+      "properties": {
+        "requestId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "studentId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "studentName": { "type": "string", "maxLength": 120 },
+        "serialNumber": { "type": "number" },
+        "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "department": { "type": "string", "enum": ["fee_recovery", "practical", "tma", "online_classes", "admission", "hr"] },
+        "requesterUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "requesterName": { "type": "string", "maxLength": 100 },
+        "requesterEmail": { "type": "string", "maxLength": 160 },
+        "reason": { "type": "string", "minLength": 3, "maxLength": 500 },
+        "status": { "type": "string", "enum": ["Pending", "Approved", "Rejected"] },
+        "reviewedByUid": { "type": "string", "maxLength": 128 },
+        "reviewedByName": { "type": "string", "maxLength": 100 },
+        "reviewerNote": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["requestId", "studentId", "studentName", "serialNumber", "centreId", "department", "requesterUid", "requesterName", "requesterEmail", "reason", "status", "reviewedByUid", "reviewedByName", "reviewerNote", "createdAt", "updatedAt"]
+    },
+    "DirectMessage": {
+      "title": "DirectMessage",
+      "description": "Hub-and-spoke direct communication message strictly between Super Admin and an individual staff member (no peer-to-peer staff messaging)",
+      "type": "object",
+      "properties": {
+        "messageId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "staffUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "staffName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "staffEmail": { "type": "string", "format": "email", "maxLength": 160 },
+        "staffRole": { "type": "string", "enum": ["centre_head", "employee"] },
+        "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "department": { "type": "string", "enum": ["all", "fee_recovery", "practical", "tma", "online_classes", "admission", "hr"] },
+        "senderUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "senderRole": { "type": "string", "enum": ["super_admin", "centre_head", "employee"] },
+        "messageType": { "type": "string", "enum": ["text", "walkie_log"] },
+        "text": { "type": "string", "minLength": 1, "maxLength": 1500 },
+        "readByStaff": { "type": "boolean" },
+        "readByAdmin": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["messageId", "staffUid", "staffName", "staffEmail", "staffRole", "centreId", "department", "senderUid", "senderName", "senderRole", "messageType", "text", "readByStaff", "readByAdmin", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/centres/{centreId}": {
+      "schema": { "$ref": "#/entities/Centre" },
+      "description": "Four independent educational centres with GPS coordinates and assigned Centre Head"
+    },
+    "/users/{uid}": {
+      "schema": { "$ref": "#/entities/UserAccount" },
+      "description": "User profiles containing role, centreId, single department, and Active/Inactive status"
+    },
+    "/students/{studentId}": {
+      "schema": { "$ref": "#/entities/Student" },
+      "description": "Central student records database shared across all five departments"
+    },
+    "/fee_recovery/{studentId}": {
+      "schema": { "$ref": "#/entities/FeeRecoveryRecord" },
+      "description": "Fee recovery department records keyed by central studentId"
+    },
+    "/practical_records/{studentId}": {
+      "schema": { "$ref": "#/entities/PracticalRecord" },
+      "description": "Practical department records keyed by central studentId"
+    },
+    "/tma_records/{studentId}": {
+      "schema": { "$ref": "#/entities/TmaRecord" },
+      "description": "TMA department records keyed by central studentId"
+    },
+    "/online_class_records/{studentId}": {
+      "schema": { "$ref": "#/entities/OnlineClassRecord" },
+      "description": "Online classes department records keyed by central studentId"
+    },
+    "/admission_records/{studentId}": {
+      "schema": { "$ref": "#/entities/AdmissionRecord" },
+      "description": "Admission department records keyed by central studentId"
+    },
+    "/employee_assignments/{assignmentId}": {
+      "schema": { "$ref": "#/entities/EmployeeAssignment" },
+      "description": "Audit trail and current mapping of employee department assignments"
+    },
+    "/centre_assignments/{centreId}": {
+      "schema": { "$ref": "#/entities/CentreAssignment" },
+      "description": "Current Centre Head assignment per centre"
+    },
+    "/activity_logs/{logId}": {
+      "schema": { "$ref": "#/entities/ActivityLog" },
+      "description": "Immutable operational and security audit logs"
+    },
+    "/location_verifications/{verificationId}": {
+      "schema": { "$ref": "#/entities/LocationVerification" },
+      "description": "GPS geofence verification attempts and outcomes"
+    },
+    "/system_settings/{settingId}": {
+      "schema": { "$ref": "#/entities/SystemSettings" },
+      "description": "Global security and Super Admin configuration"
+    },
+    "/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/NotificationItem" },
+      "description": "Operational and security alert notifications"
+    },
+    "/staff_invites/{inviteId}": {
+      "schema": { "$ref": "#/entities/StaffInvite" },
+      "description": "Pre-authorized Centre Head and Employee invitations for Google Sign-In activation"
+    },
+    "/employee_reports/{reportId}": {
+      "schema": { "$ref": "#/entities/EmployeeReport" },
+      "description": "Employee daily work reports submitted per centre and department"
+    },
+    "/hr_records/{recordId}": {
+      "schema": { "$ref": "#/entities/HrRecord" },
+      "description": "HR department attendance, onboarding, and payroll tracking records scoped per centre"
+    },
+    "/edit_requests/{requestId}": {
+      "schema": { "$ref": "#/entities/EditRequest" },
+      "description": "Employee correction permission requests reviewed by the Centre Head"
+    },
+    "/direct_messages/{messageId}": {
+      "schema": { "$ref": "#/entities/DirectMessage" },
+      "description": "Isolated Super Admin <-> Staff direct chat and walkie-talkie activity messages"
+    }
+  }
+}
