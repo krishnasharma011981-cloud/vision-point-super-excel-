@@ -102,12 +102,14 @@ export function buildTelHref(mobile: string | null | undefined): string | null {
 export function buildWhatsAppHref(
   mobile: string | null | undefined,
   studentName?: string,
+  topic = 'admission aur fees update',
 ): string | null {
   const digits = extractCallableDigits(mobile);
   if (!digits) return null;
   const cleanName = (studentName || 'Student').trim();
+  const cleanTopic = topic.trim() || 'admission aur fees update';
   const text = encodeURIComponent(
-    `Namaste ${cleanName}, Vision Point / Axis Academy (Database Security) se aapke admission aur fees update ke sambandh mein sampark kiya ja raha hai.`,
+    `Namaste ${cleanName}, Vision Point / Axis Academy (Database Security) se aapke ${cleanTopic} ke sambandh mein sampark kiya ja raha hai.`,
   );
   return `https://wa.me/${digits}?text=${text}`;
 }

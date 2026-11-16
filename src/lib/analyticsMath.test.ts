@@ -29,6 +29,9 @@ test('buildTelHref & buildWhatsAppHref build valid direct dial and WhatsApp link
   const wa = buildWhatsAppHref('9612345678', 'Aarav Sharma');
   assert.ok(wa?.startsWith('https://wa.me/919612345678?text='));
   assert.ok(wa?.includes('Aarav%20Sharma'));
+
+  const waPractical = buildWhatsAppHref('9612345678', 'Aarav Sharma', 'Practical file aur submission follow-up');
+  assert.ok(waPractical?.includes('Practical%20file'));
 });
 
 test('parseFeeNumberNullable fixes currency prefix dot bug and handles Indian formats', () => {

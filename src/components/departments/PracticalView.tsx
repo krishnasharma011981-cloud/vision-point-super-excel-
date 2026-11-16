@@ -1,6 +1,7 @@
-import { Download, FlaskConical, Search, X } from 'lucide-react';
+import { Download, FlaskConical, MessageCircle, Phone, Search, X } from 'lucide-react';
 import React, { useMemo, useState } from 'react';
 import { CENTRE_MAP } from '../../constants/centres';
+import { buildTelHref, buildWhatsAppHref, maskMobileNumber } from '../../lib/analyticsMath';
 import { buildContextualSerialMap, exportToCsv } from '../../lib/csvUtils';
 import { verifyOperationLocation } from '../../lib/securityClient';
 import { upsertPracticalRecord } from '../../services/firestoreService';
@@ -90,7 +91,8 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
         if (!combinedSearch) return true;
         return (
           r.student.studentName.toLowerCase().includes(combinedSearch) ||
-          r.student.studentId.toLowerCase().includes(combinedSearch)
+          r.student.studentId.toLowerCase().includes(combinedSearch) ||
+          r.student.mobileNumber.toLowerCase().includes(combinedSearch)
         );
       })
       .sort((a, b) => a.displaySerial - b.displaySerial);
@@ -166,10 +168,11 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
   const handleExport = () => {
     exportToCsv(
       `practical-report-${effectiveCentre}.csv`,
-      ['Student ID', 'Student Name', 'Centre', 'Practical Status', 'Submission Status', 'Completion %', 'Assigned', 'Remarks'],
+      ['Student ID', 'Student Name', 'Mobile', 'Centre', 'Practical Status', 'Submission Status', 'Completion %', 'Assigned', 'Remarks'],
       rows.map((r) => [
         r.student.studentId,
         r.student.studentName,
+        maskMobileNumber(r.student.mobileNumber),
         CENTRE_MAP[r.student.centreId].name,
         r.practicalStatus,
         r.submissionStatus,
@@ -206,7 +209,7 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search student ID or name..."
+              placeholder="Search student ID, name, or mobile..."
               className="w-full pl-9 pr-3.5 py-2 text-sm bg-white text-black placeholder:text-zinc-500 border border-zinc-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-black"
             />
           </div>
@@ -251,6 +254,7 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
               <thead>
                 <tr className="border-b border-zinc-200 bg-zinc-50 text-[11px] font-bold text-zinc-700 uppercase tracking-wider">
                   <th className="py-3 px-4">Student</th>
+                  <th className="py-3 px-4">Contact</th>
                   <th className="py-3 px-4">Subjects</th>
                   <th className="py-3 px-4">Practical Status</th>
                   <th className="py-3 px-4">Submission</th>
@@ -267,6 +271,45 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
                       <p className="text-[11px] font-mono text-slate-600">
                         S.No #{String(r.displaySerial || 1).padStart(4, '0')} · {CENTRE_MAP[r.student.centreId].code}
                       </p>
+                    </td>
+                    <td className="py-3 px-4 font-mono text-zinc-800 whitespace-nowrap">
+                      <div className="inline-flex items-center gap-2">
+                        <span>{maskMobileNumber(r.student.mobileNumber)}</span>
+                        {buildTelHref(r.student.mobileNumber) ? (
+                          <a
+                            href={buildTelHref(r.student.mobileNumber)!}
+                            onClick={(e) => e.stopPropagation()}
+                            aria-label={`Call ${r.student.studentName}`}
+                            title="Direct Call"
+                            className="p-1 rounded-md bg-emerald-50 text-emerald-700 hover:bg-emerald-600 hover:text-white border border-emerald-200 transition-colors"
+                          >
+                            <Phone className="w-3.5 h-3.5" />
+                          </a>
+                        ) : null}
+                        {buildWhatsAppHref(
+                          r.student.mobileNumber,
+                          r.student.studentName,
+                          'Practical file aur submission follow-up',
+                        ) ? (
+                          <a
+                            href={
+                              buildWhatsAppHref(
+                                r.student.mobileNumber,
+                                r.student.studentName,
+                                'Practical file aur submission follow-up',
+                              )!
+                            }
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            aria-label={`WhatsApp ${r.student.studentName}`}
+                            title="Open WhatsApp Chat"
+                            className="p-1 rounded-md bg-green-50 text-green-700 hover:bg-[#16A34A] hover:text-white border border-green-200 transition-colors"
+                          >
+                            <MessageCircle className="w-3.5 h-3.5" />
+                          </a>
+                        ) : null}
+                      </div>
                     </td>
                     <td className="py-3 px-4 text-zinc-700 max-w-[200px] truncate">{r.student.subject}</td>
                     <td className="py-3 px-4">
@@ -318,6 +361,43 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
                 <p className="text-xs text-slate-600 font-mono mt-0.5">
                   {editingStudent.studentName} · S.No #{String(displaySerialMap.get(editingStudent.studentId) ?? (editingStudent.serialNumber || 1)).padStart(4, '0')} · {CENTRE_MAP[editingStudent.centreId]?.code}
                 </p>
+                <div className="mt-1.5 inline-flex items-center gap-2 text-xs font-mono text-slate-700">
+                  <span>{maskMobileNumber(editingStudent.mobileNumber)}</span>
+                  {buildTelHref(editingStudent.mobileNumber) ? (
+                    <a
+                      href={buildTelHref(editingStudent.mobileNumber)!}
+                      aria-label={`Call ${editingStudent.studentName}`}
+                      title="Direct Call"
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 hover:bg-emerald-600 hover:text-white border border-emerald-200 text-[11px] font-sans font-semibold transition-colors"
+                    >
+                      <Phone className="w-3 h-3" />
+                      Call
+                    </a>
+                  ) : null}
+                  {buildWhatsAppHref(
+                    editingStudent.mobileNumber,
+                    editingStudent.studentName,
+                    'Practical file aur submission follow-up',
+                  ) ? (
+                    <a
+                      href={
+                        buildWhatsAppHref(
+                          editingStudent.mobileNumber,
+                          editingStudent.studentName,
+                          'Practical file aur submission follow-up',
+                        )!
+                      }
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-label={`WhatsApp ${editingStudent.studentName}`}
+                      title="Open WhatsApp Chat"
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-green-50 text-green-700 hover:bg-[#16A34A] hover:text-white border border-green-200 text-[11px] font-sans font-semibold transition-colors"
+                    >
+                      <MessageCircle className="w-3 h-3" />
+                      WhatsApp
+                    </a>
+                  ) : null}
+                </div>
               </div>
               <button type="button" onClick={() => setEditingStudent(null)} className="text-zinc-600 hover:text-black">
                 <X className="w-5 h-5" />
