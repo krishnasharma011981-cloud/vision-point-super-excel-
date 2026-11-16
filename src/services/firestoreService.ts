@@ -32,11 +32,13 @@ import type {
   EditRequest,
   EmployeeReport,
   EmployeeReportStatus,
+  FeeFollowUpStatus,
   FeeRecoveryRecord,
   LocationVerification,
   NotificationItem,
   OnlineClassRecord,
   PracticalRecord,
+  RecoveryStatus,
   StaffInvite,
   Student,
   SystemSettings,
@@ -563,8 +565,8 @@ export async function createStudentRecord(
     }
 
     if (options?.createDepartmentSkeletons && (actor.role === 'super_admin' || actor.role === 'centre_head')) {
-      const totalFee = options.totalFee ?? 12000;
-      const paidAmount = options.paidAmount ?? 6000;
+      const paidAmount = Math.max(0, Math.round(Number(options.paidAmount ?? 0)));
+      const totalFee = Math.max(paidAmount, Math.round(Number(options.totalFee ?? 12000)));
       const pendingAmount = Math.max(0, totalFee - paidAmount);
       const batch = writeBatch(db);
       batch.set(doc(db, 'fee_recovery', sid), {
@@ -656,6 +658,7 @@ export async function createStudentRecord(
 }
 
 export interface BulkImportRowPayload {
+  operation?: 'create' | 'update';
   serialNumber: number;
   studentId: string;
   studentName: string;
@@ -676,12 +679,30 @@ export interface BulkImportRowPayload {
   additionalRemarks: string;
   totalFee: number;
   paidAmount: number;
+  pendingAmount?: number;
+  recoveryStatus?: RecoveryStatus;
+  followUpStatus?: FeeFollowUpStatus;
+  explicitFeeDetected?: boolean;
   extraColumns?: Record<string, string>;
 }
 
 export interface BulkImportExecutionResult {
   importedCount: number;
+  updatedCount: number;
   failedRows: Array<{ studentName: string; studentId: string; error: string }>;
+}
+
+function sanitizeExtraColumns(extra?: Record<string, string>): Record<string, string> | undefined {
+  if (!extra) return undefined;
+  const cleaned: Record<string, string> = {};
+  for (const [k, v] of Object.entries(extra)) {
+    const key = String(k ?? '').trim().slice(0, 50);
+    const val = String(v ?? '').trim().slice(0, 300);
+    if (key && val && Object.keys(cleaned).length < 35) {
+      cleaned[key] = val;
+    }
+  }
+  return Object.keys(cleaned).length > 0 ? cleaned : undefined;
 }
 
 export async function bulkImportStudentsBatch(
@@ -689,7 +710,7 @@ export async function bulkImportStudentsBatch(
   actor: UserAccount,
   locationVerified: boolean,
 ): Promise<BulkImportExecutionResult> {
-  if (rows.length === 0) return { importedCount: 0, failedRows: [] };
+  if (rows.length === 0) return { importedCount: 0, updatedCount: 0, failedRows: [] };
 
   // Guarantee canonical centres exist so Firestore rules `exists(/centres/{centreId})` never blocks Super Admin
   if (actor.role === 'super_admin') {
@@ -714,48 +735,98 @@ export async function bulkImportStudentsBatch(
   const canCreateSkeletons = actor.role === 'super_admin' || actor.role === 'centre_head';
   const failedRows: Array<{ studentName: string; studentId: string; error: string }> = [];
   let importedCount = 0;
+  let updatedCount = 0;
 
-  const buildStudentDoc = (r: BulkImportRowPayload) => ({
-    serialNumber: r.serialNumber,
-    studentId: r.studentId,
-    studentName: r.studentName.slice(0, 120),
-    mobileNumber: r.mobileNumber.slice(0, 20),
-    subject: (r.subject || 'General NIOS Stream').slice(0, 200),
-    tcStatus: r.tcStatus,
-    bookStatus: r.bookStatus,
-    classAttendanceStatus: r.classAttendanceStatus,
-    whyNios: (r.whyNios || '').slice(0, 1000),
-    currentEducationStatus: (r.currentEducationStatus || '').slice(0, 1000),
-    futurePlanning: (r.futurePlanning || '').slice(0, 1000),
-    tmaStatus: r.tmaStatus,
-    practicalStatus: r.practicalStatus,
-    examinationStatus: r.examinationStatus,
-    centreId: r.centreId,
-    centreName: r.centreName.slice(0, 120),
-    admissionDate: r.admissionDate.slice(0, 30),
-    assignedEmployeeUid: actor.uid,
-    assignedEmployeeName: actorName,
-    additionalRemarks: (r.additionalRemarks || 'Excel Bulk Import').slice(0, 1000),
-    employeeLocked: false,
-    tmaLocked: false,
-    practicalLocked: false,
-    onlineClassesLocked: false,
-    admissionLocked: false,
-    lockedByUid: '',
-    lockedByName: '',
-    superAdminAccessGranted: true,
-    ...(r.extraColumns && Object.keys(r.extraColumns).length > 0 ? { extraColumns: r.extraColumns } : {}),
-    createdBy: actor.uid,
-    createdAt: serverTimestamp(),
-    updatedBy: actor.uid,
-    updatedAt: serverTimestamp(),
-  });
+  const computeFeeFields = (r: BulkImportRowPayload) => {
+    const paidAmount = Math.max(0, Math.round(Number(r.paidAmount ?? 0)));
+    const totalFee = Math.max(paidAmount, Math.round(Number(r.totalFee ?? 12000)));
+    const pendingAmount =
+      r.pendingAmount !== undefined
+        ? Math.max(0, Math.round(Number(r.pendingAmount)))
+        : Math.max(0, totalFee - paidAmount);
+    const recoveryStatus: RecoveryStatus =
+      r.recoveryStatus ||
+      (totalFee > 0 && pendingAmount === 0
+        ? 'Paid'
+        : paidAmount > 0 && pendingAmount > 0
+          ? 'Partial'
+          : 'Pending');
+    const followUpStatus: FeeFollowUpStatus =
+      r.followUpStatus || (recoveryStatus === 'Paid' ? 'Closed' : recoveryStatus === 'Partial' ? 'Promise to Pay' : 'Scheduled');
+    return { totalFee, paidAmount, pendingAmount, recoveryStatus, followUpStatus };
+  };
 
-  const addSkeletonWrites = (batch: ReturnType<typeof writeBatch>, r: BulkImportRowPayload) => {
+  const buildStudentCreateDoc = (r: BulkImportRowPayload) => {
+    const cleanExtras = sanitizeExtraColumns(r.extraColumns);
+    return {
+      serialNumber: Math.max(1, Math.round(Number(r.serialNumber || 1))),
+      studentId: r.studentId,
+      studentName: r.studentName.slice(0, 120),
+      mobileNumber: r.mobileNumber.slice(0, 20),
+      subject: (r.subject || 'General NIOS Stream').slice(0, 200),
+      tcStatus: r.tcStatus,
+      bookStatus: r.bookStatus,
+      classAttendanceStatus: r.classAttendanceStatus,
+      whyNios: (r.whyNios || '').slice(0, 1000),
+      currentEducationStatus: (r.currentEducationStatus || '').slice(0, 1000),
+      futurePlanning: (r.futurePlanning || '').slice(0, 1000),
+      tmaStatus: r.tmaStatus,
+      practicalStatus: r.practicalStatus,
+      examinationStatus: r.examinationStatus,
+      centreId: r.centreId,
+      centreName: r.centreName.slice(0, 120),
+      admissionDate: r.admissionDate.slice(0, 30),
+      assignedEmployeeUid: actor.uid,
+      assignedEmployeeName: actorName,
+      additionalRemarks: (r.additionalRemarks || 'Excel Bulk Import').slice(0, 1000),
+      employeeLocked: false,
+      tmaLocked: false,
+      practicalLocked: false,
+      onlineClassesLocked: false,
+      admissionLocked: false,
+      lockedByUid: '',
+      lockedByName: '',
+      superAdminAccessGranted: true,
+      ...(cleanExtras ? { extraColumns: cleanExtras } : {}),
+      createdBy: actor.uid,
+      createdAt: serverTimestamp(),
+      updatedBy: actor.uid,
+      updatedAt: serverTimestamp(),
+    };
+  };
+
+  const buildStudentUpdateDoc = (r: BulkImportRowPayload) => {
+    const cleanExtras = sanitizeExtraColumns(r.extraColumns);
+    return {
+      studentName: r.studentName.slice(0, 120),
+      mobileNumber: r.mobileNumber.slice(0, 20),
+      subject: (r.subject || 'General NIOS Stream').slice(0, 200),
+      tcStatus: r.tcStatus,
+      bookStatus: r.bookStatus,
+      classAttendanceStatus: r.classAttendanceStatus,
+      whyNios: (r.whyNios || '').slice(0, 1000),
+      currentEducationStatus: (r.currentEducationStatus || '').slice(0, 1000),
+      futurePlanning: (r.futurePlanning || '').slice(0, 1000),
+      tmaStatus: r.tmaStatus,
+      practicalStatus: r.practicalStatus,
+      examinationStatus: r.examinationStatus,
+      ...(actor.role === 'super_admin'
+        ? {
+            centreId: r.centreId,
+            centreName: r.centreName.slice(0, 120),
+          }
+        : {}),
+      admissionDate: r.admissionDate.slice(0, 30),
+      additionalRemarks: (r.additionalRemarks || 'Excel Sheet Updated').slice(0, 1000),
+      ...(cleanExtras ? { extraColumns: cleanExtras } : {}),
+      updatedBy: actor.uid,
+      updatedAt: serverTimestamp(),
+    };
+  };
+
+  const addSkeletonCreates = (batch: ReturnType<typeof writeBatch>, r: BulkImportRowPayload) => {
     const sid = r.studentId;
-    const totalFee = Math.max(0, Number(r.totalFee ?? 12000));
-    const paidAmount = Math.min(totalFee, Math.max(0, Number(r.paidAmount ?? 0)));
-    const pendingAmount = Math.max(0, totalFee - paidAmount);
+    const { totalFee, paidAmount, pendingAmount, recoveryStatus, followUpStatus } = computeFeeFields(r);
 
     batch.set(doc(db, 'admission_records', sid), {
       studentId: sid,
@@ -780,8 +851,8 @@ export async function bulkImportStudentsBatch(
       studentName: r.studentName.slice(0, 120),
       mobileNumber: r.mobileNumber.slice(0, 20),
       centreId: r.centreId,
-      recoveryStatus: pendingAmount === 0 ? 'Paid' : paidAmount > 0 ? 'Partial' : 'Pending',
-      followUpStatus: pendingAmount === 0 ? 'Closed' : 'Scheduled',
+      recoveryStatus,
+      followUpStatus,
       totalFee,
       paidAmount,
       pendingAmount,
@@ -845,25 +916,128 @@ export async function bulkImportStudentsBatch(
     });
   };
 
+  const syncUpdatedRowDepartments = async (r: BulkImportRowPayload) => {
+    const sid = r.studentId;
+    const { totalFee, paidAmount, pendingAmount, recoveryStatus, followUpStatus } = computeFeeFields(r);
+
+    // Sync fee_recovery (always update if fee detected, or create if missing)
+    const feeRef = doc(db, 'fee_recovery', sid);
+    const feeSnap = await getDoc(feeRef).catch(() => null);
+    if (feeSnap && feeSnap.exists()) {
+      await updateDoc(feeRef, {
+        studentName: r.studentName.slice(0, 120),
+        mobileNumber: r.mobileNumber.slice(0, 20),
+        ...(actor.role === 'super_admin' ? { centreId: r.centreId } : {}),
+        ...(r.explicitFeeDetected
+          ? {
+              recoveryStatus,
+              followUpStatus,
+              totalFee,
+              paidAmount,
+              pendingAmount,
+              followUpNotes: 'Fees synced from updated Excel sheet.',
+            }
+          : {}),
+        updatedBy: actor.uid,
+        updatedAt: serverTimestamp(),
+      }).catch(() => {});
+    } else {
+      await setDoc(feeRef, {
+        studentId: sid,
+        studentName: r.studentName.slice(0, 120),
+        mobileNumber: r.mobileNumber.slice(0, 20),
+        centreId: r.centreId,
+        recoveryStatus,
+        followUpStatus,
+        totalFee,
+        paidAmount,
+        pendingAmount,
+        assignedEmployeeUid: actor.uid,
+        assignedEmployeeName: actorName,
+        followUpNotes: 'Created from updated Excel sheet.',
+        lastContactDate: r.admissionDate.slice(0, 30),
+        nextFollowUpDate: r.admissionDate.slice(0, 30),
+        createdBy: actor.uid,
+        createdAt: serverTimestamp(),
+        updatedBy: actor.uid,
+        updatedAt: serverTimestamp(),
+      }).catch(() => {});
+    }
+
+    // Sync existing academic department statuses (preserving createdAt/createdBy)
+    const tmaRef = doc(db, 'tma_records', sid);
+    const tmaSnap = await getDoc(tmaRef).catch(() => null);
+    if (tmaSnap && tmaSnap.exists()) {
+      await updateDoc(tmaRef, {
+        studentName: r.studentName.slice(0, 120),
+        tmaStatus: r.tmaStatus,
+        subjectsSubmittedCount: r.tmaStatus === 'Submitted' ? 5 : 0,
+        updatedBy: actor.uid,
+        updatedAt: serverTimestamp(),
+      }).catch(() => {});
+    }
+
+    const pracRef = doc(db, 'practical_records', sid);
+    const pracSnap = await getDoc(pracRef).catch(() => null);
+    if (pracSnap && pracSnap.exists()) {
+      await updateDoc(pracRef, {
+        studentName: r.studentName.slice(0, 120),
+        practicalStatus: r.practicalStatus,
+        submissionStatus: r.practicalStatus === 'Completed' ? 'Submitted' : 'Not Submitted',
+        completionPercentage: r.practicalStatus === 'Completed' ? 100 : 0,
+        updatedBy: actor.uid,
+        updatedAt: serverTimestamp(),
+      }).catch(() => {});
+    }
+
+    const clsRef = doc(db, 'online_class_records', sid);
+    const clsSnap = await getDoc(clsRef).catch(() => null);
+    if (clsSnap && clsSnap.exists()) {
+      await updateDoc(clsRef, {
+        studentName: r.studentName.slice(0, 120),
+        attendanceStatus: r.classAttendanceStatus,
+        attendancePercentage:
+          r.classAttendanceStatus === 'Regular' ? 90 : r.classAttendanceStatus === 'Irregular' ? 50 : 10,
+        updatedBy: actor.uid,
+        updatedAt: serverTimestamp(),
+      }).catch(() => {});
+    }
+  };
+
   // Chunk size 45 => Phase A = 45 student writes, Phase B = 45 * 5 = 225 dept writes (< 500 batch limit)
   const chunkSize = 45;
   for (let i = 0; i < rows.length; i += chunkSize) {
     const chunk = rows.slice(i, i + chunkSize);
-    const committedRows: BulkImportRowPayload[] = [];
+    const committedCreates: BulkImportRowPayload[] = [];
+    const committedUpdates: BulkImportRowPayload[] = [];
 
     try {
       const studentBatch = writeBatch(db);
       for (const r of chunk) {
-        studentBatch.set(doc(db, 'students', r.studentId), buildStudentDoc(r));
+        const ref = doc(db, 'students', r.studentId);
+        if (r.operation === 'update') {
+          studentBatch.update(ref, buildStudentUpdateDoc(r));
+        } else {
+          studentBatch.set(ref, buildStudentCreateDoc(r));
+        }
       }
       await studentBatch.commit();
-      committedRows.push(...chunk);
+      for (const r of chunk) {
+        if (r.operation === 'update') committedUpdates.push(r);
+        else committedCreates.push(r);
+      }
     } catch {
       // Fall back to individual student writes so valid rows still succeed
       for (const r of chunk) {
         try {
-          await setDoc(doc(db, 'students', r.studentId), buildStudentDoc(r));
-          committedRows.push(r);
+          const ref = doc(db, 'students', r.studentId);
+          if (r.operation === 'update') {
+            await updateDoc(ref, buildStudentUpdateDoc(r));
+            committedUpdates.push(r);
+          } else {
+            await setDoc(ref, buildStudentCreateDoc(r));
+            committedCreates.push(r);
+          }
         } catch (rowErr) {
           failedRows.push({
             studentName: r.studentName,
@@ -874,18 +1048,18 @@ export async function bulkImportStudentsBatch(
       }
     }
 
-    if (canCreateSkeletons && committedRows.length > 0) {
+    if (canCreateSkeletons && committedCreates.length > 0) {
       try {
         const deptBatch = writeBatch(db);
-        for (const r of committedRows) {
-          addSkeletonWrites(deptBatch, r);
+        for (const r of committedCreates) {
+          addSkeletonCreates(deptBatch, r);
         }
         await deptBatch.commit();
       } catch {
-        for (const r of committedRows) {
+        for (const r of committedCreates) {
           try {
             const singleDeptBatch = writeBatch(db);
-            addSkeletonWrites(singleDeptBatch, r);
+            addSkeletonCreates(singleDeptBatch, r);
             await singleDeptBatch.commit();
           } catch {
             // Keep imported student even if secondary skeleton sync skipped
@@ -894,10 +1068,15 @@ export async function bulkImportStudentsBatch(
       }
     }
 
-    importedCount += committedRows.length;
+    if (canCreateSkeletons && committedUpdates.length > 0) {
+      await Promise.all(committedUpdates.map((r) => syncUpdatedRowDepartments(r)));
+    }
+
+    importedCount += committedCreates.length;
+    updatedCount += committedUpdates.length;
   }
 
-  if (importedCount > 0) {
+  if (importedCount > 0 || updatedCount > 0) {
     await logActivity({
       actorUid: actor.uid,
       actorName: actor.fullName,
@@ -908,12 +1087,12 @@ export async function bulkImportStudentsBatch(
       action: 'BULK_STUDENT_IMPORT',
       targetCollection: 'students',
       targetId: actor.role === 'super_admin' ? 'multi_centre' : actor.centreId,
-      details: `Imported ${importedCount} student records from spreadsheet (${failedRows.length} failed).`,
+      details: `Excel sync complete: ${importedCount} new added, ${updatedCount} existing updated (${failedRows.length} failed).`,
       locationVerified,
     });
   }
 
-  return { importedCount, failedRows };
+  return { importedCount, updatedCount, failedRows };
 }
 
 export async function updateStudentRecord(

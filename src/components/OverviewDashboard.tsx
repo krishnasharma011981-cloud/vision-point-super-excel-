@@ -1,7 +1,10 @@
 import {
   Activity,
+  AlertTriangle,
   Briefcase,
   Building2,
+  Calculator,
+  CheckCircle2,
   ClipboardCheck,
   Clock,
   FileSpreadsheet,
@@ -11,6 +14,7 @@ import {
   Layers,
   MonitorPlay,
   ShieldCheck,
+  TrendingUp,
   UserCheck,
   UserPlus,
   Users,
@@ -33,6 +37,7 @@ import {
   YAxis,
 } from 'recharts';
 import { CANONICAL_CENTRES, CENTRE_MAP, DEPARTMENT_LABELS, ROLE_LABELS } from '../constants/centres';
+import { computeInstitutionalAnalytics, maskMobileNumber } from '../lib/analyticsMath';
 import type {
   ActivityLog,
   AdmissionRecord,
@@ -62,8 +67,6 @@ interface OverviewDashboardProps {
   selectedCentreFilter: CentreId | 'all';
   onNavigate: (section: NavSection) => void;
 }
-
-const DONUT_COLORS = ['#DC2626', '#2563EB', '#7C3AED', '#059669'];
 
 const MiniSparkWave: React.FC<{ stroke: string; fillId: string; path: string }> = ({ stroke, fillId, path }) => (
   <svg viewBox="0 0 90 30" className="w-20 h-7 shrink-0 overflow-visible" aria-hidden="true">
@@ -111,9 +114,9 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
     [users, effectiveCentre],
   );
 
-  const scopedFees = useMemo(
-    () => (effectiveCentre === 'all' ? feeRecords : feeRecords.filter((f) => f.centreId === effectiveCentre)),
-    [feeRecords, effectiveCentre],
+  const analytics = useMemo(
+    () => computeInstitutionalAnalytics(students, feeRecords, admissionRecords, effectiveCentre),
+    [students, feeRecords, admissionRecords, effectiveCentre],
   );
 
   const totalEmployees = scopedUsers.filter((u) => u.role === 'employee' && u.status === 'Active').length;
@@ -125,72 +128,46 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
         : CANONICAL_CENTRES.length
       : 1;
 
-  const pendingTma = scopedStudents.filter((s) => s.tmaStatus !== 'Submitted').length;
-  const pendingPractical = scopedStudents.filter((s) => s.practicalStatus !== 'Completed').length;
-  const regularOnlineCount = scopedStudents.filter((s) => s.classAttendanceStatus === 'Regular').length;
-  const attendanceRate =
-    scopedStudents.length > 0 ? Math.round((regularOnlineCount / scopedStudents.length) * 100) : 0;
+  const pendingTma = analytics.totalStudents - analytics.tmaSubmittedCount;
+  const pendingPractical = analytics.totalStudents - analytics.practicalDoneCount;
+  const regularOnlineCount = analytics.regularAttendanceCount;
+  const attendanceRate = analytics.attendanceRatePct;
 
-  const totalFeeCollected = scopedFees.reduce((sum, f) => sum + (f.paidAmount || 0), 0);
-  const totalFeePending = scopedFees.reduce((sum, f) => sum + (f.pendingAmount || 0), 0);
+  const totalFeeCollected = analytics.totalFeePaid;
+  const totalFeePending = analytics.totalFeePending;
 
   const branchDistributionData = useMemo(() => {
-    const targetCentres =
-      effectiveCentre === 'all' ? CANONICAL_CENTRES : CANONICAL_CENTRES.filter((c) => c.id === effectiveCentre);
-    const total = targetCentres.reduce(
-      (sum, c) => sum + students.filter((s) => s.centreId === c.id).length,
-      0,
-    );
-    return targetCentres.map((c, idx) => {
-      const count = students.filter((s) => s.centreId === c.id).length;
-      const pct = total > 0 ? Math.round((count / total) * 100) : Math.round(100 / targetCentres.length);
-      return {
-        name: c.code,
-        fullName: c.name,
-        value: total > 0 ? count : 1,
-        actualCount: count,
-        percentage: pct,
-        color: DONUT_COLORS[idx % DONUT_COLORS.length],
-      };
-    });
-  }, [students, effectiveCentre]);
+    return analytics.branchMetrics.map((b) => ({
+      name: b.name,
+      fullName: b.fullName,
+      value: b.students,
+      actualCount: b.students,
+      percentage: b.percentage,
+      color: b.color,
+    }));
+  }, [analytics.branchMetrics]);
 
   const centreComparisonData = useMemo(() => {
-    const targetCentres =
-      effectiveCentre === 'all' ? CANONICAL_CENTRES : CANONICAL_CENTRES.filter((c) => c.id === effectiveCentre);
-    return targetCentres.map((c) => {
-      const cStudents = students.filter((s) => s.centreId === c.id);
-      const cCompletedPractical = cStudents.filter((s) => s.practicalStatus === 'Completed').length;
-      const cSubmittedTma = cStudents.filter((s) => s.tmaStatus === 'Submitted').length;
-      return {
-        name: c.code,
-        fullName: c.name,
-        Students: cStudents.length,
-        'TMA Submitted': cSubmittedTma,
-        'Practical Done': cCompletedPractical,
-      };
-    });
-  }, [students, effectiveCentre]);
+    return analytics.branchMetrics.map((b) => ({
+      name: b.name,
+      fullName: b.fullName,
+      Students: b.students,
+      'TMA Submitted': b.tmaSubmitted,
+      'Practical Done': b.practicalDone,
+    }));
+  }, [analytics.branchMetrics]);
 
-  const departmentPerformanceData = useMemo(() => {
-    const total = scopedStudents.length || 1;
-    const feePaid = scopedFees.filter((f) => f.recoveryStatus === 'Paid').length;
-    const pracDone = scopedStudents.filter((s) => s.practicalStatus === 'Completed').length;
-    const tmaDone = scopedStudents.filter((s) => s.tmaStatus === 'Submitted').length;
-    const regularClasses = scopedStudents.filter((s) => s.classAttendanceStatus === 'Regular').length;
-    const confirmedAdm =
-      admissionRecords.filter(
-        (a) => (effectiveCentre === 'all' || a.centreId === effectiveCentre) && a.admissionStatus === 'Confirmed',
-      ).length || scopedStudents.length;
+  const feeGraphData = useMemo(() => {
+    return analytics.branchMetrics.map((b) => ({
+      name: b.name,
+      fullName: b.fullName,
+      'Paid (Jama)': b.paidFee,
+      'Pending (Baki)': b.pendingFee,
+      collectionRate: b.collectionRate,
+    }));
+  }, [analytics.branchMetrics]);
 
-    return [
-      { department: 'Admission', Completed: confirmedAdm, Pending: Math.max(0, total - confirmedAdm) },
-      { department: 'Fee Recovery', Completed: feePaid, Pending: Math.max(0, scopedFees.length - feePaid) },
-      { department: 'TMA', Completed: tmaDone, Pending: pendingTma },
-      { department: 'Practical', Completed: pracDone, Pending: pendingPractical },
-      { department: 'Online', Completed: regularClasses, Pending: Math.max(0, total - regularClasses) },
-    ];
-  }, [scopedStudents, scopedFees, admissionRecords, effectiveCentre, pendingTma, pendingPractical]);
+  const departmentPerformanceData = analytics.departmentPerformance;
 
   const latestRegistrations = useMemo(() => scopedStudents.slice(0, 5), [scopedStudents]);
 
@@ -441,7 +418,9 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
               <IndianRupee className="w-5 h-5" />
             </div>
             <div className="min-w-0">
-              <p className="text-xs font-semibold text-slate-600 truncate">Fee Recovery</p>
+              <p className="text-xs font-semibold text-slate-600 truncate">
+                Fee Recovery ({analytics.collectionRatePct}%)
+              </p>
               <p className="text-xl font-extrabold text-emerald-700 font-mono tabular-nums leading-tight mt-0.5">
                 ₹{totalFeeCollected.toLocaleString('en-IN')}
               </p>
@@ -481,34 +460,44 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
 
           <div className="flex items-center gap-4">
             <div className="relative w-36 h-36 shrink-0">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={branchDistributionData}
-                    dataKey="value"
-                    nameKey="name"
-                    innerRadius={44}
-                    outerRadius={64}
-                    paddingAngle={2}
-                    stroke="none"
-                  >
-                    {branchDistributionData.map((entry) => (
-                      <Cell key={entry.name} fill={entry.color} />
-                    ))}
-                  </Pie>
-                  <Tooltip
-                    formatter={(_v, _name, item) => [`${item.payload.actualCount} students`, item.payload.fullName]}
-                  />
-                </PieChart>
-              </ResponsiveContainer>
-              <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center">
-                <span className="text-lg font-extrabold font-mono text-[#0F172A] leading-none tabular-nums">
-                  {String(branchDistributionData.length).padStart(2, '0')}
-                </span>
-                <span className="text-[10px] font-semibold text-slate-500 mt-0.5">
-                  {branchDistributionData.length === 1 ? 'Centre' : 'Centres'}
-                </span>
-              </div>
+              {analytics.totalStudents === 0 ? (
+                <div className="w-full h-full rounded-full border-8 border-slate-100 flex flex-col items-center justify-center text-center">
+                  <span className="text-lg font-extrabold font-mono text-slate-400">0</span>
+                  <span className="text-[10px] font-semibold text-slate-400">Students</span>
+                </div>
+              ) : (
+                <>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={branchDistributionData}
+                        dataKey="value"
+                        nameKey="name"
+                        innerRadius={44}
+                        outerRadius={64}
+                        paddingAngle={2}
+                        stroke="none"
+                      >
+                        {branchDistributionData.map((entry) => (
+                          <Cell key={entry.name} fill={entry.color} />
+                        ))}
+                      </Pie>
+                      <Tooltip
+                        formatter={(_v, _name, item) => [
+                          `${item.payload.actualCount} students (${item.payload.percentage}%)`,
+                          item.payload.fullName,
+                        ]}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                  <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center">
+                    <span className="text-lg font-extrabold font-mono text-[#0F172A] leading-none tabular-nums">
+                      {String(analytics.totalStudents).padStart(2, '0')}
+                    </span>
+                    <span className="text-[10px] font-semibold text-slate-500 mt-0.5">Students</span>
+                  </div>
+                </>
+              )}
             </div>
 
             <div className="flex-1 space-y-2.5">
@@ -520,6 +509,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                       style={{ backgroundColor: b.color }}
                     />
                     <span className="font-mono font-bold text-[#0F172A]">{b.name}</span>
+                    <span className="text-[11px] font-mono text-slate-500">({b.actualCount})</span>
                   </div>
                   <span className="font-mono font-bold text-slate-700 tabular-nums">{b.percentage}%</span>
                 </div>
@@ -609,7 +599,102 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
           </div>
         </div>
       </div>
+      {/* Fee Recovery Financial Graph & Logic/Mathematical Reasoning Panel */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+        <div className="lg:col-span-7 bg-white rounded-2xl border border-slate-200 p-5 shadow-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <TrendingUp className="w-4 h-4 text-emerald-700" />
+                <h3 className="text-sm font-bold text-[#0F172A]">
+                  Centre-Wise Fee Recovery Math (Paid vs. Pending)
+                </h3>
+              </div>
+              <p className="text-xs text-slate-600 mt-0.5">
+                Billed: ₹{analytics.totalFeeBilled.toLocaleString('en-IN')} · Collection Rate:{' '}
+                <strong className="text-emerald-700 font-mono">{analytics.collectionRatePct}%</strong> · Avg Paid/Student: ₹
+                {analytics.avgFeePerStudent.toLocaleString('en-IN')}
+              </p>
+            </div>
+            <div className="flex items-center gap-2 text-[11px] font-mono">
+              <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200 font-bold">
+                {analytics.paidCount} Paid
+              </span>
+              <span className="px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 font-bold">
+                {analytics.partialCount} Partial
+              </span>
+              <span className="px-2 py-0.5 rounded bg-rose-50 text-rose-800 border border-rose-200 font-bold">
+                {analytics.pendingCount + analytics.overdueCount} Due
+              </span>
+            </div>
+          </div>
+          <div className="h-56 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={feeGraphData} margin={{ top: 8, right: 12, left: 6, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
+                <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#1E293B' }} />
+                <YAxis
+                  tick={{ fontSize: 11, fill: '#1E293B' }}
+                  tickFormatter={(v) => `₹${Number(v) >= 1000 ? `${Math.round(Number(v) / 1000)}k` : v}`}
+                />
+                <Tooltip
+                  formatter={(value: unknown) => `₹${Number(value || 0).toLocaleString('en-IN')}`}
+                  contentStyle={{
+                    backgroundColor: '#ffffff',
+                    borderColor: '#cbd5e1',
+                    color: '#0F172A',
+                    borderRadius: '0.75rem',
+                  }}
+                />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Bar dataKey="Paid (Jama)" fill="#059669" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="Pending (Baki)" fill="#DC2626" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
 
+        <div className="lg:col-span-5 bg-white rounded-2xl border border-slate-200 p-5 shadow-xs flex flex-col">
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <div className="flex items-center gap-2">
+              <Calculator className="w-4 h-4 text-[#DC2626]" />
+              <h3 className="text-sm font-bold text-[#0F172A]">Logic &amp; Mathematical Insights</h3>
+            </div>
+            <span className="text-[11px] font-mono font-bold text-slate-500">Live Ratio Audit</span>
+          </div>
+          <div className="space-y-2.5 flex-1">
+            {analytics.reasoningInsights.map((insight) => (
+              <div
+                key={insight.id}
+                className={`p-3 rounded-xl border text-xs ${
+                  insight.severity === 'good'
+                    ? 'bg-emerald-50/75 border-emerald-200 text-emerald-950'
+                    : insight.severity === 'critical'
+                      ? 'bg-rose-50/75 border-rose-200 text-rose-950'
+                      : 'bg-amber-50/75 border-amber-200 text-amber-950'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="inline-flex items-center gap-1.5 font-bold">
+                    {insight.severity === 'good' ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                    ) : (
+                      <AlertTriangle
+                        className={`w-3.5 h-3.5 shrink-0 ${
+                          insight.severity === 'critical' ? 'text-rose-700' : 'text-amber-700'
+                        }`}
+                      />
+                    )}
+                    {insight.title}
+                  </span>
+                  <span className="font-mono font-extrabold text-[11px] shrink-0">{insight.metric}</span>
+                </div>
+                <p className="mt-1 text-[11px] leading-relaxed opacity-90">{insight.explanation}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
       {/* Department-Wise & Secondary Operational Metrics */}
       <div className={`grid grid-cols-1 sm:grid-cols-3 ${currentUser.role === 'super_admin' ? 'lg:grid-cols-4' : 'lg:grid-cols-3'} gap-4`}>
         <button
@@ -708,7 +793,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                         #{String(s.serialNumber).padStart(3, '0')} · {s.studentName}
                       </p>
                       <p className="text-[11px] font-mono text-slate-500">
-                        {s.mobileNumber} · {CENTRE_MAP[s.centreId]?.code}
+                        {maskMobileNumber(s.mobileNumber)} · {CENTRE_MAP[s.centreId]?.code}
                       </p>
                     </div>
                     <span className="font-mono text-[11px] text-slate-500 shrink-0">{s.admissionDate}</span>

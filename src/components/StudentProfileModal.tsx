@@ -1,6 +1,7 @@
-import { ArrowRightLeft, Edit3, MapPin, Phone, User, X } from 'lucide-react';
+import { ArrowRightLeft, Edit3, MapPin, MessageCircle, Phone, User, X } from 'lucide-react';
 import React, { useState } from 'react';
 import { CANONICAL_CENTRES } from '../constants/centres';
+import { buildTelHref, buildWhatsAppHref, maskMobileNumber } from '../lib/analyticsMath';
 import { formatDateTime } from '../lib/csvUtils';
 import { isStudentDeptLockedForEmployee } from '../services/firestoreService';
 import type { CentreId, Student, UserAccount } from '../types/domain';
@@ -60,9 +61,31 @@ export const StudentProfileModal: React.FC<StudentProfileModalProps> = ({
             </div>
             <h2 className="text-xl font-bold text-white mt-1">{student.studentName}</h2>
             <div className="flex flex-wrap items-center gap-4 mt-2 text-xs text-sky-100/90">
-              <span className="inline-flex items-center gap-1.5 font-mono">
+              <span className="inline-flex items-center gap-2 font-mono">
                 <Phone className="w-3.5 h-3.5 text-[#F59E0B]" />
-                {student.mobileNumber}
+                <span>{maskMobileNumber(student.mobileNumber)}</span>
+                {buildTelHref(student.mobileNumber) && (
+                  <a
+                    href={buildTelHref(student.mobileNumber)!}
+                    aria-label={`Call ${student.studentName}`}
+                    title="Direct Call"
+                    className="p-1 rounded-md bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500 hover:text-white border border-emerald-400/40 transition-colors"
+                  >
+                    <Phone className="w-3 h-3" />
+                  </a>
+                )}
+                {buildWhatsAppHref(student.mobileNumber, student.studentName) && (
+                  <a
+                    href={buildWhatsAppHref(student.mobileNumber, student.studentName)!}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label={`WhatsApp ${student.studentName}`}
+                    title="Open WhatsApp Chat"
+                    className="p-1 rounded-md bg-green-500/20 text-green-300 hover:bg-green-500 hover:text-white border border-green-400/40 transition-colors"
+                  >
+                    <MessageCircle className="w-3 h-3" />
+                  </a>
+                )}
               </span>
               <span className="inline-flex items-center gap-1.5">
                 <MapPin className="w-3.5 h-3.5 text-[#F59E0B]" />
@@ -170,14 +193,19 @@ export const StudentProfileModal: React.FC<StudentProfileModalProps> = ({
                 Imported Excel Columns
               </h3>
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-                {Object.entries(student.extraColumns).map(([key, val]) => (
-                  <div key={key} className="p-3 rounded-lg bg-slate-50 border border-slate-200">
-                    <p className="text-[11px] font-medium text-slate-600 truncate" title={key}>
-                      {key}
-                    </p>
-                    <p className="text-xs font-bold text-[#08152E] mt-1 break-words">{val || '—'}</p>
-                  </div>
-                ))}
+                {Object.entries(student.extraColumns).map(([key, val]) => {
+                  const displayVal = /mobile|phone|contact|whatsapp/i.test(key)
+                    ? maskMobileNumber(val)
+                    : val || '—';
+                  return (
+                    <div key={key} className="p-3 rounded-lg bg-slate-50 border border-slate-200">
+                      <p className="text-[11px] font-medium text-slate-600 truncate" title={key}>
+                        {key}
+                      </p>
+                      <p className="text-xs font-bold text-[#08152E] mt-1 break-words">{displayVal}</p>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}

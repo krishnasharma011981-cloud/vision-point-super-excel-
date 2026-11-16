@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import dotenv from 'dotenv';
-import express, { type NextFunction, type Request, type Response } from 'express';
+import express, { type NextFunction, type Request, type RequestHandler, type Response } from 'express';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { WebSocket, WebSocketServer } from 'ws';
 
@@ -1017,17 +1017,38 @@ async function startServer() {
   });
 
   if (process.env.NODE_ENV !== 'production') {
-    const { createServer: createViteServer } = await import('vite');
-    const hmrDisabled = process.env.DISABLE_HMR === 'true';
-    const vite = await createViteServer({
-      server: {
-        middlewareMode: true,
-        hmr: !hmrDisabled,
-        ws: hmrDisabled ? false : { server: httpServer },
-      },
-      appType: 'spa',
+    const viteInitPromise = (async () => {
+      const { createServer: createViteServer } = await import('vite');
+      const hmrDisabled = process.env.DISABLE_HMR === 'true';
+      const vite = await createViteServer({
+        server: {
+          middlewareMode: true,
+          hmr: !hmrDisabled,
+          ws: hmrDisabled ? false : { server: httpServer },
+        },
+        appType: 'spa',
+      });
+      return vite.middlewares;
+    })();
+
+    let resolvedViteMiddlewares: RequestHandler | null = null;
+    viteInitPromise
+      .then((mw) => {
+        resolvedViteMiddlewares = mw;
+      })
+      .catch((err) => {
+        console.error('Vite middleware initialization failed:', err);
+        process.exit(1);
+      });
+
+    app.use(async (req, res, next) => {
+      try {
+        const mw = resolvedViteMiddlewares ?? (await viteInitPromise);
+        mw(req, res, next);
+      } catch (err) {
+        next(err);
+      }
     });
-    app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(process.cwd(), 'dist');
     app.use(express.static(distDir));

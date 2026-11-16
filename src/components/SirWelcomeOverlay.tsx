@@ -75,11 +75,11 @@ export const SirWelcomeOverlay: React.FC<SirWelcomeOverlayProps> = ({
                   </>
                 )}
                 <div className="relative w-56 h-56 sm:w-64 sm:h-64 rounded-full p-1.5 bg-gradient-to-br from-[#FFC83D] via-[#FF1739] to-[#7F1D1D] shadow-[0_0_48px_rgba(255,23,57,0.55)]">
-                  <div className="w-full h-full rounded-full overflow-hidden bg-[#0b1326]">
+                  <div className="w-full h-full rounded-full overflow-hidden bg-white">
                     <img
                       src={SIR_PORTRAIT_PATH}
                       alt="Ashish Pandey Sir"
-                      className="w-full h-full object-cover object-[50%_18%] scale-[1.15]"
+                      className="w-full h-full object-cover object-top"
                     />
                   </div>
                 </div>

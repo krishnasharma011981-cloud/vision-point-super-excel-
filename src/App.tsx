@@ -682,6 +682,7 @@ export default function App() {
         {safeSection === 'student_database' && (
           <StudentDatabaseView
             students={students}
+            feeRecords={feeRecords}
             employees={users}
             editRequests={editRequests}
             currentUser={currentUser}

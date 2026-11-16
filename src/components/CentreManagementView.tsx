@@ -7,12 +7,15 @@ import {
   FlaskConical,
   IndianRupee,
   MapPin,
+  MessageCircle,
   MonitorPlay,
+  Phone,
   Users,
   X,
 } from 'lucide-react';
 import React, { useMemo, useState } from 'react';
 import { CANONICAL_CENTRES, DEPARTMENT_LABELS } from '../constants/centres';
+import { buildTelHref, buildWhatsAppHref, maskMobileNumber } from '../lib/analyticsMath';
 import { formatDateTime } from '../lib/csvUtils';
 import { updateCentreConfig } from '../services/firestoreService';
 import type {
@@ -294,7 +297,33 @@ export const CentreManagementView: React.FC<CentreManagementViewProps> = ({
                           {String(idx + 1).padStart(4, '0')}
                         </td>
                         <td className="py-2.5 px-4 font-semibold text-slate-900">{s.studentName}</td>
-                        <td className="py-2.5 px-4 font-mono text-slate-800">{s.mobileNumber}</td>
+                        <td className="py-2.5 px-4 font-mono text-slate-800 whitespace-nowrap">
+                          <div className="inline-flex items-center gap-2">
+                            <span>{maskMobileNumber(s.mobileNumber)}</span>
+                            {buildTelHref(s.mobileNumber) && (
+                              <a
+                                href={buildTelHref(s.mobileNumber)!}
+                                aria-label={`Call ${s.studentName}`}
+                                title="Direct Call"
+                                className="p-1 rounded-md bg-emerald-50 text-emerald-700 hover:bg-emerald-600 hover:text-white border border-emerald-200 transition-colors"
+                              >
+                                <Phone className="w-3 h-3" />
+                              </a>
+                            )}
+                            {buildWhatsAppHref(s.mobileNumber, s.studentName) && (
+                              <a
+                                href={buildWhatsAppHref(s.mobileNumber, s.studentName)!}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                aria-label={`WhatsApp ${s.studentName}`}
+                                title="Open WhatsApp Chat"
+                                className="p-1 rounded-md bg-green-50 text-green-700 hover:bg-[#16A34A] hover:text-white border border-green-200 transition-colors"
+                              >
+                                <MessageCircle className="w-3 h-3" />
+                              </a>
+                            )}
+                          </div>
+                        </td>
                         <td className="py-2.5 px-4 text-slate-800">{s.tmaStatus}</td>
                         <td className="py-2.5 px-4 text-slate-800">{s.practicalStatus}</td>
                       </tr>

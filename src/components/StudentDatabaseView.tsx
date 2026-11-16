@@ -9,7 +9,10 @@ import {
   Edit3,
   Eye,
   FileSpreadsheet,
+  IndianRupee,
   Lock,
+  MessageCircle,
+  Phone,
   Plus,
   Search,
   Send,
@@ -22,6 +25,12 @@ import {
 } from 'lucide-react';
 import React, { useMemo, useState } from 'react';
 import { CANONICAL_CENTRES, CENTRE_MAP, DEPARTMENT_LABELS } from '../constants/centres';
+import {
+  buildTelHref,
+  buildWhatsAppHref,
+  maskMobileNumber,
+  reconcileFeeNumbers,
+} from '../lib/analyticsMath';
 import { buildContextualSerialMap, exportToCsv, exportToExcel } from '../lib/csvUtils';
 import { verifyOperationLocation } from '../lib/securityClient';
 import {
@@ -41,7 +50,9 @@ import type {
   ClassAttendanceStatus,
   DepartmentId,
   EditRequest,
+  FeeRecoveryRecord,
   PracticalStatus,
+  RecoveryStatus,
   Student,
   TmaStatus,
   UserAccount,
@@ -53,6 +64,7 @@ import { StudentProfileModal } from './StudentProfileModal';
 
 interface StudentDatabaseViewProps {
   students: Student[];
+  feeRecords?: FeeRecoveryRecord[];
   employees: UserAccount[];
   editRequests?: EditRequest[];
   currentUser: UserAccount;
@@ -94,6 +106,7 @@ export function canUserEditStudentRow(student: Student, user: UserAccount): bool
 
 export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
   students,
+  feeRecords = [],
   employees,
   editRequests = [],
   currentUser,
@@ -221,11 +234,114 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
           seen.add(k);
           keys.push(k);
         }
+        if (keys.length >= 35) break;
       }
-      if (keys.length >= 25) break;
+      if (keys.length >= 35) break;
     }
     return keys;
   }, [filtered]);
+
+  const showFeeColumns =
+    currentUser.role !== 'employee' || currentUser.department === 'fee_recovery';
+
+  const feeByStudentMap = useMemo(() => {
+    const map = new Map<string, FeeRecoveryRecord>();
+    feeRecords.forEach((f) => map.set(f.studentId, f));
+    return map;
+  }, [feeRecords]);
+
+  const studentFeeSummaryMap = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        totalFee: number;
+        paidAmount: number;
+        pendingAmount: number;
+        recoveryStatus: RecoveryStatus;
+        hasFeeData: boolean;
+      }
+    >();
+    for (const s of filtered) {
+      const rec = feeByStudentMap.get(s.studentId);
+      if (rec) {
+        const tot = Math.max(0, Number(rec.totalFee || 0));
+        const paid = Math.max(0, Number(rec.paidAmount || 0));
+        const pending = Math.max(0, Number(rec.pendingAmount ?? Math.max(0, tot - paid)));
+        map.set(s.studentId, {
+          totalFee: tot,
+          paidAmount: paid,
+          pendingAmount: pending,
+          recoveryStatus: rec.recoveryStatus,
+          hasFeeData: true,
+        });
+      } else {
+        const extras = s.extraColumns || {};
+        const pickExtra = (rx: RegExp): string => {
+          for (const [k, v] of Object.entries(extras)) {
+            if (rx.test(k.toLowerCase())) return v;
+          }
+          return '';
+        };
+        const totRaw = pickExtra(/total.*fee|course.*fee|package/);
+        const paidRaw = pickExtra(/paid|jama|deposit|received/);
+        const pendingRaw = pickExtra(/pending|baki|baaki|due|balance/);
+        const statusRaw = pickExtra(/fee.*status|payment.*status/);
+        if (totRaw || paidRaw || pendingRaw || statusRaw) {
+          const r = reconcileFeeNumbers({
+            totalFeeRaw: totRaw,
+            paidAmountRaw: paidRaw,
+            pendingAmountRaw: pendingRaw,
+            feeStatusRaw: statusRaw,
+          });
+          map.set(s.studentId, {
+            totalFee: r.totalFee,
+            paidAmount: r.paidAmount,
+            pendingAmount: r.pendingAmount,
+            recoveryStatus: r.recoveryStatus,
+            hasFeeData: true,
+          });
+        } else {
+          map.set(s.studentId, {
+            totalFee: 0,
+            paidAmount: 0,
+            pendingAmount: 0,
+            recoveryStatus: 'Pending',
+            hasFeeData: false,
+          });
+        }
+      }
+    }
+    return map;
+  }, [filtered, feeByStudentMap]);
+
+  const sheetFeeTotals = useMemo(() => {
+    let totalFee = 0;
+    let totalPaid = 0;
+    let totalPending = 0;
+    let paidStudents = 0;
+    let partialStudents = 0;
+    let pendingStudents = 0;
+    for (const s of filtered) {
+      const f = studentFeeSummaryMap.get(s.studentId);
+      if (!f || !f.hasFeeData) continue;
+      totalFee += f.totalFee;
+      totalPaid += f.paidAmount;
+      totalPending += f.pendingAmount;
+      if (f.recoveryStatus === 'Paid') paidStudents++;
+      else if (f.recoveryStatus === 'Partial') partialStudents++;
+      else pendingStudents++;
+    }
+    const collectionRatePct = totalFee > 0 ? Math.round((totalPaid / totalFee) * 100) : 0;
+    return {
+      totalFee,
+      totalPaid,
+      totalPending,
+      paidStudents,
+      partialStudents,
+      pendingStudents,
+      collectionRatePct,
+    };
+  }, [filtered, studentFeeSummaryMap]);
 
   const effectivePageSize = rowsPerPage >= 10000 ? Math.max(1, filtered.length) : rowsPerPage;
   const totalPages = Math.max(1, Math.ceil(filtered.length / effectivePageSize));
@@ -471,64 +587,96 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
   };
 
   const handleExportCsv = () => {
+    const headers = [
+      'S.No',
+      'Student Name',
+      'Mobile No',
+      'Centre',
+      'TMA',
+      'Practical',
+      'Attendance (Live Classes)',
+      ...(showFeeColumns ? ['Total Fee', 'Paid (Jama)', 'Pending (Baki)', 'Fee Status'] : []),
+      'Subjects',
+      'Admission Date',
+      ...extraColumnKeys,
+    ];
     exportToCsv(
-      `vision-point-students-${effectiveCentre}.csv`,
-      [
-        'S.No',
-        'Student Name',
-        'Mobile No',
-        'Centre',
-        'TMA',
-        'Practical',
-        'Attendance (Live Classes)',
-        'Subjects',
-        'Admission Date',
-        ...extraColumnKeys,
-      ],
-      filtered.map((s) => [
-        displaySerialMap.get(s.studentId) ?? s.serialNumber,
-        s.studentName,
-        s.mobileNumber,
-        s.centreName,
-        s.tmaStatus,
-        s.practicalStatus,
-        s.classAttendanceStatus,
-        s.subject,
-        s.admissionDate,
-        ...extraColumnKeys.map((k) => s.extraColumns?.[k] || ''),
-      ]),
+      `database-security-students-${effectiveCentre}.csv`,
+      headers,
+      filtered.map((s) => {
+        const fee = studentFeeSummaryMap.get(s.studentId);
+        return [
+          displaySerialMap.get(s.studentId) ?? s.serialNumber,
+          s.studentName,
+          maskMobileNumber(s.mobileNumber),
+          s.centreName,
+          s.tmaStatus,
+          s.practicalStatus,
+          s.classAttendanceStatus,
+          ...(showFeeColumns
+            ? [
+                fee?.totalFee ?? 0,
+                fee?.paidAmount ?? 0,
+                fee?.pendingAmount ?? 0,
+                fee?.recoveryStatus ?? 'Pending',
+              ]
+            : []),
+          s.subject,
+          s.admissionDate,
+          ...extraColumnKeys.map((k) => {
+            const val = s.extraColumns?.[k] || '';
+            return /mobile|phone|contact|whatsapp/i.test(k) ? maskMobileNumber(val) : val;
+          }),
+        ];
+      }),
     );
     onNotify('Export Complete', `Exported ${filtered.length} student rows to CSV.`, 'success');
   };
 
   const handleExportExcel = () => {
+    const headers = [
+      'S.No',
+      'Student Name',
+      'Mobile No',
+      'Centre',
+      'TMA',
+      'Practical',
+      'Attendance (Live Classes)',
+      ...(showFeeColumns ? ['Total Fee', 'Paid (Jama)', 'Pending (Baki)', 'Fee Status'] : []),
+      'Subjects',
+      'Admission Date',
+      ...extraColumnKeys,
+    ];
     exportToExcel(
-      `vision-point-students-${effectiveCentre}.xlsx`,
+      `database-security-students-${effectiveCentre}.xlsx`,
       'Student Database',
-      [
-        'S.No',
-        'Student Name',
-        'Mobile No',
-        'Centre',
-        'TMA',
-        'Practical',
-        'Attendance (Live Classes)',
-        'Subjects',
-        'Admission Date',
-        ...extraColumnKeys,
-      ],
-      filtered.map((s) => [
-        displaySerialMap.get(s.studentId) ?? s.serialNumber,
-        s.studentName,
-        s.mobileNumber,
-        s.centreName,
-        s.tmaStatus,
-        s.practicalStatus,
-        s.classAttendanceStatus,
-        s.subject,
-        s.admissionDate,
-        ...extraColumnKeys.map((k) => s.extraColumns?.[k] || ''),
-      ]),
+      headers,
+      filtered.map((s) => {
+        const fee = studentFeeSummaryMap.get(s.studentId);
+        return [
+          displaySerialMap.get(s.studentId) ?? s.serialNumber,
+          s.studentName,
+          maskMobileNumber(s.mobileNumber),
+          s.centreName,
+          s.tmaStatus,
+          s.practicalStatus,
+          s.classAttendanceStatus,
+          ...(showFeeColumns
+            ? [
+                fee?.totalFee ?? 0,
+                fee?.paidAmount ?? 0,
+                fee?.pendingAmount ?? 0,
+                fee?.recoveryStatus ?? 'Pending',
+              ]
+            : []),
+          s.subject,
+          s.admissionDate,
+          ...extraColumnKeys.map((k) => {
+            const val = s.extraColumns?.[k] || '';
+            return /mobile|phone|contact|whatsapp/i.test(k) ? maskMobileNumber(val) : val;
+          }),
+        ];
+      }),
     );
     onNotify('Excel Export Ready', `Exported ${filtered.length} student rows to .xlsx.`, 'success');
   };
@@ -907,6 +1055,51 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
         )}
       </div>
 
+      {/* Live Financial Fee Detection Strip (Super Admin, Centre Head & Fee Dept) */}
+      {showFeeColumns && filtered.length > 0 && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="bg-white rounded-xl border border-slate-200 px-4 py-3 flex items-center justify-between gap-2">
+            <div>
+              <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Excel Total Fee</p>
+              <p className="text-lg font-extrabold font-mono text-[#08152E] tabular-nums mt-0.5">
+                ₹{sheetFeeTotals.totalFee.toLocaleString('en-IN')}
+              </p>
+            </div>
+            <IndianRupee className="w-5 h-5 text-slate-400 shrink-0" />
+          </div>
+          <div className="bg-white rounded-xl border border-emerald-200 px-4 py-3 flex items-center justify-between gap-2">
+            <div>
+              <p className="text-[11px] font-bold uppercase tracking-wider text-emerald-700">Paid (Jama)</p>
+              <p className="text-lg font-extrabold font-mono text-emerald-700 tabular-nums mt-0.5">
+                ₹{sheetFeeTotals.totalPaid.toLocaleString('en-IN')}
+              </p>
+            </div>
+            <span className="text-xs font-mono font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
+              {sheetFeeTotals.collectionRatePct}%
+            </span>
+          </div>
+          <div className="bg-white rounded-xl border border-rose-200 px-4 py-3 flex items-center justify-between gap-2">
+            <div>
+              <p className="text-[11px] font-bold uppercase tracking-wider text-[#B91C1C]">Pending (Baki)</p>
+              <p className="text-lg font-extrabold font-mono text-[#B91C1C] tabular-nums mt-0.5">
+                ₹{sheetFeeTotals.totalPending.toLocaleString('en-IN')}
+              </p>
+            </div>
+            <span className="text-[11px] font-mono font-semibold text-rose-700">
+              {sheetFeeTotals.partialStudents + sheetFeeTotals.pendingStudents} Due
+            </span>
+          </div>
+          <div className="bg-white rounded-xl border border-slate-200 px-4 py-3">
+            <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Fee Status Split</p>
+            <p className="text-xs font-mono font-bold text-[#08152E] mt-1.5">
+              <span className="text-emerald-700">{sheetFeeTotals.paidStudents} Paid</span> ·{' '}
+              <span className="text-amber-700">{sheetFeeTotals.partialStudents} Partial</span> ·{' '}
+              <span className="text-rose-700">{sheetFeeTotals.pendingStudents} Pending</span>
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Authentic Excel Formula Bar + Spreadsheet Grid */}
       <div className="glass-light-card rounded-xl overflow-hidden border border-slate-300">
         {/* Excel Formula / Selection Bar */}
@@ -956,22 +1149,30 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                 <tr className="excel-col-letters">
                   <th className="w-16">A</th>
                   <th className="min-w-[190px]">B</th>
-                  <th className="min-w-[125px]">C</th>
+                  <th className="min-w-[190px]">C</th>
                   <th className="min-w-[180px]">D</th>
                   <th className="min-w-[120px]">E</th>
                   <th className="min-w-[120px]">F</th>
                   <th className="min-w-[165px]">G</th>
+                  {showFeeColumns && (
+                    <>
+                      <th className="min-w-[110px]">H</th>
+                      <th className="min-w-[115px]">I</th>
+                      <th className="min-w-[115px]">J</th>
+                      <th className="min-w-[105px]">K</th>
+                    </>
+                  )}
                   {showExtraColumns &&
                     extraColumnKeys.map((k, extraIdx) => (
                       <th key={k} className="min-w-[140px]">
-                        {toExcelColName(7 + extraIdx)}
+                        {toExcelColName((showFeeColumns ? 11 : 7) + extraIdx)}
                       </th>
                     ))}
                   <th className="min-w-[175px]">
-                    {toExcelColName(7 + (showExtraColumns ? extraColumnKeys.length : 0))}
+                    {toExcelColName((showFeeColumns ? 11 : 7) + (showExtraColumns ? extraColumnKeys.length : 0))}
                   </th>
                   <th className="min-w-[140px]">
-                    {toExcelColName(8 + (showExtraColumns ? extraColumnKeys.length : 0))}
+                    {toExcelColName((showFeeColumns ? 12 : 8) + (showExtraColumns ? extraColumnKeys.length : 0))}
                   </th>
                 </tr>
 
@@ -995,7 +1196,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                       Student Name <ArrowUpDown className="w-3 h-3" />
                     </button>
                   </th>
-                  <th>Mobile No</th>
+                  <th>Mobile No (Call / WhatsApp)</th>
                   <th>Centre</th>
                   <th>
                     <button
@@ -1024,6 +1225,14 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                       Attendance Live Classes <ArrowUpDown className="w-3 h-3" />
                     </button>
                   </th>
+                  {showFeeColumns && (
+                    <>
+                      <th className="whitespace-nowrap">Total Fee (₹)</th>
+                      <th className="whitespace-nowrap">Paid Jama (₹)</th>
+                      <th className="whitespace-nowrap">Pending Baki (₹)</th>
+                      <th className="whitespace-nowrap">Fee Status</th>
+                    </>
+                  )}
                   {showExtraColumns &&
                     extraColumnKeys.map((k) => (
                       <th key={k} className="whitespace-nowrap">
@@ -1115,6 +1324,14 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                         <option value="Not Attending">Not Attending</option>
                       </select>
                     </td>
+                    {showFeeColumns && (
+                      <>
+                        <td className="px-2 py-2 text-[11px] text-slate-400 text-center">Auto</td>
+                        <td className="px-2 py-2 text-[11px] text-slate-400 text-center">Auto</td>
+                        <td className="px-2 py-2 text-[11px] text-slate-400 text-center">Auto</td>
+                        <td className="px-2 py-2 text-[11px] text-slate-400 text-center">—</td>
+                      </>
+                    )}
                     {showExtraColumns &&
                       extraColumnKeys.map((k) => (
                         <td key={k} className="px-2 py-2 text-[11px] text-slate-400 text-center">
@@ -1198,12 +1415,16 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                         )}
                       </td>
 
-                      {/* C: Mobile No */}
+                      {/* C: Mobile No (Masked Privacy + Direct Call & WhatsApp Icons) */}
                       <td
-                        onClick={() => setSelectedCell({ coord: `C${rowNum}`, value: s.mobileNumber })}
+                        onClick={() =>
+                          setSelectedCell({
+                            coord: `C${rowNum}`,
+                            value: maskMobileNumber(s.mobileNumber),
+                          })
+                        }
                         onDoubleClick={() => canEditRow && canEditIdentityInline && handleStartInlineEdit(s)}
-                        className="px-3 py-2 font-mono text-[#08152E] tabular-nums cursor-cell"
-                        title={canEditRow && canEditIdentityInline ? 'Double-click to edit inline' : undefined}
+                        className="px-3 py-2 font-mono text-[#08152E] tabular-nums cursor-cell whitespace-nowrap"
                       >
                         {isEditingThisRow && canEditIdentityInline ? (
                           <input
@@ -1212,10 +1433,51 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                             onChange={(e) =>
                               setInlineEditDraft((prev) => (prev ? { ...prev, mobileNumber: e.target.value } : prev))
                             }
+                            placeholder="Enter mobile number"
                             className="w-full px-2 py-1 text-xs font-mono bg-white border border-[#0F2F6B] rounded text-[#08152E] focus:outline-none"
                           />
                         ) : (
-                          s.mobileNumber
+                          <div className="inline-flex items-center gap-2">
+                            <span className="font-mono tracking-wider">{maskMobileNumber(s.mobileNumber)}</span>
+                            {buildTelHref(s.mobileNumber) ? (
+                              <a
+                                href={buildTelHref(s.mobileNumber)!}
+                                onClick={(e) => e.stopPropagation()}
+                                aria-label={`Call ${s.studentName}`}
+                                title="Direct Call"
+                                className="p-1 rounded-md bg-emerald-50 text-emerald-700 hover:bg-emerald-600 hover:text-white border border-emerald-200 transition-colors"
+                              >
+                                <Phone className="w-3.5 h-3.5" />
+                              </a>
+                            ) : (
+                              <span
+                                aria-hidden="true"
+                                className="p-1 rounded-md bg-slate-100 text-slate-400 border border-slate-200 opacity-50 cursor-not-allowed"
+                              >
+                                <Phone className="w-3.5 h-3.5" />
+                              </span>
+                            )}
+                            {buildWhatsAppHref(s.mobileNumber, s.studentName) ? (
+                              <a
+                                href={buildWhatsAppHref(s.mobileNumber, s.studentName)!}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                aria-label={`WhatsApp ${s.studentName}`}
+                                title="Open WhatsApp Chat"
+                                className="p-1 rounded-md bg-green-50 text-green-700 hover:bg-[#16A34A] hover:text-white border border-green-200 transition-colors"
+                              >
+                                <MessageCircle className="w-3.5 h-3.5" />
+                              </a>
+                            ) : (
+                              <span
+                                aria-hidden="true"
+                                className="p-1 rounded-md bg-slate-100 text-slate-400 border border-slate-200 opacity-50 cursor-not-allowed"
+                              >
+                                <MessageCircle className="w-3.5 h-3.5" />
+                              </span>
+                            )}
+                          </div>
                         )}
                       </td>
 
@@ -1349,10 +1611,77 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                         )}
                       </td>
 
+                      {/* H-K: Detected Fee Math Columns */}
+                      {showFeeColumns &&
+                        (() => {
+                          const fee = studentFeeSummaryMap.get(s.studentId);
+                          const hasFee = Boolean(fee?.hasFeeData);
+                          return (
+                            <>
+                              <td
+                                onClick={() =>
+                                  setSelectedCell({
+                                    coord: `H${rowNum}`,
+                                    value: hasFee ? `₹${fee!.totalFee.toLocaleString('en-IN')}` : '—',
+                                  })
+                                }
+                                className="px-3 py-2 font-mono font-semibold text-[#08152E] text-right tabular-nums cursor-cell"
+                              >
+                                {hasFee ? `₹${fee!.totalFee.toLocaleString('en-IN')}` : '—'}
+                              </td>
+                              <td
+                                onClick={() =>
+                                  setSelectedCell({
+                                    coord: `I${rowNum}`,
+                                    value: hasFee ? `₹${fee!.paidAmount.toLocaleString('en-IN')}` : '—',
+                                  })
+                                }
+                                className="px-3 py-2 font-mono font-bold text-emerald-700 text-right tabular-nums cursor-cell"
+                              >
+                                {hasFee ? `₹${fee!.paidAmount.toLocaleString('en-IN')}` : '—'}
+                              </td>
+                              <td
+                                onClick={() =>
+                                  setSelectedCell({
+                                    coord: `J${rowNum}`,
+                                    value: hasFee ? `₹${fee!.pendingAmount.toLocaleString('en-IN')}` : '—',
+                                  })
+                                }
+                                className={`px-3 py-2 font-mono font-bold text-right tabular-nums cursor-cell ${
+                                  hasFee && fee!.pendingAmount > 0 ? 'text-[#B91C1C]' : 'text-slate-600'
+                                }`}
+                              >
+                                {hasFee ? `₹${fee!.pendingAmount.toLocaleString('en-IN')}` : '—'}
+                              </td>
+                              <td
+                                onClick={() =>
+                                  setSelectedCell({
+                                    coord: `K${rowNum}`,
+                                    value: hasFee ? fee!.recoveryStatus : 'Pending',
+                                  })
+                                }
+                                className={`px-3 py-2 font-bold cursor-cell ${
+                                  fee?.recoveryStatus === 'Paid'
+                                    ? 'bg-emerald-50/70 text-emerald-800'
+                                    : fee?.recoveryStatus === 'Partial'
+                                      ? 'bg-amber-50/70 text-amber-800'
+                                      : fee?.recoveryStatus === 'Overdue'
+                                        ? 'bg-red-50/70 text-red-800'
+                                        : 'text-slate-600'
+                                }`}
+                              >
+                                {hasFee ? fee!.recoveryStatus : '—'}
+                              </td>
+                            </>
+                          );
+                        })()}
+
                       {/* Dynamic Imported Extra Excel Columns */}
                       {showExtraColumns &&
                         extraColumnKeys.map((colKey) => {
-                          const cellVal = s.extraColumns?.[colKey] || '';
+                          const rawCellVal = s.extraColumns?.[colKey] || '';
+                          const isPhoneCol = /mobile|phone|contact|whatsapp/i.test(colKey);
+                          const cellVal = isPhoneCol && rawCellVal ? maskMobileNumber(rawCellVal) : rawCellVal;
                           const canEditExtra = isSuperAdmin || isCentreHead;
                           return (
                             <td
@@ -1362,12 +1691,12 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                               }
                               onDoubleClick={() => canEditRow && canEditExtra && handleStartInlineEdit(s)}
                               className="px-3 py-2 text-slate-800 cursor-cell whitespace-nowrap max-w-[220px] truncate"
-                              title={cellVal || (canEditExtra ? 'Double-click to edit inline' : undefined)}
+                              title={isPhoneCol ? 'Masked Phone Column' : cellVal || (canEditExtra ? 'Double-click to edit inline' : undefined)}
                             >
                               {isEditingThisRow && canEditExtra ? (
                                 <input
                                   type="text"
-                                  value={inlineEditDraft.extraColumns[colKey] ?? cellVal}
+                                  value={inlineEditDraft.extraColumns[colKey] ?? rawCellVal}
                                   onChange={(e) =>
                                     setInlineEditDraft((prev) =>
                                       prev
@@ -1534,7 +1863,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                                     isEmployee
                                       ? currentUser.department === 'fee_recovery'
                                         ? 'Fee Recovery employees update fee records in the Fee Recovery section.'
-                                        : 'HR employees have view-only access on Student Database.'
+                                        : 'Department has view-only access on Student Database.'
                                       : 'Read-only outside your centre.'
                                   }
                                 >

@@ -10,7 +10,18 @@ import {
   X,
 } from 'lucide-react';
 import React, { useMemo, useState } from 'react';
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
 import { CANONICAL_CENTRES, CENTRE_MAP, DEPARTMENT_LABELS, DEPARTMENTS } from '../constants/centres';
+import { computeInstitutionalAnalytics, reconcileFeeNumbers } from '../lib/analyticsMath';
 import { exportToCsv, exportToExcel, formatDateTime } from '../lib/csvUtils';
 import { reviewEmployeeReport, submitEmployeeReport } from '../services/firestoreService';
 import type {
@@ -207,18 +218,51 @@ export const ReportsAnalyticsView: React.FC<ReportsAnalyticsViewProps> = ({
       });
   }, [students, effectiveCentre, dateFrom, dateTo, search]);
 
+  const analytics = useMemo(
+    () => computeInstitutionalAnalytics(filteredStudents, feeRecords, admissionRecords, effectiveCentre),
+    [filteredStudents, feeRecords, admissionRecords, effectiveCentre],
+  );
+
   const reportPayload = useMemo((): { headers: string[]; rows: Array<Array<string | number>> } => {
     if (reportType === 'centre_summary') {
+      const feeMap = new Map(feeRecords.map((r) => [r.studentId, r]));
       const targetCentres =
         effectiveCentre === 'all' ? CANONICAL_CENTRES : CANONICAL_CENTRES.filter((c) => c.id === effectiveCentre);
       return {
-        headers: ['Centre Code', 'Centre Name', 'Total Students', 'TMA Submitted', 'Practical Completed', 'Regular Classes'],
+        headers: [
+          'Centre Code',
+          'Centre Name',
+          'Total Students',
+          'Total Fee (₹)',
+          'Paid Jama (₹)',
+          'Pending Baki (₹)',
+          'Collection %',
+          'TMA Submitted',
+          'Practical Done',
+          'Regular Classes',
+        ],
         rows: targetCentres.map((c) => {
           const cs = filteredStudents.filter((s) => s.centreId === c.id);
+          let tot = 0;
+          let paid = 0;
+          let pend = 0;
+          for (const s of cs) {
+            const f = feeMap.get(s.studentId);
+            if (f) {
+              tot += f.totalFee;
+              paid += f.paidAmount;
+              pend += f.pendingAmount;
+            }
+          }
+          const pct = tot > 0 ? Math.round((paid / tot) * 100) : 0;
           return [
             c.code,
             c.name,
             cs.length,
+            tot,
+            paid,
+            pend,
+            `${pct}%`,
             cs.filter((s) => s.tmaStatus === 'Submitted').length,
             cs.filter((s) => s.practicalStatus === 'Completed').length,
             cs.filter((s) => s.classAttendanceStatus === 'Regular').length,
@@ -233,15 +277,46 @@ export const ReportsAnalyticsView: React.FC<ReportsAnalyticsViewProps> = ({
         headers: ['Student ID', 'Student Name', 'Centre', 'Status', 'Total Fee', 'Paid', 'Pending', 'Assigned'],
         rows: filteredStudents.map((s) => {
           const rec = feeMap.get(s.studentId);
+          if (rec) {
+            return [
+              s.studentId,
+              s.studentName,
+              CENTRE_MAP[s.centreId].code,
+              rec.recoveryStatus,
+              rec.totalFee,
+              rec.paidAmount,
+              rec.pendingAmount,
+              rec.assignedEmployeeName || s.assignedEmployeeName || 'Unassigned',
+            ];
+          }
+          const extras = s.extraColumns || {};
+          const findExtra = (rx: RegExp): string => {
+            for (const [k, v] of Object.entries(extras)) {
+              if (rx.test(k.toLowerCase())) return v;
+            }
+            return '';
+          };
+          const hasExtraFee =
+            Boolean(findExtra(/total.*fee|course.*fee|package/)) ||
+            Boolean(findExtra(/paid|jama|deposit|received/)) ||
+            Boolean(findExtra(/pending|baki|baaki|due|balance/));
+          const reconciled = hasExtraFee
+            ? reconcileFeeNumbers({
+                totalFeeRaw: findExtra(/total.*fee|course.*fee|package/),
+                paidAmountRaw: findExtra(/paid|jama|deposit|received/),
+                pendingAmountRaw: findExtra(/pending|baki|baaki|due|balance/),
+                feeStatusRaw: findExtra(/fee.*status|payment.*status/),
+              })
+            : null;
           return [
             s.studentId,
             s.studentName,
             CENTRE_MAP[s.centreId].code,
-            rec?.recoveryStatus || 'Pending',
-            rec?.totalFee ?? 12000,
-            rec?.paidAmount ?? 0,
-            rec?.pendingAmount ?? 12000,
-            rec?.assignedEmployeeName || s.assignedEmployeeName || 'Unassigned',
+            reconciled?.recoveryStatus || 'Pending',
+            reconciled?.totalFee ?? 0,
+            reconciled?.paidAmount ?? 0,
+            reconciled?.pendingAmount ?? 0,
+            s.assignedEmployeeName || 'Unassigned',
           ];
         }),
       };
@@ -711,6 +786,75 @@ export const ReportsAnalyticsView: React.FC<ReportsAnalyticsViewProps> = ({
         </div>
       ) : (
         <>
+          {/* Mathematical Fee & Department Analytics Graphs */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="bg-white rounded-xl border border-zinc-200 p-4">
+              <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-600">Scoped Students</p>
+              <p className="text-2xl font-extrabold font-mono text-black tabular-nums mt-1">
+                {analytics.totalStudents}
+              </p>
+            </div>
+            <div className="bg-white rounded-xl border border-zinc-200 p-4">
+              <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-600">Total Fee Billed</p>
+              <p className="text-2xl font-extrabold font-mono text-black tabular-nums mt-1">
+                ₹{analytics.totalFeeBilled.toLocaleString('en-IN')}
+              </p>
+            </div>
+            <div className="bg-white rounded-xl border border-emerald-200 p-4">
+              <p className="text-[11px] font-bold uppercase tracking-wider text-emerald-700">
+                Collected ({analytics.collectionRatePct}%)
+              </p>
+              <p className="text-2xl font-extrabold font-mono text-emerald-700 tabular-nums mt-1">
+                ₹{analytics.totalFeePaid.toLocaleString('en-IN')}
+              </p>
+            </div>
+            <div className="bg-white rounded-xl border border-rose-200 p-4">
+              <p className="text-[11px] font-bold uppercase tracking-wider text-red-700">Pending Recovery</p>
+              <p className="text-2xl font-extrabold font-mono text-red-700 tabular-nums mt-1">
+                ₹{analytics.totalFeePending.toLocaleString('en-IN')}
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="bg-white rounded-xl border border-zinc-200 p-4">
+              <h3 className="text-sm font-bold text-black">Branch Fee Graph (Paid vs. Pending)</h3>
+              <p className="text-xs text-zinc-600 mb-3">Accurate financial breakdown computed from uploaded records</p>
+              <div className="h-52 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={analytics.branchMetrics} margin={{ top: 6, right: 10, left: 6, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
+                    <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#1E293B' }} />
+                    <YAxis
+                      tick={{ fontSize: 11, fill: '#1E293B' }}
+                      tickFormatter={(v) => `₹${Number(v) >= 1000 ? `${Math.round(Number(v) / 1000)}k` : v}`}
+                    />
+                    <Tooltip formatter={(val: unknown) => `₹${Number(val || 0).toLocaleString('en-IN')}`} />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    <Bar dataKey="paidFee" name="Paid (Jama)" fill="#059669" radius={[4, 4, 0, 0]} />
+                    <Bar dataKey="pendingFee" name="Pending (Baki)" fill="#DC2626" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl border border-zinc-200 p-4">
+              <h3 className="text-sm font-bold text-black">Department Completion Rate (%)</h3>
+              <p className="text-xs text-zinc-600 mb-3">Percentage of students completed across all 5 departments</p>
+              <div className="h-52 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={analytics.departmentPerformance} margin={{ top: 6, right: 10, left: -10, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
+                    <XAxis dataKey="department" tick={{ fontSize: 11, fill: '#1E293B' }} />
+                    <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: '#1E293B' }} tickFormatter={(v) => `${v}%`} />
+                    <Tooltip formatter={(val: unknown) => `${val}%`} />
+                    <Bar dataKey="completionPct" name="Completion %" fill="#2563EB" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+
           {/* Operational Report Selector */}
           <div className="bg-white rounded-xl border border-zinc-200 p-4 grid grid-cols-1 sm:grid-cols-3 gap-3 no-print">
             <select

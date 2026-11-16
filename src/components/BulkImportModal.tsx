@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { CANONICAL_CENTRES, CENTRE_MAP } from '../constants/centres';
+import { maskMobileNumber } from '../lib/analyticsMath';
 import {
   cleanMobileNumber,
   exportToCsv,
@@ -53,7 +54,8 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
   );
   const [autoDetectCentre, setAutoDetectCentre] = useState<boolean>(isSuperAdmin);
   const [allowMissingMobile, setAllowMissingMobile] = useState<boolean>(true);
-  const [replaceExisting, setReplaceExisting] = useState<boolean>(false);
+  const [importMode, setImportMode] = useState<'upsert' | 'skip_duplicates' | 'replace_all'>('upsert');
+  const [defaultTotalFee, setDefaultTotalFee] = useState<number>(12000);
   const [showColumnMapper, setShowColumnMapper] = useState<boolean>(false);
 
   const [sheetNames, setSheetNames] = useState<string[]>([]);
@@ -75,7 +77,7 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
   useEffect(() => {
     if (open) {
       setSelectedCentre(isSuperAdmin ? defaultCentreId : currentUser.centreId);
-      setReplaceExisting(false);
+      setImportMode('upsert');
       setImportStatusText('');
       setImportError(null);
       setParseError(null);
@@ -92,25 +94,46 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
     [rawSheets, activeSheet],
   );
 
-  const existingIds = useMemo(() => {
-    const set = new Set<string>();
-    existingStudents.forEach((s) => set.add(s.studentId.trim().toLowerCase()));
-    return set;
+  const existingById = useMemo(() => {
+    const map = new Map<string, Student>();
+    existingStudents.forEach((s) => map.set(s.studentId.trim().toLowerCase(), s));
+    return map;
   }, [existingStudents]);
 
-  const existingMobileByCentre = useMemo(() => {
-    const set = new Set<string>();
+  const existingByCentreMobile = useMemo(() => {
+    const map = new Map<string, Student>();
     existingStudents.forEach((s) => {
       const m = cleanMobileNumber(s.mobileNumber);
       if (m.length >= 7 && m.toLowerCase() !== 'not provided') {
-        set.add(`${s.centreId}::${m}`);
+        map.set(`${s.centreId}::${m}`, s);
       }
     });
-    return set;
+    return map;
+  }, [existingStudents]);
+
+  const existingUniqueByCentreName = useMemo(() => {
+    const counts = new Map<string, number>();
+    const map = new Map<string, Student>();
+    existingStudents.forEach((s) => {
+      const key = `${s.centreId}::${s.studentName.trim().toLowerCase()}`;
+      counts.set(key, (counts.get(key) || 0) + 1);
+      map.set(key, s);
+    });
+    for (const [k, count] of counts.entries()) {
+      if (count > 1) map.delete(k);
+    }
+    return map;
   }, [existingStudents]);
 
   const previewRows = useMemo<
-    Array<NormalizedImportStudent & { duplicateReason: string | null; raw: Record<string, string> }>
+    Array<
+      NormalizedImportStudent & {
+        duplicateReason: string | null;
+        matchedExisting: Student | null;
+        operation: 'create' | 'update';
+        raw: Record<string, string>;
+      }
+    >
   >(() => {
     const seenIds = new Set<string>();
     const seenCentreMobiles = new Set<string>();
@@ -123,6 +146,7 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
         isSuperAdmin && autoDetectCentre,
         columnMapping,
         allowMissingMobile,
+        defaultTotalFee,
       );
 
       const override = editedOverrides[idx];
@@ -147,15 +171,40 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
         normalized.validationError = null;
       }
 
-      let duplicateReason: string | null = null;
-      if (normalized.studentId) {
-        const idKey = normalized.studentId.toLowerCase();
-        if (!replaceExisting && existingIds.has(idKey)) {
-          duplicateReason = `Student ID "${normalized.studentId}" already exists.`;
-        } else if (seenIds.has(idKey)) {
-          duplicateReason = `Duplicate Student ID "${normalized.studentId}" in sheet.`;
+      let matchedExisting: Student | null = null;
+      if (importMode !== 'replace_all') {
+        if (normalized.studentId) {
+          matchedExisting = existingById.get(normalized.studentId.toLowerCase()) || null;
         }
-        seenIds.add(idKey);
+        if (
+          !matchedExisting &&
+          normalized.mobileNumber.length >= 7 &&
+          normalized.mobileNumber.toLowerCase() !== 'not provided'
+        ) {
+          matchedExisting =
+            existingByCentreMobile.get(`${normalized.centreId}::${normalized.mobileNumber}`) || null;
+        }
+        if (!matchedExisting && normalized.studentName.length >= 2) {
+          const nameMatch =
+            existingUniqueByCentreName.get(
+              `${normalized.centreId}::${normalized.studentName.toLowerCase()}`,
+            ) || null;
+          if (
+            nameMatch &&
+            (normalized.mobileNumber === 'Not Provided' || nameMatch.mobileNumber === normalized.mobileNumber)
+          ) {
+            matchedExisting = nameMatch;
+          }
+        }
+      }
+
+      let duplicateReason: string | null = null;
+      const sheetIdKey = (matchedExisting?.studentId || normalized.studentId).toLowerCase();
+      if (sheetIdKey) {
+        if (seenIds.has(sheetIdKey)) {
+          duplicateReason = `Duplicate Student ID "${matchedExisting?.studentId || normalized.studentId}" in sheet.`;
+        }
+        seenIds.add(sheetIdKey);
       }
       if (
         !duplicateReason &&
@@ -163,15 +212,31 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
         normalized.mobileNumber.toLowerCase() !== 'not provided'
       ) {
         const mobKey = `${normalized.centreId}::${normalized.mobileNumber}`;
-        if (!replaceExisting && existingMobileByCentre.has(mobKey)) {
-          duplicateReason = `Mobile ${normalized.mobileNumber} already exists in ${normalized.centreName}.`;
-        } else if (seenCentreMobiles.has(mobKey)) {
-          duplicateReason = `Duplicate mobile ${normalized.mobileNumber} in sheet.`;
+        if (seenCentreMobiles.has(mobKey)) {
+          duplicateReason = `Duplicate mobile ${maskMobileNumber(normalized.mobileNumber)} in sheet.`;
         }
         seenCentreMobiles.add(mobKey);
       }
 
-      return { ...normalized, duplicateReason, raw };
+      if (!duplicateReason && matchedExisting && importMode === 'skip_duplicates') {
+        duplicateReason = `Already exists (#${matchedExisting.serialNumber} ${matchedExisting.studentName}).`;
+      }
+
+      // Centre Head can only update students belonging to their own centre
+      if (
+        !duplicateReason &&
+        matchedExisting &&
+        importMode === 'upsert' &&
+        !isSuperAdmin &&
+        matchedExisting.centreId !== currentUser.centreId
+      ) {
+        duplicateReason = 'Matches student in another centre (read-only).';
+      }
+
+      const operation: 'create' | 'update' =
+        matchedExisting && importMode === 'upsert' ? 'update' : 'create';
+
+      return { ...normalized, duplicateReason, matchedExisting, operation, raw };
     });
   }, [
     activeRawRows,
@@ -180,20 +245,39 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
     autoDetectCentre,
     columnMapping,
     allowMissingMobile,
-    replaceExisting,
+    defaultTotalFee,
+    importMode,
     editedOverrides,
-    existingIds,
-    existingMobileByCentre,
+    existingById,
+    existingByCentreMobile,
+    existingUniqueByCentreName,
+    currentUser.centreId,
   ]);
 
   const readyRows = useMemo(
     () => previewRows.filter((r) => !r.validationError && !r.duplicateReason),
     [previewRows],
   );
+  const newReadyCount = useMemo(
+    () => readyRows.filter((r) => r.operation === 'create').length,
+    [readyRows],
+  );
+  const updateReadyCount = useMemo(
+    () => readyRows.filter((r) => r.operation === 'update').length,
+    [readyRows],
+  );
   const issueRows = useMemo(
     () => previewRows.filter((r) => r.validationError || r.duplicateReason),
     [previewRows],
   );
+
+  const feeSummary = useMemo(() => {
+    const total = readyRows.reduce((s, r) => s + r.totalFee, 0);
+    const paid = readyRows.reduce((s, r) => s + r.paidAmount, 0);
+    const pending = readyRows.reduce((s, r) => s + r.pendingAmount, 0);
+    const pct = total > 0 ? Math.round((paid / total) * 100) : 0;
+    return { total, paid, pending, pct };
+  }, [readyRows]);
 
   // Columns beyond Student Name & Mobile No to render the full Excel spreadsheet preview
   const extraPreviewHeaders = useMemo(
@@ -360,7 +444,7 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
         return;
       }
 
-      const shouldReplace = isSuperAdmin && replaceExisting && existingStudents.length > 0;
+      const shouldReplace = isSuperAdmin && importMode === 'replace_all' && existingStudents.length > 0;
       if (shouldReplace) {
         setImportStatusText(`Clearing existing ${existingStudents.length} records...`);
         await deleteStudentsBatch(existingStudents, currentUser, {
@@ -368,11 +452,45 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
         });
       }
 
-      setImportStatusText(`Importing ${readyRows.length} students...`);
+      setImportStatusText(`Syncing ${readyRows.length} students & fees...`);
       let nextSerial = shouldReplace ? 1 : await getNextSerialNumber(existingStudents);
       const year = new Date().getFullYear();
 
       const payloads: BulkImportRowPayload[] = readyRows.map((row) => {
+        if (row.operation === 'update' && row.matchedExisting) {
+          return {
+            operation: 'update',
+            serialNumber: row.matchedExisting.serialNumber,
+            studentId: row.matchedExisting.studentId,
+            studentName: row.studentName,
+            mobileNumber:
+              row.mobileNumber === 'Not Provided' && row.matchedExisting.mobileNumber
+                ? row.matchedExisting.mobileNumber
+                : row.mobileNumber,
+            subject: row.subject,
+            tcStatus: row.tcStatus,
+            bookStatus: row.bookStatus,
+            classAttendanceStatus: row.classAttendanceStatus,
+            whyNios: row.whyNios,
+            currentEducationStatus: row.currentEducationStatus,
+            futurePlanning: row.futurePlanning,
+            tmaStatus: row.tmaStatus,
+            practicalStatus: row.practicalStatus,
+            examinationStatus: row.examinationStatus,
+            centreId: row.centreId,
+            centreName: row.centreName,
+            admissionDate: row.admissionDate,
+            additionalRemarks: row.additionalRemarks,
+            totalFee: row.totalFee,
+            paidAmount: row.paidAmount,
+            pendingAmount: row.pendingAmount,
+            recoveryStatus: row.recoveryStatus,
+            followUpStatus: row.followUpStatus,
+            explicitFeeDetected: row.explicitFeeDetected,
+            extraColumns: row.extraColumns,
+          };
+        }
+
         const serialNumber = nextSerial++;
         const sid =
           row.studentId && /^[a-zA-Z0-9_-]+$/.test(row.studentId)
@@ -383,6 +501,7 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                 .toUpperCase()}`;
 
         return {
+          operation: 'create',
           serialNumber,
           studentId: sid,
           studentName: row.studentName,
@@ -403,6 +522,10 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
           additionalRemarks: row.additionalRemarks,
           totalFee: row.totalFee,
           paidAmount: row.paidAmount,
+          pendingAmount: row.pendingAmount,
+          recoveryStatus: row.recoveryStatus,
+          followUpStatus: row.followUpStatus,
+          explicitFeeDetected: row.explicitFeeDetected,
           extraColumns: row.extraColumns,
         };
       });
@@ -410,15 +533,15 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
       const result = await bulkImportStudentsBatch(payloads, currentUser, true);
       const totalSkipped = issueRows.length + result.failedRows.length;
 
-      if (result.importedCount === 0 && result.failedRows.length > 0) {
+      if (result.importedCount === 0 && result.updatedCount === 0 && result.failedRows.length > 0) {
         const errMsg = result.failedRows[0]?.error || 'Firestore denied or rejected the imported rows.';
         setImportError(errMsg);
         onError('Import Rejected', errMsg);
       } else {
         onSuccess(
-          `Successfully imported ${result.importedCount} student records${
-            totalSkipped > 0 ? ` (${totalSkipped} skipped/duplicates)` : ''
-          }. Pura Excel database ab live table me khul gaya hai.`,
+          `Excel sync complete: ${result.importedCount} new added, ${result.updatedCount} existing updated (fees & graphs synced)${
+            totalSkipped > 0 ? `, ${totalSkipped} skipped` : ''
+          }.`,
         );
         setRawSheets({});
         setHeadersBySheet({});
@@ -426,7 +549,7 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
         setActiveSheet('');
         setFileName('');
         setEditedOverrides({});
-        setReplaceExisting(false);
+        setImportMode('upsert');
         onClose();
       }
     } catch (err) {
@@ -495,52 +618,74 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
             </div>
           </div>
 
-          {isSuperAdmin && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 rounded-xl bg-sky-50/70 border border-sky-200">
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-wider text-[#0B2454] mb-1">
-                  Fallback / Default Centre
-                </label>
-                <select
-                  value={selectedCentre}
-                  onChange={(e) => setSelectedCentre(e.target.value as CentreId)}
-                  className="w-full px-3 py-2 text-xs bg-white text-[#08152E] font-semibold border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#0F2F6B]"
-                >
-                  {CANONICAL_CENTRES.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name} ({c.code})
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex items-end">
-                <label className="flex items-center gap-2.5 text-xs font-semibold text-[#08152E] bg-white px-3 py-2 rounded-lg border border-slate-300 w-full cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={autoDetectCentre}
-                    onChange={(e) => setAutoDetectCentre(e.target.checked)}
-                    className="rounded border-slate-300 text-[#B91C1C] focus:ring-[#B91C1C]"
-                  />
-                  <span>Auto-detect Centre from Excel &ldquo;Centre&rdquo; column</span>
-                </label>
-              </div>
-              {existingStudents.length > 0 && (
-                <div className="sm:col-span-2">
-                  <label className="flex items-center gap-2.5 text-xs font-bold text-red-900 bg-red-50/90 px-3 py-2 rounded-lg border border-red-200 w-full cursor-pointer">
+          {/* Import Behavior & Centre Settings */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 p-3 rounded-xl bg-sky-50/70 border border-sky-200">
+            {isSuperAdmin && (
+              <>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-wider text-[#0B2454] mb-1">
+                    Fallback / Default Centre
+                  </label>
+                  <select
+                    value={selectedCentre}
+                    onChange={(e) => setSelectedCentre(e.target.value as CentreId)}
+                    className="w-full px-3 py-2 text-xs bg-white text-[#08152E] font-semibold border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#0F2F6B]"
+                  >
+                    {CANONICAL_CENTRES.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name} ({c.code})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex items-end">
+                  <label className="flex items-center gap-2.5 text-xs font-semibold text-[#08152E] bg-white px-3 py-2 rounded-lg border border-slate-300 w-full cursor-pointer">
                     <input
                       type="checkbox"
-                      checked={replaceExisting}
-                      onChange={(e) => setReplaceExisting(e.target.checked)}
-                      className="rounded border-red-300 text-red-700 focus:ring-red-600"
+                      checked={autoDetectCentre}
+                      onChange={(e) => setAutoDetectCentre(e.target.checked)}
+                      className="rounded border-slate-300 text-[#B91C1C] focus:ring-[#B91C1C]"
                     />
-                    <span>
-                      Clear &amp; replace all existing {existingStudents.length} student records before importing this sheet (Fresh Re-Upload)
-                    </span>
+                    <span>Auto-detect Centre column</span>
                   </label>
                 </div>
-              )}
+              </>
+            )}
+
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-wider text-[#0B2454] mb-1">
+                Excel Upload / Update Mode
+              </label>
+              <select
+                value={importMode}
+                onChange={(e) =>
+                  setImportMode(e.target.value as 'upsert' | 'skip_duplicates' | 'replace_all')
+                }
+                className="w-full px-3 py-2 text-xs bg-white text-[#08152E] font-semibold border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#0F2F6B]"
+              >
+                <option value="upsert">Add New &amp; Update Existing Rows (Sync Fees)</option>
+                <option value="skip_duplicates">Add New Rows Only (Skip Existing)</option>
+                {isSuperAdmin && existingStudents.length > 0 && (
+                  <option value="replace_all">
+                    Fresh Re-Upload (Delete All {existingStudents.length} Existing)
+                  </option>
+                )}
+              </select>
             </div>
-          )}
+
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-wider text-[#0B2454] mb-1">
+                Default Total Fee (If Column Missing)
+              </label>
+              <input
+                type="number"
+                min={0}
+                value={defaultTotalFee}
+                onChange={(e) => setDefaultTotalFee(Math.max(0, Number(e.target.value) || 0))}
+                className="w-full px-3 py-2 text-xs font-mono font-bold bg-white text-[#08152E] border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#0F2F6B]"
+              />
+            </div>
+          </div>
 
           {/* File Picker Dropzone */}
           <label className="flex flex-col items-center justify-center border-2 border-dashed border-slate-300 rounded-xl p-4 cursor-pointer hover:border-[#DC2626] hover:bg-rose-50/30 transition-colors">
@@ -554,8 +699,8 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
             </span>
             <span className="text-xs text-slate-600 mt-0.5">
               {previewRows.length > 0
-                ? `${previewRows.length} rows found · ${activeHeaders.length} columns · ${readyRows.length} ready to import`
-                : 'Works with MS Excel, Google Sheets, NIOS portals, and UTF-8/UTF-16 CSV'}
+                ? `${previewRows.length} rows found · ${activeHeaders.length} columns · ${newReadyCount} new + ${updateReadyCount} updates`
+                : 'Auto-detects Paid (Jama), Pending (Baki), Total Fee & all custom columns'}
             </span>
             <input
               type="file"
@@ -578,12 +723,42 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
           {/* Column Mapper + Full Spreadsheet Preview */}
           {activeRawRows.length > 0 && (
             <div className="space-y-3">
+              {/* Mathematical Fee & Sync Detection Banner */}
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 p-3 rounded-xl bg-slate-900 text-white text-xs">
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-slate-300">Rows to Sync</p>
+                  <p className="font-mono font-bold text-sm mt-0.5">
+                    {newReadyCount} New · {updateReadyCount} Update
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-slate-300">Detected Total Fee</p>
+                  <p className="font-mono font-bold text-sm mt-0.5">₹{feeSummary.total.toLocaleString('en-IN')}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-emerald-300">Paid (Jama)</p>
+                  <p className="font-mono font-bold text-sm text-emerald-400 mt-0.5">
+                    ₹{feeSummary.paid.toLocaleString('en-IN')}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-rose-300">Pending (Baki)</p>
+                  <p className="font-mono font-bold text-sm text-rose-400 mt-0.5">
+                    ₹{feeSummary.pending.toLocaleString('en-IN')}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-amber-300">Collection Rate</p>
+                  <p className="font-mono font-bold text-sm text-[#FBBF24] mt-0.5">{feeSummary.pct}%</p>
+                </div>
+              </div>
+
               {/* Toolbar */}
               <div className="flex flex-wrap items-center justify-between gap-2.5">
                 <div className="flex flex-wrap items-center gap-2 text-xs">
                   <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200 font-bold">
                     <CheckCircle2 className="w-3.5 h-3.5" />
-                    {readyRows.length} Ready to Import
+                    {readyRows.length} Ready
                   </span>
                   {issueRows.length > 0 && (
                     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-50 text-amber-900 border border-amber-200 font-bold">
@@ -637,10 +812,10 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                 <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-300 space-y-2.5">
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-xs font-bold text-[#08152E]">
-                      Column Mapping (All other Excel columns will also be saved &amp; displayed in the sheet!)
+                      Column Mapping (All other Excel columns up to 35 are also preserved!)
                     </p>
                   </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
                     {(
                       [
                         { key: 'studentName', label: 'Student Name *' },
@@ -651,7 +826,9 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                         { key: 'practicalStatus', label: 'Practical Status' },
                         { key: 'classAttendanceStatus', label: 'Attendance' },
                         { key: 'totalFee', label: 'Total Fee' },
-                        { key: 'paidAmount', label: 'Paid Amount' },
+                        { key: 'paidAmount', label: 'Paid (Jama)' },
+                        { key: 'pendingAmount', label: 'Pending (Baki)' },
+                        { key: 'feeStatus', label: 'Fee Status' },
                         { key: 'admissionDate', label: 'Admission Date' },
                       ] as Array<{ key: keyof ExcelColumnMapping; label: string }>
                     ).map((field) => (
@@ -692,11 +869,23 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                         <th className="px-2.5 py-2 font-semibold border-r border-slate-700 min-w-[160px]">
                           Student Name*
                         </th>
-                        <th className="px-2.5 py-2 font-semibold border-r border-slate-700 min-w-[125px]">
-                          Mobile No
+                        <th className="px-2.5 py-2 font-semibold border-r border-slate-700 min-w-[115px]">
+                          Mobile (Masked)
                         </th>
                         <th className="px-2.5 py-2 font-semibold border-r border-slate-700 whitespace-nowrap">
                           Target Centre
+                        </th>
+                        <th className="px-2.5 py-2 font-semibold border-r border-slate-700 whitespace-nowrap bg-[#172554]">
+                          Total Fee
+                        </th>
+                        <th className="px-2.5 py-2 font-semibold border-r border-slate-700 whitespace-nowrap bg-[#172554]">
+                          Paid (Jama)
+                        </th>
+                        <th className="px-2.5 py-2 font-semibold border-r border-slate-700 whitespace-nowrap bg-[#172554]">
+                          Pending (Baki)
+                        </th>
+                        <th className="px-2.5 py-2 font-semibold border-r border-slate-700 whitespace-nowrap bg-[#172554]">
+                          Fee Status
                         </th>
                         {extraPreviewHeaders.map((h) => (
                           <th
@@ -706,7 +895,7 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                             {h}
                           </th>
                         ))}
-                        <th className="px-2.5 py-2 font-semibold whitespace-nowrap">Status</th>
+                        <th className="px-2.5 py-2 font-semibold whitespace-nowrap">Sync Action</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200 bg-white">
@@ -715,7 +904,7 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                         return (
                           <tr
                             key={`${idx}-${row.studentId}`}
-                            className={errMsg ? 'bg-amber-50/75' : 'hover:bg-slate-50'}
+                            className={errMsg ? 'bg-amber-50/75' : row.operation === 'update' ? 'bg-sky-50/50 hover:bg-sky-50' : 'hover:bg-slate-50'}
                           >
                             <td className="px-2.5 py-1.5 font-mono text-slate-500 border-r border-slate-200">
                               {row.rowIndex}
@@ -734,28 +923,53 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                                 className="w-full px-2 py-1 text-xs bg-white border border-slate-200 rounded focus:border-[#0F2F6B] focus:outline-none font-semibold text-[#08152E]"
                               />
                             </td>
-                            <td className="px-2 py-1 border-r border-slate-200">
-                              <input
-                                type="text"
-                                value={editedOverrides[idx]?.mobileNumber ?? row.mobileNumber}
-                                onChange={(e) =>
-                                  setEditedOverrides((prev) => ({
-                                    ...prev,
-                                    [idx]: { ...prev[idx], mobileNumber: e.target.value },
-                                  }))
-                                }
-                                placeholder="Mobile"
-                                className="w-full px-2 py-1 text-xs font-mono bg-white border border-slate-200 rounded focus:border-[#0F2F6B] focus:outline-none text-[#08152E]"
-                              />
+                            <td className="px-2.5 py-1.5 font-mono text-slate-800 whitespace-nowrap border-r border-slate-200">
+                              {row.validationError?.includes('Mobile') ? (
+                                <input
+                                  type="text"
+                                  value={editedOverrides[idx]?.mobileNumber ?? ''}
+                                  onChange={(e) =>
+                                    setEditedOverrides((prev) => ({
+                                      ...prev,
+                                      [idx]: { ...prev[idx], mobileNumber: e.target.value },
+                                    }))
+                                  }
+                                  placeholder="Enter Mobile"
+                                  className="w-full px-2 py-1 text-xs font-mono bg-white border border-amber-400 rounded text-[#08152E]"
+                                />
+                              ) : (
+                                maskMobileNumber(row.mobileNumber)
+                              )}
                             </td>
                             <td className="px-2.5 py-1.5 font-medium text-[#0B2454] whitespace-nowrap border-r border-slate-200">
                               {CENTRE_MAP[row.centreId].code} · {row.centreName}
+                            </td>
+                            <td className="px-2.5 py-1.5 font-mono font-semibold text-slate-900 whitespace-nowrap border-r border-slate-200">
+                              ₹{row.totalFee.toLocaleString('en-IN')}
+                            </td>
+                            <td className="px-2.5 py-1.5 font-mono font-bold text-emerald-700 whitespace-nowrap border-r border-slate-200">
+                              ₹{row.paidAmount.toLocaleString('en-IN')}
+                            </td>
+                            <td className="px-2.5 py-1.5 font-mono font-bold text-rose-700 whitespace-nowrap border-r border-slate-200">
+                              ₹{row.pendingAmount.toLocaleString('en-IN')}
+                            </td>
+                            <td className="px-2.5 py-1.5 whitespace-nowrap border-r border-slate-200">
+                              <span
+                                className={`font-bold ${
+                                  row.recoveryStatus === 'Paid'
+                                    ? 'text-emerald-700'
+                                    : row.recoveryStatus === 'Partial'
+                                      ? 'text-amber-700'
+                                      : 'text-rose-700'
+                                }`}
+                              >
+                                {row.recoveryStatus}
+                              </span>
                             </td>
                             {extraPreviewHeaders.map((h) => (
                               <td
                                 key={h}
                                 className="px-2.5 py-1.5 text-slate-700 whitespace-nowrap max-w-[200px] truncate border-r border-slate-200"
-                                title={row.raw[h] || ''}
                               >
                                 {row.raw[h] || '—'}
                               </td>
@@ -763,8 +977,12 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                             <td className="px-2.5 py-1.5 whitespace-nowrap">
                               {errMsg ? (
                                 <span className="text-[11px] font-semibold text-amber-900">{errMsg}</span>
+                              ) : row.operation === 'update' ? (
+                                <span className="text-[11px] font-bold text-blue-700">
+                                  Update #{row.matchedExisting?.serialNumber}
+                                </span>
                               ) : (
-                                <span className="text-[11px] font-bold text-emerald-700">Ready</span>
+                                <span className="text-[11px] font-bold text-emerald-700">New Row</span>
                               )}
                             </td>
                           </tr>
@@ -775,7 +993,7 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                 </div>
                 {previewRows.length > 150 && (
                   <div className="px-3 py-1.5 bg-slate-50 border-t border-slate-200 text-[11px] text-slate-600">
-                    Showing first 150 of {previewRows.length} rows in preview (all {readyRows.length} ready rows will be imported into the main database).
+                    Showing first 150 of {previewRows.length} rows in preview (all {readyRows.length} ready rows will be synced into the database).
                   </div>
                 )}
               </div>
@@ -805,8 +1023,10 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
               className="px-5 py-2 text-xs font-bold text-white btn-crimson-gloss rounded-lg disabled:opacity-50"
             >
               {importing
-                ? importStatusText || `Importing ${readyRows.length} Students...`
-                : `Import ${readyRows.length} Students & Open Full Sheet`}
+                ? importStatusText || `Syncing ${readyRows.length} Students...`
+                : updateReadyCount > 0
+                  ? `Sync ${newReadyCount} New + ${updateReadyCount} Updates`
+                  : `Import ${readyRows.length} Students & Open Full Sheet`}
             </button>
           </div>
         </div>

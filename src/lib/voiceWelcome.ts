@@ -1,7 +1,7 @@
 const SIR_WELCOME_AUDIO =
   '/assets/aistudio/cartesia_2026-11-15T07_19_16Z_ASHISH-SSIR_sonic-3.6_hi-IN_4315358c.wav';
 
-export const SIR_PORTRAIT_PATH = '/assets/aistudio/image_f5a71cb9.png';
+export const SIR_PORTRAIT_PATH = '/assets/aistudio/image_c7733cd1.png';
 
 let lastPlayedAt = 0;
 let cachedAudio: HTMLAudioElement | null = null;

@@ -1,11 +1,14 @@
 import * as XLSX from 'xlsx';
 import { CANONICAL_CENTRES, CENTRE_MAP } from '../constants/centres';
+import { reconcileFeeNumbers } from './analyticsMath';
 import type {
   BookStatus,
   CentreId,
   ClassAttendanceStatus,
   ExaminationStatus,
+  FeeFollowUpStatus,
   PracticalStatus,
+  RecoveryStatus,
   Student,
   TcStatus,
   TmaStatus,
@@ -208,6 +211,19 @@ const HEADER_MATCH_HINTS = [
   'course',
   'fee',
   'paid',
+  'jama',
+  'baki',
+  'baaki',
+  'due',
+  'dues',
+  'pending',
+  'balance',
+  'amount',
+  'received',
+  'deposit',
+  'installment',
+  'receipt',
+  'status',
   'date',
   'remark',
   'father',
@@ -298,12 +314,13 @@ function worksheetToRowObjects(ws: XLSX.WorkSheet): {
 
   if (!grid || grid.length === 0) return { headers: [], rows: [] };
 
-  // Find max column span across all rows (since trailing empty header columns can have values below)
+  // Find max column span across ALL rows so no trailing columns are ever dropped
   const headerRowIdx = grid.length > 1 ? findBestHeaderRowIndex(grid) : 0;
-  const maxCols = Math.max(
-    (grid[headerRowIdx] || []).length,
-    ...grid.slice(headerRowIdx + 1, headerRowIdx + 25).map((r) => (r || []).length),
-  );
+  let maxCols = (grid[headerRowIdx] || []).length;
+  for (let r = headerRowIdx + 1; r < grid.length; r++) {
+    const len = (grid[r] || []).length;
+    if (len > maxCols) maxCols = len;
+  }
 
   const rawHeaders: string[] = [];
   for (let c = 0; c < maxCols; c++) {
@@ -518,6 +535,8 @@ export interface ExcelColumnMapping {
   additionalRemarks?: string;
   totalFee?: string;
   paidAmount?: string;
+  pendingAmount?: string;
+  feeStatus?: string;
 }
 
 const EXACT_ALIAS_LISTS: Record<keyof ExcelColumnMapping, string[]> = {
@@ -593,8 +612,49 @@ const EXACT_ALIAS_LISTS: Record<keyof ExcelColumnMapping, string[]> = {
   ],
   futurePlanning: ['futureplanning', 'futureplan', 'goal', 'careerplan', 'aim'],
   additionalRemarks: ['additionalremarks', 'remarks', 'remark', 'notes', 'note', 'comment', 'comments'],
-  totalFee: ['totalfee', 'totalfees', 'fee', 'fees', 'coursefee', 'packagefee'],
-  paidAmount: ['paidamount', 'feepaid', 'paid', 'receivedfee', 'deposit', 'amountpaid'],
+  totalFee: ['totalfee', 'totalfees', 'totalamount', 'fee', 'fees', 'coursefee', 'packagefee', 'actualfee', 'payablefee'],
+  paidAmount: [
+    'paidamount',
+    'feepaid',
+    'feespaid',
+    'paid',
+    'paidfee',
+    'paidfees',
+    'jama',
+    'feejama',
+    'feesjama',
+    'receivedfee',
+    'feereceived',
+    'receivedamount',
+    'amountreceived',
+    'deposit',
+    'deposited',
+    'amountpaid',
+    'collected',
+    'collection',
+  ],
+  pendingAmount: [
+    'pendingamount',
+    'pendingfee',
+    'pendingfees',
+    'pending',
+    'due',
+    'dues',
+    'duefee',
+    'duefees',
+    'dueamount',
+    'balance',
+    'balancefee',
+    'balancefees',
+    'balanceamount',
+    'bal',
+    'baki',
+    'baaki',
+    'remaining',
+    'remainingfee',
+    'unpaidamount',
+  ],
+  feeStatus: ['feestatus', 'feesstatus', 'paymentstatus', 'recoverystatus', 'paidstatus'],
 };
 
 const FUZZY_CONTAINS: Array<{ field: keyof ExcelColumnMapping; keywords: string[]; exclude?: string[] }> = [
@@ -610,8 +670,10 @@ const FUZZY_CONTAINS: Array<{ field: keyof ExcelColumnMapping; keywords: string[
   { field: 'bookStatus', keywords: ['book'] },
   { field: 'examinationStatus', keywords: ['exam'] },
   { field: 'admissionDate', keywords: ['admdate', 'admissiondate', 'joiningdate'] },
-  { field: 'totalFee', keywords: ['totalfee', 'fees', 'coursefee'] },
-  { field: 'paidAmount', keywords: ['paid', 'deposit', 'received'] },
+  { field: 'feeStatus', keywords: ['feestatus', 'paymentstatus', 'recoverystatus'] },
+  { field: 'pendingAmount', keywords: ['pending', 'due', 'balance', 'baki', 'baaki', 'remaining', 'unpaid'] },
+  { field: 'paidAmount', keywords: ['paid', 'jama', 'deposit', 'received', 'collected'] },
+  { field: 'totalFee', keywords: ['totalfee', 'coursefee', 'packagefee', 'totalamount', 'fees'] },
   { field: 'additionalRemarks', keywords: ['remark', 'note', 'comment'] },
 ];
 
@@ -810,13 +872,6 @@ function normalizeExam(raw: string): ExaminationStatus {
   return 'Not Completed';
 }
 
-function parseFeeNumber(raw: string, fallback: number): number {
-  if (!raw) return fallback;
-  const cleaned = raw.replace(/[^0-9.]/g, '');
-  const num = Number(cleaned);
-  return Number.isFinite(num) && num >= 0 ? Math.round(num) : fallback;
-}
-
 export interface NormalizedImportStudent {
   rowIndex: number;
   studentId: string;
@@ -838,6 +893,10 @@ export interface NormalizedImportStudent {
   additionalRemarks: string;
   totalFee: number;
   paidAmount: number;
+  pendingAmount: number;
+  recoveryStatus: RecoveryStatus;
+  followUpStatus: FeeFollowUpStatus;
+  explicitFeeDetected: boolean;
   extraColumns: Record<string, string>;
   validationError: string | null;
 }
@@ -849,6 +908,7 @@ export function normalizeImportedStudentRow(
   allowCentreOverride: boolean,
   explicitMapping?: ExcelColumnMapping,
   allowMissingMobile = true,
+  defaultTotalFee = 12000,
 ): NormalizedImportStudent {
   const headers = Object.keys(rawRow);
   const activeMapping = explicitMapping || fuzzyDetectColumnMapping(headers, [rawRow]);
@@ -876,10 +936,16 @@ export function normalizeImportedStudentRow(
     .slice(0, 64);
 
   const rawSubject = getField('subject') || 'Hindi, English, Mathematics, Science, Social Science';
-  const totalFee = parseFeeNumber(getField('totalFee'), 12000);
-  const paidAmount = Math.min(totalFee, parseFeeNumber(getField('paidAmount'), 0));
 
-  // Preserve ALL other custom Excel columns (excluding serial no / mapped core fields)
+  const reconciledFee = reconcileFeeNumbers({
+    totalFeeRaw: getField('totalFee'),
+    paidAmountRaw: getField('paidAmount'),
+    pendingAmountRaw: getField('pendingAmount'),
+    feeStatusRaw: getField('feeStatus'),
+    defaultTotalFee,
+  });
+
+  // Preserve ALL other custom Excel columns up to Firestore limit (35 keys)
   const mappedHeadersUsed = new Set(Object.values(activeMapping).filter((v): v is string => Boolean(v)));
   const extraColumns: Record<string, string> = {};
   for (const h of headers) {
@@ -889,7 +955,7 @@ export function normalizeImportedStudentRow(
     const val = String(rawRow[h] ?? '').trim();
     if (!val) continue;
     const cleanKey = h.trim().slice(0, 50);
-    if (cleanKey && Object.keys(extraColumns).length < 30) {
+    if (cleanKey && Object.keys(extraColumns).length < 35) {
       extraColumns[cleanKey] = val.slice(0, 300);
     }
   }
@@ -920,8 +986,12 @@ export function normalizeImportedStudentRow(
     currentEducationStatus: getField('currentEducationStatus').slice(0, 1000),
     futurePlanning: getField('futurePlanning').slice(0, 1000),
     additionalRemarks: (getField('additionalRemarks') || 'Excel Bulk Import').slice(0, 1000),
-    totalFee,
-    paidAmount,
+    totalFee: reconciledFee.totalFee,
+    paidAmount: reconciledFee.paidAmount,
+    pendingAmount: reconciledFee.pendingAmount,
+    recoveryStatus: reconciledFee.recoveryStatus,
+    followUpStatus: reconciledFee.followUpStatus,
+    explicitFeeDetected: reconciledFee.explicitFeeDetected,
     extraColumns,
     validationError,
   };
