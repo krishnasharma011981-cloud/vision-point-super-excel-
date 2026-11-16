@@ -14,6 +14,7 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  Cell,
   Legend,
   ResponsiveContainer,
   Tooltip,
@@ -21,7 +22,11 @@ import {
   YAxis,
 } from 'recharts';
 import { CANONICAL_CENTRES, CENTRE_MAP, DEPARTMENT_LABELS, DEPARTMENTS } from '../constants/centres';
-import { computeInstitutionalAnalytics, reconcileFeeNumbers } from '../lib/analyticsMath';
+import {
+  computeInstitutionalAnalytics,
+  formatCompactInr,
+  resolveStudentFeeSummary,
+} from '../lib/analyticsMath';
 import { exportToCsv, exportToExcel, formatDateTime } from '../lib/csvUtils';
 import { reviewEmployeeReport, submitEmployeeReport } from '../services/firestoreService';
 import type {
@@ -236,6 +241,8 @@ export const ReportsAnalyticsView: React.FC<ReportsAnalyticsViewProps> = ({
           'Total Fee (₹)',
           'Paid Jama (₹)',
           'Pending Baki (₹)',
+          'TMA Fee (₹)',
+          'Exam Fee (₹)',
           'Collection %',
           'TMA Submitted',
           'Practical Done',
@@ -246,13 +253,15 @@ export const ReportsAnalyticsView: React.FC<ReportsAnalyticsViewProps> = ({
           let tot = 0;
           let paid = 0;
           let pend = 0;
+          let tmaFeeSum = 0;
+          let examFeeSum = 0;
           for (const s of cs) {
-            const f = feeMap.get(s.studentId);
-            if (f) {
-              tot += f.totalFee;
-              paid += f.paidAmount;
-              pend += f.pendingAmount;
-            }
+            const summary = resolveStudentFeeSummary(s, feeMap.get(s.studentId));
+            tot += summary.totalFee;
+            paid += summary.paidAmount;
+            pend += summary.pendingAmount;
+            tmaFeeSum += summary.tmaFee;
+            examFeeSum += summary.examFee;
           }
           const pct = tot > 0 ? Math.round((paid / tot) * 100) : 0;
           return [
@@ -262,6 +271,8 @@ export const ReportsAnalyticsView: React.FC<ReportsAnalyticsViewProps> = ({
             tot,
             paid,
             pend,
+            tmaFeeSum,
+            examFeeSum,
             `${pct}%`,
             cs.filter((s) => s.tmaStatus === 'Submitted').length,
             cs.filter((s) => s.practicalStatus === 'Completed').length,
@@ -274,49 +285,21 @@ export const ReportsAnalyticsView: React.FC<ReportsAnalyticsViewProps> = ({
     if (reportType === 'fee_recovery') {
       const feeMap = new Map(feeRecords.map((r) => [r.studentId, r]));
       return {
-        headers: ['Student ID', 'Student Name', 'Centre', 'Status', 'Total Fee', 'Paid', 'Pending', 'Assigned'],
+        headers: ['Student ID', 'Student Name', 'Centre', 'Status', 'Total Fee', 'Paid', 'Pending', 'TMA Fee', 'Exam Fee', 'Assigned'],
         rows: filteredStudents.map((s) => {
           const rec = feeMap.get(s.studentId);
-          if (rec) {
-            return [
-              s.studentId,
-              s.studentName,
-              CENTRE_MAP[s.centreId].code,
-              rec.recoveryStatus,
-              rec.totalFee,
-              rec.paidAmount,
-              rec.pendingAmount,
-              rec.assignedEmployeeName || s.assignedEmployeeName || 'Unassigned',
-            ];
-          }
-          const extras = s.extraColumns || {};
-          const findExtra = (rx: RegExp): string => {
-            for (const [k, v] of Object.entries(extras)) {
-              if (rx.test(k.toLowerCase())) return v;
-            }
-            return '';
-          };
-          const hasExtraFee =
-            Boolean(findExtra(/total.*fee|course.*fee|package/)) ||
-            Boolean(findExtra(/paid|jama|deposit|received/)) ||
-            Boolean(findExtra(/pending|baki|baaki|due|balance/));
-          const reconciled = hasExtraFee
-            ? reconcileFeeNumbers({
-                totalFeeRaw: findExtra(/total.*fee|course.*fee|package/),
-                paidAmountRaw: findExtra(/paid|jama|deposit|received/),
-                pendingAmountRaw: findExtra(/pending|baki|baaki|due|balance/),
-                feeStatusRaw: findExtra(/fee.*status|payment.*status/),
-              })
-            : null;
+          const summary = resolveStudentFeeSummary(s, rec);
           return [
             s.studentId,
             s.studentName,
             CENTRE_MAP[s.centreId].code,
-            reconciled?.recoveryStatus || 'Pending',
-            reconciled?.totalFee ?? 0,
-            reconciled?.paidAmount ?? 0,
-            reconciled?.pendingAmount ?? 0,
-            s.assignedEmployeeName || 'Unassigned',
+            summary.recoveryStatus,
+            summary.totalFee,
+            summary.paidAmount,
+            summary.pendingAmount,
+            summary.tmaFee,
+            summary.examFee,
+            rec?.assignedEmployeeName || s.assignedEmployeeName || 'Unassigned',
           ];
         }),
       };
@@ -366,13 +349,20 @@ export const ReportsAnalyticsView: React.FC<ReportsAnalyticsViewProps> = ({
         headers: ['Student ID', 'Student Name', 'Centre', 'Attendance', 'Participation', 'Attendance %', 'Assigned'],
         rows: filteredStudents.map((s) => {
           const rec = oMap.get(s.studentId);
+          const resolvedStatus = rec?.attendanceStatus || s.classAttendanceStatus;
           return [
             s.studentId,
             s.studentName,
             CENTRE_MAP[s.centreId].code,
-            rec?.attendanceStatus || s.classAttendanceStatus,
-            rec?.participationLevel || 'Moderate',
-            rec?.attendancePercentage ?? 75,
+            resolvedStatus,
+            rec?.participationLevel ||
+              (resolvedStatus === 'Regular'
+                ? 'High'
+                : resolvedStatus === 'Irregular'
+                  ? 'Moderate'
+                  : 'Inactive'),
+            rec?.attendancePercentage ??
+              (resolvedStatus === 'Regular' ? 90 : resolvedStatus === 'Irregular' ? 50 : 0),
             rec?.assignedEmployeeName || s.assignedEmployeeName || 'Unassigned',
           ];
         }),
@@ -816,24 +806,72 @@ export const ReportsAnalyticsView: React.FC<ReportsAnalyticsViewProps> = ({
             </div>
           </div>
 
+          <div className="bg-white rounded-xl border border-zinc-200 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex flex-wrap items-center gap-2 font-mono">
+              <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200 font-bold">
+                Full Paid: {analytics.paidCount}
+              </span>
+              <span className="px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 font-bold">
+                Partial: {analytics.partialCount}
+              </span>
+              <span className="px-2 py-0.5 rounded bg-rose-50 text-rose-800 border border-rose-200 font-bold">
+                Pending/Due: {analytics.pendingCount + analytics.overdueCount}
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-3 font-mono font-bold text-zinc-800">
+              <span className="text-amber-800">TMA Fees: ₹{analytics.totalTmaFee.toLocaleString('en-IN')}</span>
+              <span className="text-indigo-800">Exam Fees: ₹{analytics.totalExamFee.toLocaleString('en-IN')}</span>
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div className="bg-white rounded-xl border border-zinc-200 p-4">
-              <h3 className="text-sm font-bold text-black">Branch Fee Graph (Paid vs. Pending)</h3>
+              <h3 className="text-sm font-bold text-black">
+                {analytics.branchMetrics.length <= 1
+                  ? 'Fee Breakdown (Total / Paid / Baki / TMA / Exam)'
+                  : 'Branch Fee Graph (Paid vs. Pending)'}
+              </h3>
               <p className="text-xs text-zinc-600 mb-3">Accurate financial breakdown computed from uploaded records</p>
               <div className="h-52 w-full">
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={analytics.branchMetrics} margin={{ top: 6, right: 10, left: 6, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
-                    <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#1E293B' }} />
-                    <YAxis
-                      tick={{ fontSize: 11, fill: '#1E293B' }}
-                      tickFormatter={(v) => `₹${Number(v) >= 1000 ? `${Math.round(Number(v) / 1000)}k` : v}`}
-                    />
-                    <Tooltip formatter={(val: unknown) => `₹${Number(val || 0).toLocaleString('en-IN')}`} />
-                    <Legend wrapperStyle={{ fontSize: 12 }} />
-                    <Bar dataKey="paidFee" name="Paid (Jama)" fill="#059669" radius={[4, 4, 0, 0]} />
-                    <Bar dataKey="pendingFee" name="Pending (Baki)" fill="#DC2626" radius={[4, 4, 0, 0]} />
-                  </BarChart>
+                  {analytics.branchMetrics.length <= 1 ? (
+                    <BarChart
+                      data={[
+                        { metric: 'Total Fee', Amount: analytics.totalFeeBilled, fill: '#0F172A' },
+                        { metric: 'Paid (Jama)', Amount: analytics.totalFeePaid, fill: '#059669' },
+                        { metric: 'Pending (Baki)', Amount: analytics.totalFeePending, fill: '#DC2626' },
+                        { metric: 'TMA Fee', Amount: analytics.totalTmaFee, fill: '#D97706' },
+                        { metric: 'Exam Fee', Amount: analytics.totalExamFee, fill: '#4F46E5' },
+                      ]}
+                      margin={{ top: 6, right: 10, left: 6, bottom: 0 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
+                      <XAxis dataKey="metric" tick={{ fontSize: 10, fill: '#1E293B' }} />
+                      <YAxis
+                        tick={{ fontSize: 11, fill: '#1E293B' }}
+                        tickFormatter={(v) => formatCompactInr(v)}
+                      />
+                      <Tooltip formatter={(val: unknown) => `₹${Number(val || 0).toLocaleString('en-IN')}`} />
+                      <Bar dataKey="Amount" radius={[4, 4, 0, 0]}>
+                        {['#0F172A', '#059669', '#DC2626', '#D97706', '#4F46E5'].map((c, idx) => (
+                          <Cell key={idx} fill={c} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  ) : (
+                    <BarChart data={analytics.branchMetrics} margin={{ top: 6, right: 10, left: 6, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
+                      <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#1E293B' }} />
+                      <YAxis
+                        tick={{ fontSize: 11, fill: '#1E293B' }}
+                        tickFormatter={(v) => formatCompactInr(v)}
+                      />
+                      <Tooltip formatter={(val: unknown) => `₹${Number(val || 0).toLocaleString('en-IN')}`} />
+                      <Legend wrapperStyle={{ fontSize: 12 }} />
+                      <Bar dataKey="paidFee" name="Paid (Jama)" fill="#059669" radius={[4, 4, 0, 0]} />
+                      <Bar dataKey="pendingFee" name="Pending (Baki)" fill="#DC2626" radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  )}
                 </ResponsiveContainer>
               </div>
             </div>

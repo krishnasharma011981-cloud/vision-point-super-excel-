@@ -1,9 +1,10 @@
-import { Download, MonitorPlay, Search, X } from 'lucide-react';
+import { Download, MonitorPlay, RotateCcw, Search, X } from 'lucide-react';
 import React, { useMemo, useState } from 'react';
 import { CENTRE_MAP } from '../../constants/centres';
 import { buildContextualSerialMap, exportToCsv } from '../../lib/csvUtils';
 import { verifyOperationLocation } from '../../lib/securityClient';
-import { upsertOnlineClassRecord } from '../../services/firestoreService';
+import { resetOnlineAttendanceToZeroBatch, upsertOnlineClassRecord } from '../../services/firestoreService';
+import { ConfirmDialog } from '../ConfirmDialog';
 import type {
   CentreId,
   ClassAttendanceStatus,
@@ -45,13 +46,15 @@ export const OnlineClassesView: React.FC<OnlineClassesViewProps> = ({
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
   const [permissionStudent, setPermissionStudent] = useState<Student | null>(null);
 
-  const [attendanceStatus, setAttendanceStatus] = useState<ClassAttendanceStatus>('Regular');
-  const [participationLevel, setParticipationLevel] = useState<ParticipationLevel>('High');
-  const [attendancePercentage, setAttendancePercentage] = useState('85');
+  const [attendanceStatus, setAttendanceStatus] = useState<ClassAttendanceStatus>('Not Attending');
+  const [participationLevel, setParticipationLevel] = useState<ParticipationLevel>('Inactive');
+  const [attendancePercentage, setAttendancePercentage] = useState('0');
   const [lastAttendanceUpdate, setLastAttendanceUpdate] = useState('');
   const [assignedEmployeeUid, setAssignedEmployeeUid] = useState('');
   const [followUpNotes, setFollowUpNotes] = useState('');
   const [saving, setSaving] = useState(false);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [resetBusy, setResetBusy] = useState(false);
 
   const recMap = useMemo(() => {
     const map = new Map<string, OnlineClassRecord>();
@@ -75,14 +78,21 @@ export const OnlineClassesView: React.FC<OnlineClassesViewProps> = ({
         const rec = recMap.get(s.studentId);
         const lockedForEmployee =
           currentUser.role === 'employee' && (Boolean(s.onlineClassesLocked) || Boolean(rec?.employeeLocked));
+        const resolvedStatus = rec?.attendanceStatus || s.classAttendanceStatus;
         return {
           student: s,
           displaySerial: displaySerialMap.get(s.studentId) ?? s.serialNumber,
-          attendanceStatus: rec?.attendanceStatus || s.classAttendanceStatus,
-          participationLevel: rec?.participationLevel || 'Moderate',
+          attendanceStatus: resolvedStatus,
+          participationLevel:
+            rec?.participationLevel ||
+            (resolvedStatus === 'Regular'
+              ? 'High'
+              : resolvedStatus === 'Irregular'
+                ? 'Moderate'
+                : 'Inactive'),
           attendancePercentage:
             rec?.attendancePercentage ??
-            (s.classAttendanceStatus === 'Regular' ? 90 : s.classAttendanceStatus === 'Irregular' ? 50 : 10),
+            (resolvedStatus === 'Regular' ? 90 : resolvedStatus === 'Irregular' ? 50 : 0),
           lastAttendanceUpdate: rec?.lastAttendanceUpdate || s.admissionDate,
           assignedEmployeeName: rec?.assignedEmployeeName || s.assignedEmployeeName || 'Unassigned',
           followUpNotes: rec?.followUpNotes || '',
@@ -114,9 +124,22 @@ export const OnlineClassesView: React.FC<OnlineClassesViewProps> = ({
       return;
     }
     setEditingStudent(student);
-    setAttendanceStatus(rec?.attendanceStatus || student.classAttendanceStatus);
-    setParticipationLevel(rec?.participationLevel || 'Moderate');
-    setAttendancePercentage(String(rec?.attendancePercentage ?? 80));
+    const resolvedStatus = rec?.attendanceStatus || student.classAttendanceStatus;
+    setAttendanceStatus(resolvedStatus);
+    setParticipationLevel(
+      rec?.participationLevel ||
+        (resolvedStatus === 'Regular'
+          ? 'High'
+          : resolvedStatus === 'Irregular'
+            ? 'Moderate'
+            : 'Inactive'),
+    );
+    setAttendancePercentage(
+      String(
+        rec?.attendancePercentage ??
+          (resolvedStatus === 'Regular' ? 90 : resolvedStatus === 'Irregular' ? 50 : 0),
+      ),
+    );
     setLastAttendanceUpdate(rec?.lastAttendanceUpdate || new Date().toISOString().slice(0, 10));
     setAssignedEmployeeUid(rec?.assignedEmployeeUid || student.assignedEmployeeUid || currentUser.uid);
     setFollowUpNotes(rec?.followUpNotes || '');
@@ -232,14 +255,27 @@ export const OnlineClassesView: React.FC<OnlineClassesViewProps> = ({
             <option value="Not Attending">Not Attending</option>
           </select>
         </div>
-        <button
-          type="button"
-          onClick={handleExport}
-          className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-black bg-white border border-zinc-300 rounded-lg hover:bg-zinc-100 whitespace-nowrap"
-        >
-          <Download className="w-3.5 h-3.5" />
-          Export Attendance Report
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {(currentUser.role === 'super_admin' || currentUser.role === 'centre_head') &&
+            (regularCount > 0 || avgAttendance > 0 || rows.some((r) => r.attendanceStatus !== 'Not Attending')) && (
+              <button
+                type="button"
+                onClick={() => setShowResetConfirm(true)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-red-700 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 whitespace-nowrap"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                Reset All to 0%
+              </button>
+            )}
+          <button
+            type="button"
+            onClick={handleExport}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-black bg-white border border-zinc-300 rounded-lg hover:bg-zinc-100 whitespace-nowrap"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Export Attendance Report
+          </button>
+        </div>
       </div>
 
       <DepartmentPendingRequestsPanel
@@ -340,7 +376,16 @@ export const OnlineClassesView: React.FC<OnlineClassesViewProps> = ({
                   <label className="block text-xs font-semibold text-black mb-1">Attendance Status</label>
                   <select
                     value={attendanceStatus}
-                    onChange={(e) => setAttendanceStatus(e.target.value as ClassAttendanceStatus)}
+                    onChange={(e) => {
+                      const next = e.target.value as ClassAttendanceStatus;
+                      setAttendanceStatus(next);
+                      setParticipationLevel(
+                        next === 'Regular' ? 'High' : next === 'Irregular' ? 'Moderate' : 'Inactive',
+                      );
+                      setAttendancePercentage(
+                        next === 'Regular' ? '90' : next === 'Irregular' ? '50' : '0',
+                      );
+                    }}
                     className="w-full px-3 py-2 text-sm bg-white text-black border border-zinc-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-black"
                   >
                     <option value="Regular">Regular</option>
@@ -435,6 +480,47 @@ export const OnlineClassesView: React.FC<OnlineClassesViewProps> = ({
         currentUser={currentUser}
         onClose={() => setPermissionStudent(null)}
         onNotify={onNotify}
+      />
+
+      <ConfirmDialog
+        open={showResetConfirm}
+        title="Reset Online Attendance to 0%"
+        description={`Reset all ${rows.length} visible student online attendance statuses to Not Attending (0%)? You can update individual students anytime later.`}
+        confirmLabel="Reset to 0%"
+        destructive
+        busy={resetBusy}
+        onCancel={() => setShowResetConfirm(false)}
+        onConfirm={async () => {
+          setResetBusy(true);
+          try {
+            const scopedStudentList = students.filter((s) =>
+              effectiveCentre === 'all' ? true : s.centreId === effectiveCentre,
+            );
+            const scopedRecordList = onlineClassRecords.filter((r) =>
+              effectiveCentre === 'all' ? true : r.centreId === effectiveCentre,
+            );
+            const res = await resetOnlineAttendanceToZeroBatch(
+              scopedStudentList,
+              scopedRecordList,
+              currentUser,
+              `Reset Online Attendance to 0% (${effectiveCentre})`,
+            );
+            onNotify(
+              'Online Attendance Reset to 0%',
+              `Updated ${res.studentsUpdated} student rows and ${res.recordsUpdated} class records to Not Attending (0%).`,
+              'success',
+            );
+            setShowResetConfirm(false);
+          } catch (err) {
+            onNotify(
+              'Reset Failed',
+              err instanceof Error ? err.message : 'Unable to reset online attendance.',
+              'error',
+            );
+          } finally {
+            setResetBusy(false);
+          }
+        }}
       />
     </div>
   );

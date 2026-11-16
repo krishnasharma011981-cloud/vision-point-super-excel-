@@ -4,15 +4,10 @@ import {
   Lock,
   Megaphone,
   MessageSquare,
-  Mic,
-  MicOff,
-  Radio,
   Search,
   Send,
   ShieldCheck,
   User as UserIcon,
-  Volume2,
-  VolumeX,
   Wifi,
   WifiOff,
 } from 'lucide-react';
@@ -26,10 +21,8 @@ import {
 import type {
   CentreId,
   DirectMessage,
-  IncomingWalkieState,
   OnlineUserPresence,
   UserAccount,
-  WalkieTargetMode,
 } from '../types/domain';
 
 interface CommunicationViewProps {
@@ -40,21 +33,6 @@ interface CommunicationViewProps {
   wsConnected: boolean;
   onlineStaff: OnlineUserPresence[];
   superAdminOnline: boolean;
-  audioUnlocked: boolean;
-  isTransmitting: boolean;
-  txTargetLabel: string;
-  txRecipientCount: number | null;
-  micLevel: number;
-  incomingWalkie: IncomingWalkieState | null;
-  rxLevel: number;
-  onUnlockSpeaker: () => Promise<boolean>;
-  onStartWalkieTx: (params: {
-    targetMode: WalkieTargetMode;
-    targetUid?: string;
-    targetCentreId?: CentreId;
-    label: string;
-  }) => Promise<void>;
-  onStopWalkieTx: (onFinished?: (durationSec: number) => void) => void;
   onSendChatPing: (staffUid: string, preview: string) => void;
   onNotify: (title: string, description: string, variant: 'success' | 'error' | 'warning' | 'info') => void;
 }
@@ -79,16 +57,6 @@ export const CommunicationView: React.FC<CommunicationViewProps> = ({
   wsConnected,
   onlineStaff,
   superAdminOnline,
-  audioUnlocked,
-  isTransmitting,
-  txTargetLabel,
-  txRecipientCount,
-  micLevel,
-  incomingWalkie,
-  rxLevel,
-  onUnlockSpeaker,
-  onStartWalkieTx,
-  onStopWalkieTx,
   onSendChatPing,
   onNotify,
 }) => {
@@ -115,6 +83,11 @@ export const CommunicationView: React.FC<CommunicationViewProps> = ({
   }, [selectedCentreFilter]);
 
   const onlineUidSet = useMemo(() => new Set(onlineStaff.map((u) => u.uid)), [onlineStaff]);
+
+  const chatMessages = useMemo(
+    () => directMessages.filter((m) => m.messageType !== 'walkie_log'),
+    [directMessages],
+  );
 
   const eligibleStaff = useMemo(() => {
     if (!isSuperAdmin) return [];
@@ -155,27 +128,27 @@ export const CommunicationView: React.FC<CommunicationViewProps> = ({
   const activeThreadUid = isSuperAdmin ? selectedStaff?.uid || '' : currentUser.uid;
   const threadMessages = useMemo(() => {
     if (!activeThreadUid) return [];
-    return directMessages.filter((m) => m.staffUid === activeThreadUid);
-  }, [directMessages, activeThreadUid]);
+    return chatMessages.filter((m) => m.staffUid === activeThreadUid);
+  }, [chatMessages, activeThreadUid]);
 
   // Unread counts per staff member for Super Admin roster
   const unreadByStaffUid = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const m of directMessages) {
+    for (const m of chatMessages) {
       if (isSuperAdmin && !m.readByAdmin) {
         counts.set(m.staffUid, (counts.get(m.staffUid) || 0) + 1);
       }
     }
     return counts;
-  }, [directMessages, isSuperAdmin]);
+  }, [chatMessages, isSuperAdmin]);
 
   const lastMessageByStaffUid = useMemo(() => {
     const map = new Map<string, DirectMessage>();
-    for (const m of directMessages) {
+    for (const m of chatMessages) {
       map.set(m.staffUid, m);
     }
     return map;
-  }, [directMessages]);
+  }, [chatMessages]);
 
   // Auto-mark visible thread messages as read
   useEffect(() => {
@@ -244,100 +217,6 @@ export const CommunicationView: React.FC<CommunicationViewProps> = ({
     }
   };
 
-  // Walkie-Talkie PTT & Mic Toggle controls
-  const currentWalkieParams = useMemo(() => {
-    if (!isSuperAdmin) {
-      return {
-        targetMode: 'super_admin' as WalkieTargetMode,
-        label: 'Super Admin (Sir)',
-        staffRecordTarget: currentUser,
-      };
-    }
-    if (adminChannelMode === 'centre') {
-      return {
-        targetMode: 'centre' as WalkieTargetMode,
-        targetCentreId: broadcastCentreId,
-        label: `${CENTRE_MAP[broadcastCentreId].code} All Staff`,
-        staffRecordTarget: null,
-      };
-    }
-    if (adminChannelMode === 'all') {
-      return {
-        targetMode: 'all' as WalkieTargetMode,
-        label: 'All 4 Centres Broadcast',
-        staffRecordTarget: null,
-      };
-    }
-    return {
-      targetMode: 'staff' as WalkieTargetMode,
-      targetUid: selectedStaff?.uid,
-      label: selectedStaff ? `${selectedStaff.fullName} (${CENTRE_MAP[selectedStaff.centreId]?.code})` : 'Select Staff',
-      staffRecordTarget: selectedStaff,
-    };
-  }, [isSuperAdmin, adminChannelMode, broadcastCentreId, selectedStaff, currentUser]);
-
-  const handleToggleMic = async () => {
-    if (isTransmitting) {
-      const targetForLog = currentWalkieParams.staffRecordTarget;
-      onStopWalkieTx((durationSec) => {
-        if (targetForLog && durationSec >= 1) {
-          sendDirectMessage(
-            {
-              targetStaff: isSuperAdmin ? targetForLog : undefined,
-              text: `Walkie-Talkie live voice call (${durationSec}s)`,
-              messageType: 'walkie_log',
-            },
-            currentUser,
-          ).catch(() => {});
-        }
-      });
-      return;
-    }
-
-    if (isSuperAdmin && adminChannelMode === 'staff' && !selectedStaff) {
-      onNotify('Select Staff First', 'Choose a staff member or Centre Head from the list to speak to.', 'warning');
-      return;
-    }
-
-    await onStartWalkieTx({
-      targetMode: currentWalkieParams.targetMode,
-      targetUid: currentWalkieParams.targetUid,
-      targetCentreId: currentWalkieParams.targetCentreId,
-      label: currentWalkieParams.label,
-    });
-  };
-
-  const handlePttDown = async () => {
-    if (isTransmitting) return;
-    if (isSuperAdmin && adminChannelMode === 'staff' && !selectedStaff) {
-      onNotify('Select Staff First', 'Choose a staff member or Centre Head from the list to speak to.', 'warning');
-      return;
-    }
-    await onStartWalkieTx({
-      targetMode: currentWalkieParams.targetMode,
-      targetUid: currentWalkieParams.targetUid,
-      targetCentreId: currentWalkieParams.targetCentreId,
-      label: currentWalkieParams.label,
-    });
-  };
-
-  const handlePttUp = () => {
-    if (!isTransmitting) return;
-    const targetForLog = currentWalkieParams.staffRecordTarget;
-    onStopWalkieTx((durationSec) => {
-      if (targetForLog && durationSec >= 1) {
-        sendDirectMessage(
-          {
-            targetStaff: isSuperAdmin ? targetForLog : undefined,
-            text: `Walkie-Talkie live voice call (${durationSec}s)`,
-            messageType: 'walkie_log',
-          },
-          currentUser,
-        ).catch(() => {});
-      }
-    });
-  };
-
   const broadcastTargetCount = useMemo(() => {
     if (!isSuperAdmin) return 0;
     if (adminChannelMode === 'centre') {
@@ -362,23 +241,21 @@ export const CommunicationView: React.FC<CommunicationViewProps> = ({
     return selectedStaff && onlineUidSet.has(selectedStaff.uid) ? 1 : 0;
   }, [isSuperAdmin, adminChannelMode, onlineStaff, broadcastCentreId, selectedStaff, onlineUidSet]);
 
-  const activeVuLevel = isTransmitting ? micLevel : incomingWalkie ? rxLevel : 0;
-
   return (
     <div className="space-y-4">
       {/* Header Strip */}
       <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
-            <Radio className="w-5 h-5 text-[#DC2626] shrink-0" />
+            <MessageSquare className="w-5 h-5 text-[#DC2626] shrink-0" />
             <h1 className="text-lg font-extrabold text-[#0F172A] tracking-tight">
-              {isSuperAdmin ? 'Command Comms & Live Walkie-Talkie' : 'Direct Channel with Super Admin'}
+              {isSuperAdmin ? 'Command Staff Direct Chat' : 'Direct Chat with Super Admin'}
             </h1>
           </div>
           <p className="text-xs text-slate-600 mt-1">
             {isSuperAdmin
-              ? 'Message or open live Walkie-Talkie voice with any staff member or Centre Head across all 4 centres.'
-              : 'Private 1-on-1 line with Super Admin. Staff-to-staff chat and walkie-talkie are strictly disabled.'}
+              ? 'Send direct messages or branch announcements privately to any staff member or Centre Head across all 4 centres.'
+              : 'Private 1-on-1 chat channel with Super Admin. Staff-to-staff chat is strictly disabled.'}
           </p>
         </div>
 
@@ -389,21 +266,8 @@ export const CommunicationView: React.FC<CommunicationViewProps> = ({
             ) : (
               <WifiOff className="w-3.5 h-3.5 text-amber-600 shrink-0" />
             )}
-            <span>{wsConnected ? 'Walkie Radio Connected' : 'Connecting Radio...'}</span>
+            <span>{wsConnected ? 'Chat Live' : 'Connecting Chat...'}</span>
           </div>
-
-          <button
-            type="button"
-            onClick={onUnlockSpeaker}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-bold whitespace-nowrap transition-colors ${
-              audioUnlocked
-                ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                : 'bg-amber-50 border-amber-300 text-amber-900 hover:bg-amber-100'
-            }`}
-          >
-            {audioUnlocked ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
-            <span>{audioUnlocked ? 'Speaker Ready' : 'Enable Speaker'}</span>
-          </button>
         </div>
       </div>
 
@@ -435,7 +299,7 @@ export const CommunicationView: React.FC<CommunicationViewProps> = ({
                       : 'text-slate-600 hover:text-[#0F172A]'
                   }`}
                 >
-                  Centre Mic
+                  Centre Chat
                 </button>
                 <button
                   type="button"
@@ -523,7 +387,7 @@ export const CommunicationView: React.FC<CommunicationViewProps> = ({
                                 isOnline ? 'text-emerald-700' : 'text-slate-400'
                               }`}
                             >
-                              {isOnline ? 'Live' : 'Offline'}
+                              {isOnline ? 'Online' : 'Offline'}
                             </span>
                           </div>
                           <p className="text-[11px] text-slate-600 truncate mt-0.5">
@@ -578,12 +442,12 @@ export const CommunicationView: React.FC<CommunicationViewProps> = ({
                     </span>
                   </div>
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    Speak live on Walkie-Talkie or send an announcement. Every active staff member receives it
-                    privately and can only reply back to you.
+                    Send an announcement message. Every active staff member receives it privately in their chat thread
+                    and can only reply back to you.
                   </p>
                   <div className="pt-2 border-t border-slate-200 flex items-center justify-between text-xs font-mono tabular-nums">
                     <span className="text-slate-600">Assigned Staff: {broadcastTargetCount}</span>
-                    <span className="font-bold text-emerald-700">Live Now: {broadcastOnlineCount}</span>
+                    <span className="font-bold text-emerald-700">Online Now: {broadcastOnlineCount}</span>
                   </div>
                 </div>
               </div>
@@ -591,121 +455,49 @@ export const CommunicationView: React.FC<CommunicationViewProps> = ({
           </aside>
         )}
 
-        {/* RIGHT CONSOLE: WALKIE-TALKIE TRANSCEIVER + CHAT THREAD */}
+        {/* RIGHT CONSOLE: DIRECT CHAT THREAD */}
         <section
           className={`${
             isSuperAdmin ? 'lg:col-span-8' : 'w-full'
           } bg-white rounded-2xl border border-slate-200 flex flex-col overflow-hidden min-h-[540px] max-h-[760px]`}
         >
-          {/* Walkie-Talkie Hardware Transceiver Deck */}
-          <div className="bg-[#0F172A] text-white p-4 sm:p-5 border-b border-slate-800">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-              <div className="min-w-0 space-y-1">
-                <div className="flex items-center gap-2 text-xs font-bold text-amber-400">
-                  <Radio className="w-4 h-4 shrink-0" />
-                  <span>
-                    {isSuperAdmin ? 'Walkie-Talkie Direct Transceiver' : 'Walkie-Talkie Line · Super Admin'}
-                  </span>
-                </div>
-                <h2 className="text-base font-extrabold text-white truncate">
-                  {isSuperAdmin
-                    ? adminChannelMode === 'staff'
-                      ? selectedStaff
-                        ? `${selectedStaff.fullName}`
-                        : 'Select a staff member'
-                      : adminChannelMode === 'centre'
-                        ? `${CENTRE_MAP[broadcastCentreId].name}`
-                        : 'All 4 Centres (Command Broadcast)'
-                    : 'Super Admin (Sir)'}
-                </h2>
-                <p className="text-xs text-slate-300 truncate">
-                  {isSuperAdmin
-                    ? adminChannelMode === 'staff' && selectedStaff
-                      ? `${ROLE_LABELS[selectedStaff.role]} · ${DEPARTMENT_LABELS[selectedStaff.department]} · ${
-                          CENTRE_MAP[selectedStaff.centreId]?.name
-                        } · ${onlineUidSet.has(selectedStaff.uid) ? 'Online Now' : 'Currently Offline'}`
-                      : `${broadcastOnlineCount} of ${broadcastTargetCount} staff online right now`
-                    : `${superAdminOnline ? 'Super Admin is Online' : 'Super Admin Offline'} · Private Sir ↔ Staff channel`}
-                </p>
-              </div>
-
-              {/* Dual Mic Controls: Toggle ON/OFF + Hold-to-Talk */}
-              <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-                <button
-                  type="button"
-                  onMouseDown={handlePttDown}
-                  onMouseUp={handlePttUp}
-                  onMouseLeave={handlePttUp}
-                  onTouchStart={(e) => {
-                    e.preventDefault();
-                    handlePttDown();
-                  }}
-                  onTouchEnd={handlePttUp}
-                  disabled={!wsConnected || (isSuperAdmin && adminChannelMode === 'staff' && !selectedStaff)}
-                  className={`inline-flex items-center gap-2 px-4 py-2.5 text-xs font-bold rounded-xl border transition-all whitespace-nowrap select-none disabled:opacity-45 ${
-                    isTransmitting
-                      ? 'bg-[#DC2626] border-red-400 text-white shadow-lg'
-                      : 'bg-slate-800 hover:bg-slate-700 border-slate-600 text-white'
-                  }`}
-                >
-                  <Mic className="w-4 h-4" />
-                  <span>Hold to Speak</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={handleToggleMic}
-                  disabled={!wsConnected || (isSuperAdmin && adminChannelMode === 'staff' && !selectedStaff)}
-                  className={`inline-flex items-center gap-2 px-4 py-2.5 text-xs font-bold rounded-xl transition-all whitespace-nowrap disabled:opacity-45 ${
-                    isTransmitting
-                      ? 'bg-white text-[#B91C1C] hover:bg-slate-100'
-                      : 'bg-[#DC2626] hover:bg-[#B91C1C] text-white'
-                  }`}
-                >
-                  {isTransmitting ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
-                  <span>{isTransmitting ? 'Mic Off' : 'Mic On (Hands-Free)'}</span>
-                </button>
-              </div>
-            </div>
-
-            {/* Live Signal & Audio Meter Strip */}
-            <div className="mt-3.5 pt-3 border-t border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div className="flex items-center gap-3 flex-1 min-w-0">
-                <span className="text-[11px] font-mono text-slate-300 whitespace-nowrap">
-                  {isTransmitting
-                    ? `TX LIVE -> ${txTargetLabel}${
-                        txRecipientCount !== null ? ` (${txRecipientCount} listening)` : ''
-                      }`
-                    : incomingWalkie
-                      ? `RX LIVE <- ${incomingWalkie.fromName}`
-                      : 'STANDBY'}
+          {/* Chat Thread Header */}
+          <div className="bg-[#0F172A] text-white p-4 sm:p-5 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="min-w-0 space-y-1">
+              <div className="flex items-center gap-2 text-xs font-bold text-amber-400">
+                <MessageSquare className="w-4 h-4 shrink-0" />
+                <span>
+                  {isSuperAdmin ? 'Private Direct Chat' : 'Direct Chat Line · Super Admin'}
                 </span>
-                <div className="flex items-center gap-1 flex-1 max-w-[200px] h-3" aria-hidden="true">
-                  {Array.from({ length: 14 }).map((_, i) => {
-                    const lit = activeVuLevel >= ((i + 1) / 14) * 0.72;
-                    return (
-                      <div
-                        key={i}
-                        className={`flex-1 rounded-xs transition-all duration-75 ${
-                          lit
-                            ? isTransmitting
-                              ? 'bg-red-400 h-3'
-                              : 'bg-emerald-400 h-3'
-                            : 'bg-slate-800 h-1.5'
-                        }`}
-                      />
-                    );
-                  })}
-                </div>
               </div>
-
-              {!isSuperAdmin && (
-                <div className="inline-flex items-center gap-1.5 text-[11px] text-slate-300 whitespace-nowrap">
-                  <Lock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                  <span>Peer staff chat disabled</span>
-                </div>
-              )}
+              <h2 className="text-base font-extrabold text-white truncate">
+                {isSuperAdmin
+                  ? adminChannelMode === 'staff'
+                    ? selectedStaff
+                      ? `${selectedStaff.fullName}`
+                      : 'Select a staff member'
+                    : adminChannelMode === 'centre'
+                      ? `${CENTRE_MAP[broadcastCentreId].name}`
+                      : 'All 4 Centres (Command Broadcast)'
+                  : 'Super Admin (Sir)'}
+              </h2>
+              <p className="text-xs text-slate-300 truncate">
+                {isSuperAdmin
+                  ? adminChannelMode === 'staff' && selectedStaff
+                    ? `${ROLE_LABELS[selectedStaff.role]} · ${DEPARTMENT_LABELS[selectedStaff.department]} · ${
+                        CENTRE_MAP[selectedStaff.centreId]?.name
+                      } · ${onlineUidSet.has(selectedStaff.uid) ? 'Online Now' : 'Currently Offline'}`
+                    : `${broadcastOnlineCount} of ${broadcastTargetCount} staff online right now`
+                  : `${superAdminOnline ? 'Super Admin is Online' : 'Super Admin Offline'} · Private Sir ↔ Staff chat`}
+              </p>
             </div>
+
+            {!isSuperAdmin && (
+              <div className="inline-flex items-center gap-1.5 text-[11px] text-slate-300 whitespace-nowrap shrink-0">
+                <Lock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span>Peer staff chat disabled</span>
+              </div>
+            )}
           </div>
 
           {/* Chat Thread */}
@@ -722,13 +514,13 @@ export const CommunicationView: React.FC<CommunicationViewProps> = ({
                 </h3>
                 <p className="text-xs text-slate-600 leading-relaxed">
                   Type an official directive below to deliver it privately to all {broadcastTargetCount} active staff
-                  members, or click <strong>Mic On</strong> above to speak live to everyone connected right now.
+                  members in this scope.
                 </p>
               </div>
             ) : !activeThreadUid ? (
               <div className="h-full flex flex-col items-center justify-center text-center py-10 text-slate-500 space-y-2">
                 <UserIcon className="w-8 h-8 text-slate-400" />
-                <p className="text-xs font-semibold">Select a staff member or Centre Head to start messaging.</p>
+                <p className="text-xs font-semibold">Select a staff member or Centre Head to start chatting.</p>
               </div>
             ) : threadMessages.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-center max-w-sm mx-auto py-10 space-y-2.5">
@@ -738,33 +530,18 @@ export const CommunicationView: React.FC<CommunicationViewProps> = ({
                 <p className="text-sm font-bold text-[#0F172A]">No messages yet</p>
                 <p className="text-xs text-slate-600 leading-relaxed">
                   {isSuperAdmin
-                    ? `Send a direct message or use Walkie-Talkie Mic On to talk live with ${selectedStaff?.fullName}.`
-                    : 'Your private channel with Super Admin is ready. You can reply to Sir here or speak live using Walkie-Talkie.'}
+                    ? `Send a direct message to start chatting with ${selectedStaff?.fullName}.`
+                    : 'Your private chat with Super Admin is ready. Send a message below to reach Sir.'}
                 </p>
               </div>
             ) : (
               threadMessages.map((msg) => {
                 const isMine = msg.senderUid === currentUser.uid;
-                const isWalkieLog = msg.messageType === 'walkie_log';
                 const isRead = isSuperAdmin
                   ? msg.senderRole === 'super_admin'
                     ? msg.readByStaff
                     : msg.readByAdmin
                   : msg.readByStaff;
-
-                if (isWalkieLog) {
-                  return (
-                    <div key={msg.messageId} className="flex justify-center">
-                      <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-slate-200/75 text-slate-700 text-[11px] font-medium">
-                        <Radio className="w-3.5 h-3.5 text-[#DC2626] shrink-0" />
-                        <span>
-                          {msg.senderName} · {msg.text}
-                        </span>
-                        <span className="font-mono tabular-nums text-slate-500">{formatTime(msg.createdAt)}</span>
-                      </div>
-                    </div>
-                  );
-                }
 
                 return (
                   <div key={msg.messageId} className={`flex ${isMine ? 'justify-end' : 'justify-start'}`}>
@@ -832,7 +609,7 @@ export const CommunicationView: React.FC<CommunicationViewProps> = ({
                       ? `Write a direct message to ${selectedStaff.fullName}...`
                       : 'Select a staff member on the left...'
                     : 'Write broadcast announcement for staff...'
-                  : 'Type your reply to Super Admin (Sir)...'
+                  : 'Type your message to Super Admin (Sir)...'
               }
               className="flex-1 px-3.5 py-2.5 text-sm bg-slate-50 border border-slate-200 rounded-xl text-[#0F172A] placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#DC2626]/25 focus:border-[#DC2626] disabled:opacity-50"
             />

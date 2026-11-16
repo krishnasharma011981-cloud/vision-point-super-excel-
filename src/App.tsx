@@ -27,9 +27,9 @@ import { SettingsView } from './components/SettingsView';
 import { SirWelcomeOverlay } from './components/SirWelcomeOverlay';
 import { StudentDatabaseView } from './components/StudentDatabaseView';
 import { ToastContainer, type ToastMessage } from './components/Toast';
-import { WalkieOverlayBar } from './components/WalkieOverlayBar';
-import { isBootstrappedOwnerEmail } from './constants/centres';
-import { useWalkieComms } from './hooks/useWalkieComms';
+import { CENTRE_MAP, isBootstrappedOwnerEmail } from './constants/centres';
+import { useChatComms } from './hooks/useChatComms';
+import { extractJaunpurHeadingAndBlankColumns } from './lib/csvUtils';
 import { auth, db, handleFirestoreError, OperationType } from './lib/firebase';
 import { speakWelcomeMessage, stopWelcomeMessage } from './lib/voiceWelcome';
 import {
@@ -37,6 +37,9 @@ import {
   ensureInitialPlatformSetup,
   getUserProfile,
   logActivity,
+  mergeCustomColumnsIntoSharedConfig,
+  resetOnlineAttendanceToZeroBatch,
+  saveExcelSheetConfig,
 } from './services/firestoreService';
 import type {
   ActivityLog,
@@ -46,6 +49,7 @@ import type {
   DirectMessage,
   EditRequest,
   EmployeeReport,
+  ExcelSheetConfig,
   FeeRecoveryRecord,
   LocationVerification,
   NavSection,
@@ -104,6 +108,11 @@ export default function App() {
   const [employeeReports, setEmployeeReports] = useState<EmployeeReport[]>([]);
   const [editRequests, setEditRequests] = useState<EditRequest[]>([]);
   const [directMessages, setDirectMessages] = useState<DirectMessage[]>([]);
+  const [sheetConfigs, setSheetConfigs] = useState<ExcelSheetConfig[]>([]);
+  const [sheetConfigsLoaded, setSheetConfigsLoaded] = useState(false);
+  const [onlineClassRecordsLoaded, setOnlineClassRecordsLoaded] = useState(false);
+  const attendanceZeroMigrationRanRef = useRef(false);
+  const jaunpurColsSharedMigrationRef = useRef(false);
 
   const notify = useCallback(
     (title: string, description: string, variant: ToastMessage['variant'] = 'info') => {
@@ -123,13 +132,12 @@ export default function App() {
   const activeSectionRef = useRef<NavSection>(activeSection);
   activeSectionRef.current = activeSection;
 
-  const walkieComms = useWalkieComms({
+  const chatComms = useChatComms({
     currentUser,
-    onNotify: notify,
     onIncomingChatPing: useCallback(
       ({ fromName, preview }: { fromName: string; staffUid: string; preview: string }) => {
         if (activeSectionRef.current !== 'communication') {
-          notify(`New Message from ${fromName}`, preview || 'Open Sir Connect & Walkie to read.', 'info');
+          notify(`New Message from ${fromName}`, preview || 'Open Direct Chat to read.', 'info');
         }
       },
       [notify],
@@ -242,7 +250,20 @@ export default function App() {
 
         if (profile && profile.status === 'Active') {
           setCurrentUser(profile);
-          setSelectedCentreFilter(profile.role === 'super_admin' ? 'all' : profile.centreId);
+          let resolvedCentre: CentreId | 'all' = profile.centreId;
+          if (profile.role === 'super_admin') {
+            try {
+              const saved = localStorage.getItem(`ds_super_admin_centre_${profile.uid}`);
+              if (saved === 'all' || (saved && saved in CENTRE_MAP)) {
+                resolvedCentre = saved as CentreId | 'all';
+              } else {
+                resolvedCentre = 'vp_lookerganj';
+              }
+            } catch {
+              resolvedCentre = 'vp_lookerganj';
+            }
+          }
+          setSelectedCentreFilter(resolvedCentre);
           setActiveSection(profile.role === 'employee' ? (profile.department as NavSection) : 'overview');
         } else if (profile && profile.status !== 'Active') {
           await signOut(auth);
@@ -321,8 +342,16 @@ export default function App() {
   // Note: Non-super-admin queries omit .orderBy() when .where() is used and sort client-side
   // so no Firestore composite index is required for Centre Head or Employee sessions.
   useEffect(() => {
-    if (!currentUser) return;
+    if (!currentUser) {
+      setSheetConfigsLoaded(false);
+      setOnlineClassRecordsLoaded(false);
+      attendanceZeroMigrationRanRef.current = false;
+      jaunpurColsSharedMigrationRef.current = false;
+      return;
+    }
     setDataLoading(true);
+    setSheetConfigsLoaded(false);
+    setOnlineClassRecordsLoaded(false);
     const unsubs: Unsubscribe[] = [];
 
     const isSuper = currentUser.role === 'super_admin';
@@ -379,9 +408,15 @@ export default function App() {
     );
 
     // 4. Department-Specific Records (Strictly isolated by department for employees)
-    const subscribeDept = <T,>(colName: string, deptKey: string, setter: (items: T[]) => void) => {
+    const subscribeDept = <T,>(
+      colName: string,
+      deptKey: string,
+      setter: (items: T[]) => void,
+      onFirstLoad?: () => void,
+    ) => {
       if (!isSuper && !isHead && currentUser.department !== deptKey) {
         setter([]);
+        onFirstLoad?.();
         return;
       }
       const q = isSuper
@@ -390,8 +425,14 @@ export default function App() {
       unsubs.push(
         onSnapshot(
           q,
-          (snap) => setter(snap.docs.map((d) => d.data() as T)),
-          (err) => handleFirestoreError(err, OperationType.LIST, colName),
+          (snap) => {
+            setter(snap.docs.map((d) => d.data() as T));
+            onFirstLoad?.();
+          },
+          (err) => {
+            onFirstLoad?.();
+            handleFirestoreError(err, OperationType.LIST, colName);
+          },
         ),
       );
     };
@@ -399,7 +440,12 @@ export default function App() {
     subscribeDept<FeeRecoveryRecord>('fee_recovery', 'fee_recovery', setFeeRecords);
     subscribeDept<PracticalRecord>('practical_records', 'practical', setPracticalRecords);
     subscribeDept<TmaRecord>('tma_records', 'tma', setTmaRecords);
-    subscribeDept<OnlineClassRecord>('online_class_records', 'online_classes', setOnlineClassRecords);
+    subscribeDept<OnlineClassRecord>(
+      'online_class_records',
+      'online_classes',
+      setOnlineClassRecords,
+      () => setOnlineClassRecordsLoaded(true),
+    );
     subscribeDept<AdmissionRecord>('admission_records', 'admission', setAdmissionRecords);
 
     // 5 & 6. Activity Logs & Location Verifications (Super Admin ONLY)
@@ -524,7 +570,7 @@ export default function App() {
     const msgQuery = isSuper
       ? query(collection(db, 'direct_messages'), orderBy('createdAt', 'desc'), limit(400))
       : query(collection(db, 'direct_messages'), where('staffUid', '==', currentUser.uid), limit(250));
-    unsubs.push(
+      unsubs.push(
       onSnapshot(
         msgQuery,
         (snap) => {
@@ -537,10 +583,141 @@ export default function App() {
       ),
     );
 
+    // 13. Shared Excel Sheet Column & Heading Configs
+    unsubs.push(
+      onSnapshot(
+        collection(db, 'excel_sheet_configs'),
+        (snap) => {
+          setSheetConfigs(snap.docs.map((d) => d.data() as ExcelSheetConfig));
+          setSheetConfigsLoaded(true);
+        },
+        (err) => {
+          setSheetConfigsLoaded(true);
+          handleFirestoreError(err, OperationType.LIST, 'excel_sheet_configs');
+        },
+      ),
+    );
+
     return () => {
       unsubs.forEach((u) => u());
     };
   }, [currentUser]);
+
+  // One-time baseline reset: sets existing Online Attendance (100% default from earlier imports) to 0%
+  // while leaving any future attendance updates completely untouched.
+  useEffect(() => {
+    if (
+      !currentUser ||
+      currentUser.role !== 'super_admin' ||
+      dataLoading ||
+      !sheetConfigsLoaded ||
+      !onlineClassRecordsLoaded ||
+      attendanceZeroMigrationRanRef.current
+    ) {
+      return;
+    }
+
+    const alreadyBaselineZeroed = sheetConfigs.some((c) => c.configId === 'online_attendance_zero_v1');
+    if (alreadyBaselineZeroed) {
+      attendanceZeroMigrationRanRef.current = true;
+      return;
+    }
+
+    attendanceZeroMigrationRanRef.current = true;
+    (async () => {
+      try {
+        const res = await resetOnlineAttendanceToZeroBatch(
+          students,
+          onlineClassRecords,
+          currentUser,
+          'Initial baseline: Online Attendance set to 0% until updated',
+        );
+        await saveExcelSheetConfig(
+          'online_attendance_zero_v1',
+          {
+            headerLabels: {},
+            customColumns: [],
+            hiddenCoreColumns: [],
+            deletedExtraColumns: [],
+          },
+          currentUser,
+          'Recorded Online Attendance 0% baseline marker',
+        );
+        if (res.studentsUpdated > 0 || res.recordsUpdated > 0) {
+          notify(
+            'Online Attendance Set to 0%',
+            `Updated ${res.studentsUpdated} student rows to Not Attending (0%). You can update attendance anytime later.`,
+            'info',
+          );
+        }
+      } catch {
+        attendanceZeroMigrationRanRef.current = false;
+      }
+    })();
+  }, [
+    currentUser,
+    dataLoading,
+    sheetConfigsLoaded,
+    onlineClassRecordsLoaded,
+    sheetConfigs,
+    students,
+    onlineClassRecords,
+    notify,
+  ]);
+
+  // One-time sync: share Jaunpur heading-only / blank extra columns across all centres via global config
+  useEffect(() => {
+    if (
+      !currentUser ||
+      currentUser.role !== 'super_admin' ||
+      dataLoading ||
+      !sheetConfigsLoaded ||
+      jaunpurColsSharedMigrationRef.current
+    ) {
+      return;
+    }
+
+    const alreadyShared = sheetConfigs.some((c) => c.configId === 'jaunpur_cols_shared_v1');
+    if (alreadyShared) {
+      jaunpurColsSharedMigrationRef.current = true;
+      return;
+    }
+
+    jaunpurColsSharedMigrationRef.current = true;
+    (async () => {
+      try {
+        const jaunpurHeadings = extractJaunpurHeadingAndBlankColumns(students, sheetConfigs);
+        const added =
+          jaunpurHeadings.length > 0
+            ? await mergeCustomColumnsIntoSharedConfig(
+                jaunpurHeadings,
+                currentUser,
+                'Synced Jaunpur heading-only / blank extra columns across all centres',
+              )
+            : [];
+        await saveExcelSheetConfig(
+          'jaunpur_cols_shared_v1',
+          {
+            headerLabels: {},
+            customColumns: [],
+            hiddenCoreColumns: [],
+            deletedExtraColumns: [],
+          },
+          currentUser,
+          'Recorded Jaunpur shared extra columns baseline',
+        );
+        if (added.length > 0) {
+          notify(
+            'Jaunpur Columns Synced Across Centres',
+            `Added ${added.length} Jaunpur extra heading${added.length > 1 ? 's' : ''} (${added.join(', ')}) to all centres.`,
+            'info',
+          );
+        }
+      } catch {
+        jaunpurColsSharedMigrationRef.current = false;
+      }
+    })();
+  }, [currentUser, dataLoading, sheetConfigsLoaded, sheetConfigs, students, notify]);
 
   const handleSelectSection = (section: NavSection) => {
     if (!currentUser) return;
@@ -551,6 +728,20 @@ export default function App() {
     setActiveSection(section);
     window.location.hash = `#${section}`;
   };
+
+  const handleChangeCentreFilter = useCallback(
+    (nextCentre: CentreId | 'all') => {
+      setSelectedCentreFilter(nextCentre);
+      if (currentUser?.role === 'super_admin') {
+        try {
+          localStorage.setItem(`ds_super_admin_centre_${currentUser.uid}`, nextCentre);
+        } catch {
+          // ignore storage quota errors
+        }
+      }
+    },
+    [currentUser],
+  );
 
   if (authChecking) {
     return (
@@ -587,7 +778,15 @@ export default function App() {
           onAuthenticated={(profile, activeCentre) => {
             setLoginError(null);
             setCurrentUser(profile);
-            setSelectedCentreFilter(profile.role === 'super_admin' ? 'all' : activeCentre);
+            const resolvedCentre = profile.role === 'super_admin' ? activeCentre : profile.centreId;
+            setSelectedCentreFilter(resolvedCentre);
+            if (profile.role === 'super_admin') {
+              try {
+                localStorage.setItem(`ds_super_admin_centre_${profile.uid}`, activeCentre);
+              } catch {
+                // ignore storage quota errors
+              }
+            }
             setActiveSection(profile.role === 'employee' ? (profile.department as NavSection) : 'overview');
             triggerSirWelcome();
           }}
@@ -616,9 +815,8 @@ export default function App() {
         globalSearch={globalSearch}
         notifications={notifications}
         unreadCommsCount={unreadCommsCount}
-        isWalkieLive={Boolean(walkieComms.incomingWalkie || walkieComms.isTransmitting)}
         onSelectSection={handleSelectSection}
-        onChangeCentreFilter={setSelectedCentreFilter}
+        onChangeCentreFilter={handleChangeCentreFilter}
         onChangeGlobalSearch={setGlobalSearch}
         onLogout={handleLogout}
       >
@@ -636,6 +834,7 @@ export default function App() {
             activityLogs={activityLogs}
             selectedCentreFilter={selectedCentreFilter}
             onNavigate={handleSelectSection}
+            onNotify={notify}
           />
         )}
 
@@ -645,20 +844,10 @@ export default function App() {
             users={users}
             directMessages={directMessages}
             selectedCentreFilter={selectedCentreFilter}
-            wsConnected={walkieComms.wsConnected}
-            onlineStaff={walkieComms.onlineStaff}
-            superAdminOnline={walkieComms.superAdminOnline}
-            audioUnlocked={walkieComms.audioUnlocked}
-            isTransmitting={walkieComms.isTransmitting}
-            txTargetLabel={walkieComms.txTargetLabel}
-            txRecipientCount={walkieComms.txRecipientCount}
-            micLevel={walkieComms.micLevel}
-            incomingWalkie={walkieComms.incomingWalkie}
-            rxLevel={walkieComms.rxLevel}
-            onUnlockSpeaker={walkieComms.unlockSpeaker}
-            onStartWalkieTx={walkieComms.startWalkieTx}
-            onStopWalkieTx={walkieComms.stopWalkieTx}
-            onSendChatPing={walkieComms.sendChatPing}
+            wsConnected={chatComms.wsConnected}
+            onlineStaff={chatComms.onlineStaff}
+            superAdminOnline={chatComms.superAdminOnline}
+            onSendChatPing={chatComms.sendChatPing}
             onNotify={notify}
           />
         )}
@@ -685,6 +874,7 @@ export default function App() {
             feeRecords={feeRecords}
             employees={users}
             editRequests={editRequests}
+            sheetConfigs={sheetConfigs}
             currentUser={currentUser}
             selectedCentreFilter={selectedCentreFilter}
             globalSearch={globalSearch}
@@ -812,20 +1002,6 @@ export default function App() {
         progress={sirProgress}
         onPlayNow={triggerSirWelcome}
         onDismiss={dismissSirWelcome}
-      />
-      <WalkieOverlayBar
-        currentUser={currentUser}
-        incomingWalkie={walkieComms.incomingWalkie}
-        rxLevel={walkieComms.rxLevel}
-        isTransmitting={walkieComms.isTransmitting}
-        txTargetLabel={walkieComms.txTargetLabel}
-        txRecipientCount={walkieComms.txRecipientCount}
-        micLevel={walkieComms.micLevel}
-        audioUnlocked={walkieComms.audioUnlocked}
-        onUnlockSpeaker={walkieComms.unlockSpeaker}
-        onStartReply={walkieComms.startWalkieTx}
-        onStopTx={() => walkieComms.stopWalkieTx()}
-        onOpenComms={() => handleSelectSection('communication')}
       />
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </>

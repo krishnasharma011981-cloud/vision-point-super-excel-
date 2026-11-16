@@ -132,7 +132,7 @@ export const SIDEBAR_ITEMS: Array<{
   department?: DepartmentId;
 }> = [
   { id: 'overview', label: 'Overview' },
-  { id: 'communication', label: 'Sir Connect & Walkie' },
+  { id: 'communication', label: 'Sir Chat' },
   { id: 'centre_management', label: 'Centre Management' },
   { id: 'student_database', label: 'Student Database' },
   { id: 'fee_recovery', label: 'Fee Recovery', department: 'fee_recovery' },

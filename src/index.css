@@ -184,6 +184,25 @@
   border-color: #2c3552;
 }
 
+.excel-sheet-compact {
+  font-size: 11px;
+}
+
+.excel-sheet-compact .excel-col-letters th {
+  padding: 2px 3px;
+  font-size: 9px;
+}
+
+.excel-sheet-compact .excel-col-header th {
+  padding: 6px 5px;
+  font-size: 10px;
+  letter-spacing: 0.01em;
+}
+
+.excel-sheet-compact td {
+  padding: 5px 5px;
+}
+
 .excel-row:nth-child(even) {
   background-color: #f8fafd;
 }

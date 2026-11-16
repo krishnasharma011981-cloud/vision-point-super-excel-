@@ -1,6 +1,7 @@
 import { ShieldAlert, X } from 'lucide-react';
 import React, { useEffect, useState } from 'react';
 import { CANONICAL_CENTRES, CENTRE_MAP, DEPARTMENT_LABELS } from '../constants/centres';
+import { clampFeeNumber, maskMobileNumber } from '../lib/analyticsMath';
 import { verifyOperationLocation } from '../lib/securityClient';
 import {
   checkDuplicateStudent,
@@ -53,7 +54,7 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
   const [subject, setSubject] = useState('');
   const [tcStatus, setTcStatus] = useState<TcStatus>('Not Received');
   const [bookStatus, setBookStatus] = useState<BookStatus>('Pending');
-  const [classAttendanceStatus, setClassAttendanceStatus] = useState<ClassAttendanceStatus>('Regular');
+  const [classAttendanceStatus, setClassAttendanceStatus] = useState<ClassAttendanceStatus>('Not Attending');
   const [whyNios, setWhyNios] = useState('');
   const [currentEducationStatus, setCurrentEducationStatus] = useState('');
   const [futurePlanning, setFuturePlanning] = useState('');
@@ -65,6 +66,8 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
   const [additionalRemarks, setAdditionalRemarks] = useState('');
   const [totalFee, setTotalFee] = useState('12000');
   const [paidAmount, setPaidAmount] = useState('5000');
+  const [tmaFee, setTmaFee] = useState('0');
+  const [examFee, setExamFee] = useState('0');
 
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -76,7 +79,7 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
       setCentreId(editingStudent.centreId);
       setStudentId(editingStudent.studentId);
       setStudentName(editingStudent.studentName);
-      setMobileNumber(editingStudent.mobileNumber);
+      setMobileNumber('');
       setSubject(editingStudent.subject);
       setTcStatus(editingStudent.tcStatus);
       setBookStatus(editingStudent.bookStatus);
@@ -90,6 +93,8 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
       setAdmissionDate(editingStudent.admissionDate);
       setAssignedEmployeeUid(editingStudent.assignedEmployeeUid);
       setAdditionalRemarks(editingStudent.additionalRemarks);
+      setTmaFee(String(editingStudent.tmaFee ?? 0));
+      setExamFee(String(editingStudent.examFee ?? 0));
     } else {
       const targetCentre = currentUser.role === 'super_admin' ? defaultCentreId : currentUser.centreId;
       setCentreId(targetCentre);
@@ -101,7 +106,7 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
       setSubject('Hindi, English, Mathematics, Science, Social Science');
       setTcStatus('Not Received');
       setBookStatus('Pending');
-      setClassAttendanceStatus('Regular');
+      setClassAttendanceStatus('Not Attending');
       setWhyNios('');
       setCurrentEducationStatus('');
       setFuturePlanning('');
@@ -113,6 +118,8 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
       setAdditionalRemarks('');
       setTotalFee('12000');
       setPaidAmount('5000');
+      setTmaFee('0');
+      setExamFee('0');
     }
   }, [open, editingStudent, defaultCentreId, currentUser, existingStudents.length]);
 
@@ -136,7 +143,12 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
     e.preventDefault();
     setFormError(null);
 
-    if (studentName.trim().length < 2 || mobileNumber.trim().length < 7) {
+    const effectiveMobile =
+      isEditing && editingStudent && mobileNumber.trim() === ''
+        ? editingStudent.mobileNumber
+        : mobileNumber.trim();
+
+    if (studentName.trim().length < 2 || effectiveMobile.length < 7) {
       setFormError('Valid Student Name and Mobile Number are required.');
       return;
     }
@@ -202,10 +214,13 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
       const assignedEmpName =
         assignedEmp?.fullName || (assignedEmployeeUid === currentUser.uid ? currentUser.fullName : 'Unassigned');
 
+      const cleanTmaFee = clampFeeNumber(tmaFee);
+      const cleanExamFee = clampFeeNumber(examFee);
+
       if (isEditing && editingStudent) {
         let updatesPayload: Partial<Student> = {
           studentName: studentName.trim(),
-          mobileNumber: mobileNumber.trim(),
+          mobileNumber: effectiveMobile,
           subject: subject.trim(),
           tcStatus,
           bookStatus,
@@ -220,6 +235,8 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
           assignedEmployeeUid,
           assignedEmployeeName: assignedEmpName,
           additionalRemarks: additionalRemarks.trim(),
+          tmaFee: cleanTmaFee,
+          examFee: cleanExamFee,
         };
 
         if (isEmployee) {
@@ -232,7 +249,7 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
           } else if (empDept === 'admission') {
             updatesPayload = {
               studentName: studentName.trim(),
-              mobileNumber: mobileNumber.trim(),
+              mobileNumber: effectiveMobile,
               subject: subject.trim(),
               tcStatus,
               bookStatus,
@@ -244,6 +261,8 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
               assignedEmployeeUid,
               assignedEmployeeName: assignedEmpName,
               additionalRemarks: additionalRemarks.trim(),
+              tmaFee: cleanTmaFee,
+              examFee: cleanExamFee,
             };
           } else {
             setFormError('Your department has read-only access on central student rows.');
@@ -287,12 +306,16 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
             assignedEmployeeUid,
             assignedEmployeeName: assignedEmpName,
             additionalRemarks: additionalRemarks.trim(),
+            tmaFee: cleanTmaFee,
+            examFee: cleanExamFee,
           },
           currentUser,
           true,
           {
             totalFee: Number(totalFee) || 12000,
             paidAmount: Number(paidAmount) || 0,
+            tmaFee: cleanTmaFee,
+            examFee: cleanExamFee,
             createDepartmentSkeletons: currentUser.role !== 'employee',
           },
         );
@@ -361,14 +384,20 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-[#08152E] mb-1">Mobile Number</label>
+              <label className="block text-xs font-semibold text-[#08152E] mb-1">
+                Mobile Number {isEditing && editingStudent ? `(${maskMobileNumber(editingStudent.mobileNumber)})` : ''}
+              </label>
               <input
                 type="tel"
-                required
+                required={!isEditing}
                 disabled={!canEditAdmissionFields}
                 value={mobileNumber}
                 onChange={(e) => setMobileNumber(e.target.value)}
-                placeholder="10-digit mobile number"
+                placeholder={
+                  isEditing && editingStudent
+                    ? `${maskMobileNumber(editingStudent.mobileNumber)} (Leave blank to keep)`
+                    : '10-digit mobile number'
+                }
                 className="w-full px-3 py-2 text-sm font-mono bg-white text-[#08152E] placeholder:text-slate-400 border border-slate-300 rounded-lg disabled:bg-slate-100 disabled:text-slate-600 focus:outline-none focus:ring-2 focus:ring-[#0F2F6B]"
               />
             </div>
@@ -528,30 +557,54 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
             </div>
           </div>
 
-          {!isEditing && currentUser.role !== 'employee' && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-4 rounded-xl bg-slate-50 border border-slate-200">
-              <div>
-                <label className="block text-xs font-semibold text-[#08152E] mb-1">Total Fee Schedule (INR)</label>
-                <input
-                  type="number"
-                  min={0}
-                  value={totalFee}
-                  onChange={(e) => setTotalFee(e.target.value)}
-                  className="w-full px-3 py-2 text-sm font-mono bg-white text-[#08152E] border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#0F2F6B]"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-[#08152E] mb-1">Initial Paid Amount (INR)</label>
-                <input
-                  type="number"
-                  min={0}
-                  value={paidAmount}
-                  onChange={(e) => setPaidAmount(e.target.value)}
-                  className="w-full px-3 py-2 text-sm font-mono bg-white text-[#08152E] border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#0F2F6B]"
-                />
-              </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 p-4 rounded-xl bg-slate-50 border border-slate-200">
+            {!isEditing && currentUser.role !== 'employee' && (
+              <>
+                <div>
+                  <label className="block text-xs font-semibold text-[#08152E] mb-1">Total Fee Schedule (INR)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={totalFee}
+                    onChange={(e) => setTotalFee(e.target.value)}
+                    className="w-full px-3 py-2 text-sm font-mono bg-white text-[#08152E] border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#0F2F6B]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[#08152E] mb-1">Initial Paid Amount (INR)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={paidAmount}
+                    onChange={(e) => setPaidAmount(e.target.value)}
+                    className="w-full px-3 py-2 text-sm font-mono bg-white text-[#08152E] border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#0F2F6B]"
+                  />
+                </div>
+              </>
+            )}
+            <div>
+              <label className="block text-xs font-semibold text-amber-900 mb-1">TMA Fee (INR)</label>
+              <input
+                type="number"
+                min={0}
+                disabled={!canEditAdmissionFields}
+                value={tmaFee}
+                onChange={(e) => setTmaFee(e.target.value)}
+                className="w-full px-3 py-2 text-sm font-mono bg-white text-[#08152E] border border-amber-300 rounded-lg disabled:bg-slate-100 disabled:text-slate-600 focus:outline-none focus:ring-2 focus:ring-[#0F2F6B]"
+              />
             </div>
-          )}
+            <div>
+              <label className="block text-xs font-semibold text-indigo-900 mb-1">Exam Fee (INR)</label>
+              <input
+                type="number"
+                min={0}
+                disabled={!canEditAdmissionFields}
+                value={examFee}
+                onChange={(e) => setExamFee(e.target.value)}
+                className="w-full px-3 py-2 text-sm font-mono bg-white text-[#08152E] border border-indigo-300 rounded-lg disabled:bg-slate-100 disabled:text-slate-600 focus:outline-none focus:ring-2 focus:ring-[#0F2F6B]"
+              />
+            </div>
+          </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div>

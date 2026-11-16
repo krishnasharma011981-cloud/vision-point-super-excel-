@@ -13,6 +13,7 @@ import {
   IndianRupee,
   Layers,
   MonitorPlay,
+  RotateCcw,
   ShieldCheck,
   TrendingUp,
   UserCheck,
@@ -37,7 +38,7 @@ import {
   YAxis,
 } from 'recharts';
 import { CANONICAL_CENTRES, CENTRE_MAP, DEPARTMENT_LABELS, ROLE_LABELS } from '../constants/centres';
-import { computeInstitutionalAnalytics, maskMobileNumber } from '../lib/analyticsMath';
+import { computeInstitutionalAnalytics, formatCompactInr, maskMobileNumber } from '../lib/analyticsMath';
 import type {
   ActivityLog,
   AdmissionRecord,
@@ -51,7 +52,9 @@ import type {
   TmaRecord,
   UserAccount,
 } from '../types/domain';
+import { resetOnlineAttendanceToZeroBatch } from '../services/firestoreService';
 import { CampusTwilightArtwork } from './CampusTwilightArtwork';
+import { ConfirmDialog } from './ConfirmDialog';
 
 interface OverviewDashboardProps {
   currentUser: UserAccount;
@@ -66,6 +69,7 @@ interface OverviewDashboardProps {
   activityLogs: ActivityLog[];
   selectedCentreFilter: CentreId | 'all';
   onNavigate: (section: NavSection) => void;
+  onNotify?: (title: string, description: string, variant: 'success' | 'error' | 'warning' | 'info') => void;
 }
 
 const MiniSparkWave: React.FC<{ stroke: string; fillId: string; path: string }> = ({ stroke, fillId, path }) => (
@@ -87,12 +91,16 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   users,
   students,
   feeRecords,
+  onlineClassRecords,
   admissionRecords,
   activityLogs,
   selectedCentreFilter,
   onNavigate,
+  onNotify,
 }) => {
   const [clockText, setClockText] = useState(() => new Date().toLocaleTimeString('en-IN', { hour12: false }));
+  const [showResetAttendanceConfirm, setShowResetAttendanceConfirm] = useState(false);
+  const [resetAttendanceBusy, setResetAttendanceBusy] = useState(false);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -166,6 +174,28 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
       collectionRate: b.collectionRate,
     }));
   }, [analytics.branchMetrics]);
+
+  const singleCentreMilestoneData = useMemo(
+    () => [
+      { name: 'Full Paid', Count: analytics.paidCount, fill: '#059669' },
+      { name: 'Partial', Count: analytics.partialCount, fill: '#D97706' },
+      { name: 'Pending/Due', Count: analytics.pendingCount + analytics.overdueCount, fill: '#DC2626' },
+      { name: 'TMA Done', Count: analytics.tmaSubmittedCount, fill: '#2563EB' },
+      { name: 'Practical', Count: analytics.practicalDoneCount, fill: '#7C3AED' },
+    ],
+    [analytics],
+  );
+
+  const singleCentreFeeBreakdown = useMemo(
+    () => [
+      { metric: 'Total Billed', Amount: analytics.totalFeeBilled, fill: '#0F172A' },
+      { metric: 'Paid (Jama)', Amount: analytics.totalFeePaid, fill: '#059669' },
+      { metric: 'Pending (Baki)', Amount: analytics.totalFeePending, fill: '#DC2626' },
+      { metric: 'TMA Fees', Amount: analytics.totalTmaFee, fill: '#D97706' },
+      { metric: 'Exam Fees', Amount: analytics.totalExamFee, fill: '#4F46E5' },
+    ],
+    [analytics],
+  );
 
   const departmentPerformanceData = analytics.departmentPerformance;
 
@@ -438,7 +468,21 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
               <MonitorPlay className="w-5 h-5" />
             </div>
             <div className="min-w-0">
-              <p className="text-xs font-semibold text-slate-600 truncate">Online Attendance</p>
+              <div className="flex items-center gap-1.5">
+                <p className="text-xs font-semibold text-slate-600 truncate">Online Attendance</p>
+                {(currentUser.role === 'super_admin' || currentUser.role === 'centre_head') &&
+                  attendanceRate > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowResetAttendanceConfirm(true)}
+                      title="Reset Online Attendance to 0%"
+                      className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-bold text-red-700 bg-red-50 border border-red-200 rounded hover:bg-red-100 shrink-0"
+                    >
+                      <RotateCcw className="w-2.5 h-2.5" />
+                      0%
+                    </button>
+                  )}
+              </div>
               <p className="text-2xl font-extrabold text-[#0F172A] font-mono tabular-nums leading-tight mt-0.5">
                 {attendanceRate}%
               </p>
@@ -448,6 +492,45 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
           <MiniSparkWave stroke="#7C3AED" fillId="sparkOnline" path="M0 24 Q 20 20, 44 10 T 90 14" />
         </div>
       </div>
+
+      <ConfirmDialog
+        open={showResetAttendanceConfirm}
+        title="Reset Online Attendance to 0%"
+        description={`Reset online class attendance to 0% (Not Attending) for ${scopedStudents.length} students${effectiveCentre === 'all' ? ' across all centres' : ` in ${CENTRE_MAP[effectiveCentre]?.name}`}? You can update attendance later anytime.`}
+        confirmLabel="Reset to 0%"
+        destructive
+        busy={resetAttendanceBusy}
+        onCancel={() => setShowResetAttendanceConfirm(false)}
+        onConfirm={async () => {
+          setResetAttendanceBusy(true);
+          try {
+            const scopedRecs =
+              effectiveCentre === 'all'
+                ? onlineClassRecords
+                : onlineClassRecords.filter((r) => r.centreId === effectiveCentre);
+            const res = await resetOnlineAttendanceToZeroBatch(
+              scopedStudents,
+              scopedRecs,
+              currentUser,
+              `Dashboard Reset: Online Attendance set to 0% (${effectiveCentre})`,
+            );
+            onNotify?.(
+              'Online Attendance Reset to 0%',
+              `Updated ${res.studentsUpdated} students & ${res.recordsUpdated} class records to 0% (Not Attending).`,
+              'success',
+            );
+            setShowResetAttendanceConfirm(false);
+          } catch (err) {
+            onNotify?.(
+              'Reset Failed',
+              err instanceof Error ? err.message : 'Unable to reset online attendance.',
+              'error',
+            );
+          } finally {
+            setResetAttendanceBusy(false);
+          }
+        }}
+      />
 
       {/* 3-Card Row Matching Bottom Section of Dashboard Reference: Branch Distribution Donut + Attendance/Completion Trend + Quick Actions */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
@@ -518,37 +601,57 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
           </div>
         </div>
 
-        {/* Smooth Crimson Area Chart */}
+        {/* Adaptive Branch Comparison / Single-Centre Milestone Chart */}
         <div className="lg:col-span-5 bg-white rounded-2xl border border-slate-200 p-5 shadow-xs">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2">
               <Activity className="w-4 h-4 text-[#DC2626]" />
-              <h3 className="text-sm font-bold text-[#0F172A]">Branch Volume &amp; Completion</h3>
+              <h3 className="text-sm font-bold text-[#0F172A]">
+                {centreComparisonData.length <= 1
+                  ? 'Branch Milestones & Fee Split'
+                  : 'Branch Volume & Completion'}
+              </h3>
             </div>
-            <span className="text-[11px] text-slate-500 font-medium">Live Telemetry</span>
+            <span className="text-[11px] text-slate-500 font-medium">
+              {centreComparisonData.length <= 1 ? CENTRE_MAP[effectiveCentre as CentreId]?.code || 'Branch' : '4 Centres Live'}
+            </span>
           </div>
           <div className="h-44 w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={centreComparisonData} margin={{ top: 10, right: 12, left: -18, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="crimsonAreaFill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#DC2626" stopOpacity={0.32} />
-                    <stop offset="95%" stopColor="#DC2626" stopOpacity={0.02} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
-                <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#334155' }} />
-                <YAxis tick={{ fontSize: 11, fill: '#334155' }} allowDecimals={false} />
-                <Tooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#e2e8f0', borderRadius: '0.75rem' }} />
-                <Area
-                  type="monotone"
-                  dataKey="Students"
-                  stroke="#DC2626"
-                  strokeWidth={2.5}
-                  fill="url(#crimsonAreaFill)"
-                  dot={{ r: 4, fill: '#DC2626', stroke: '#ffffff', strokeWidth: 2 }}
-                />
-              </AreaChart>
+              {centreComparisonData.length <= 1 ? (
+                <BarChart data={singleCentreMilestoneData} margin={{ top: 10, right: 12, left: -18, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
+                  <XAxis dataKey="name" tick={{ fontSize: 10, fill: '#334155' }} />
+                  <YAxis tick={{ fontSize: 11, fill: '#334155' }} allowDecimals={false} />
+                  <Tooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#e2e8f0', borderRadius: '0.75rem' }} />
+                  <Bar dataKey="Count" radius={[4, 4, 0, 0]}>
+                    {singleCentreMilestoneData.map((entry) => (
+                      <Cell key={entry.name} fill={entry.fill} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              ) : (
+                <AreaChart data={centreComparisonData} margin={{ top: 10, right: 12, left: -18, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="crimsonAreaFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#DC2626" stopOpacity={0.32} />
+                      <stop offset="95%" stopColor="#DC2626" stopOpacity={0.02} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
+                  <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#334155' }} />
+                  <YAxis tick={{ fontSize: 11, fill: '#334155' }} allowDecimals={false} />
+                  <Tooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#e2e8f0', borderRadius: '0.75rem' }} />
+                  <Area
+                    type="monotone"
+                    dataKey="Students"
+                    stroke="#DC2626"
+                    strokeWidth={2.5}
+                    fill="url(#crimsonAreaFill)"
+                    dot={{ r: 4, fill: '#DC2626', stroke: '#ffffff', strokeWidth: 2 }}
+                  />
+                </AreaChart>
+              )}
             </ResponsiveContainer>
           </div>
         </div>
@@ -611,9 +714,17 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                 </h3>
               </div>
               <p className="text-xs text-slate-600 mt-0.5">
-                Billed: ₹{analytics.totalFeeBilled.toLocaleString('en-IN')} · Collection Rate:{' '}
-                <strong className="text-emerald-700 font-mono">{analytics.collectionRatePct}%</strong> · Avg Paid/Student: ₹
-                {analytics.avgFeePerStudent.toLocaleString('en-IN')}
+                Billed: ₹{analytics.totalFeeBilled.toLocaleString('en-IN')} · Paid: ₹
+                {analytics.totalFeePaid.toLocaleString('en-IN')} · Due: ₹
+                {analytics.totalFeePending.toLocaleString('en-IN')} · Rate:{' '}
+                <strong className="text-emerald-700 font-mono">{analytics.collectionRatePct}%</strong>
+                {(analytics.totalTmaFee > 0 || analytics.totalExamFee > 0) && (
+                  <>
+                    {' '}
+                    · TMA: ₹{analytics.totalTmaFee.toLocaleString('en-IN')} · Exam: ₹
+                    {analytics.totalExamFee.toLocaleString('en-IN')}
+                  </>
+                )}
               </p>
             </div>
             <div className="flex items-center gap-2 text-[11px] font-mono">
@@ -630,26 +741,48 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
           </div>
           <div className="h-56 w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={feeGraphData} margin={{ top: 8, right: 12, left: 6, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
-                <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#1E293B' }} />
-                <YAxis
-                  tick={{ fontSize: 11, fill: '#1E293B' }}
-                  tickFormatter={(v) => `₹${Number(v) >= 1000 ? `${Math.round(Number(v) / 1000)}k` : v}`}
-                />
-                <Tooltip
-                  formatter={(value: unknown) => `₹${Number(value || 0).toLocaleString('en-IN')}`}
-                  contentStyle={{
-                    backgroundColor: '#ffffff',
-                    borderColor: '#cbd5e1',
-                    color: '#0F172A',
-                    borderRadius: '0.75rem',
-                  }}
-                />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
-                <Bar dataKey="Paid (Jama)" fill="#059669" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="Pending (Baki)" fill="#DC2626" radius={[4, 4, 0, 0]} />
-              </BarChart>
+              {feeGraphData.length <= 1 ? (
+                <BarChart data={singleCentreFeeBreakdown} margin={{ top: 8, right: 12, left: 6, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
+                  <XAxis dataKey="metric" tick={{ fontSize: 11, fill: '#1E293B' }} />
+                  <YAxis tick={{ fontSize: 11, fill: '#1E293B' }} tickFormatter={(v) => formatCompactInr(v)} />
+                  <Tooltip
+                    formatter={(value: unknown) => `₹${Number(value || 0).toLocaleString('en-IN')}`}
+                    contentStyle={{
+                      backgroundColor: '#ffffff',
+                      borderColor: '#cbd5e1',
+                      color: '#0F172A',
+                      borderRadius: '0.75rem',
+                    }}
+                  />
+                  <Bar dataKey="Amount" radius={[4, 4, 0, 0]}>
+                    {singleCentreFeeBreakdown.map((entry) => (
+                      <Cell key={entry.metric} fill={entry.fill} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              ) : (
+                <BarChart data={feeGraphData} margin={{ top: 8, right: 12, left: 6, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
+                  <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#1E293B' }} />
+                  <YAxis
+                    tick={{ fontSize: 11, fill: '#1E293B' }}
+                    tickFormatter={(v) => formatCompactInr(v)}
+                  />
+                  <Tooltip
+                    formatter={(value: unknown) => `₹${Number(value || 0).toLocaleString('en-IN')}`}
+                    contentStyle={{
+                      backgroundColor: '#ffffff',
+                      borderColor: '#cbd5e1',
+                      color: '#0F172A',
+                      borderRadius: '0.75rem',
+                    }}
+                  />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  <Bar dataKey="Paid (Jama)" fill="#059669" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="Pending (Baki)" fill="#DC2626" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              )}
             </ResponsiveContainer>
           </div>
         </div>

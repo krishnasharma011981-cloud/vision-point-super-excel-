@@ -9,6 +9,7 @@ import {
   maskMobileNumber,
   parseFeeNumberNullable,
   reconcileFeeNumbers,
+  resolveStudentFeeSummary,
 } from './analyticsMath';
 
 test('maskMobileNumber hides full digits in 96******* style', () => {
@@ -86,7 +87,7 @@ test('allocateExactPercentages sums strictly to 100 when non-empty and 0 when em
   assert.deepEqual(allocateExactPercentages([0, 0, 0, 0]), [0, 0, 0, 0]);
 });
 
-test('computeInstitutionalAnalytics computes exact fee totals, branch shares, and reasoning insights', () => {
+test('computeInstitutionalAnalytics computes exact fee totals, TMA/Exam fees, branch shares, and reasoning insights', () => {
   const baseStudent = (id: string, centreId: Student['centreId'], tma: Student['tmaStatus']): Student => ({
     serialNumber: 1,
     studentId: id,
@@ -115,9 +116,12 @@ test('computeInstitutionalAnalytics computes exact fee totals, branch shares, an
   });
 
   const students: Student[] = [
-    baseStudent('S1', 'vp_lookerganj', 'Submitted'),
-    baseStudent('S2', 'vp_lookerganj', 'Pending'),
-    baseStudent('S3', 'vp_civillines', 'Pending'),
+    { ...baseStudent('S1', 'vp_lookerganj', 'Submitted'), tmaFee: 1000, examFee: 2000 },
+    { ...baseStudent('S2', 'vp_lookerganj', 'Pending'), tmaFee: 1500, examFee: 2500 },
+    {
+      ...baseStudent('S3', 'vp_civillines', 'Pending'),
+      extraColumns: { 'TMA Fee': 'Rs. 1,200', 'Exam Fee': '₹ 1,800', 'Total Fee': '16000' },
+    },
   ];
 
   const fees: FeeRecoveryRecord[] = [
@@ -131,6 +135,8 @@ test('computeInstitutionalAnalytics computes exact fee totals, branch shares, an
       totalFee: 12000,
       paidAmount: 12000,
       pendingAmount: 0,
+      tmaFee: 1000,
+      examFee: 2000,
       assignedEmployeeUid: 'u1',
       assignedEmployeeName: 'Staff',
       followUpNotes: '',
@@ -151,6 +157,8 @@ test('computeInstitutionalAnalytics computes exact fee totals, branch shares, an
       totalFee: 12000,
       paidAmount: 6000,
       pendingAmount: 6000,
+      tmaFee: 1500,
+      examFee: 2500,
       assignedEmployeeUid: 'u1',
       assignedEmployeeName: 'Staff',
       followUpNotes: '',
@@ -183,6 +191,11 @@ test('computeInstitutionalAnalytics computes exact fee totals, branch shares, an
     },
   ];
 
+  const s3Summary = resolveStudentFeeSummary(students[2], fees[2]);
+  assert.equal(s3Summary.tmaFee, 1200);
+  assert.equal(s3Summary.examFee, 1800);
+  assert.equal(s3Summary.totalFee, 16000);
+
   const admissions: AdmissionRecord[] = [];
   const res = computeInstitutionalAnalytics(students, fees, admissions, 'all');
 
@@ -190,6 +203,8 @@ test('computeInstitutionalAnalytics computes exact fee totals, branch shares, an
   assert.equal(res.totalFeeBilled, 40000);
   assert.equal(res.totalFeePaid, 18000);
   assert.equal(res.totalFeePending, 22000);
+  assert.equal(res.totalTmaFee, 3700);
+  assert.equal(res.totalExamFee, 6300);
   assert.equal(res.collectionRatePct, 45);
   assert.equal(res.paidCount, 1);
   assert.equal(res.partialCount, 1);
@@ -202,3 +217,51 @@ test('computeInstitutionalAnalytics computes exact fee totals, branch shares, an
   assert.ok(res.reasoningInsights.some((i) => i.id === 'pending_concentration' && i.metric.includes('CLN')));
   assert.ok(res.reasoningInsights.some((i) => i.id === 'dual_risk' && i.metric.includes('2 Students')));
 });
+
+test('computeInstitutionalAnalytics returns 0% attendance when all students are Not Attending and scales on update', () => {
+  const makeStu = (id: string, status: Student['classAttendanceStatus']): Student => ({
+    serialNumber: 1,
+    studentId: id,
+    studentName: `Student ${id}`,
+    mobileNumber: '9612345678',
+    subject: 'Hindi',
+    tcStatus: 'Not Received',
+    bookStatus: 'Pending',
+    classAttendanceStatus: status,
+    whyNios: '',
+    currentEducationStatus: '',
+    futurePlanning: '',
+    tmaStatus: 'Pending',
+    practicalStatus: 'Pending',
+    examinationStatus: 'Not Completed',
+    centreId: 'vp_lookerganj',
+    centreName: 'Vision Point Lookerganj',
+    admissionDate: '2026-01-01',
+    assignedEmployeeUid: 'u1',
+    assignedEmployeeName: 'Staff',
+    additionalRemarks: '',
+    createdBy: 'u1',
+    createdAt: '',
+    updatedBy: 'u1',
+    updatedAt: '',
+  });
+
+  const allZero = computeInstitutionalAnalytics(
+    [makeStu('A1', 'Not Attending'), makeStu('A2', 'Not Attending')],
+    [],
+    [],
+    'vp_lookerganj',
+  );
+  assert.equal(allZero.attendanceRatePct, 0);
+  assert.equal(allZero.regularAttendanceCount, 0);
+
+  const halfUpdated = computeInstitutionalAnalytics(
+    [makeStu('A1', 'Regular'), makeStu('A2', 'Not Attending')],
+    [],
+    [],
+    'vp_lookerganj',
+  );
+  assert.equal(halfUpdated.attendanceRatePct, 50);
+  assert.equal(halfUpdated.regularAttendanceCount, 1);
+});
+

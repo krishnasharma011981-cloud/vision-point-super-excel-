@@ -11,13 +11,20 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { CANONICAL_CENTRES, CENTRE_MAP } from '../constants/centres';
 import { maskMobileNumber } from '../lib/analyticsMath';
 import {
+  alignHeaderToCommonSchema,
   cleanMobileNumber,
   exportToCsv,
   exportToExcel,
+  extractBlankAndSparseSheetHeadings,
+  extractCommonBranchExtraHeaders,
   fuzzyDetectColumnMapping,
+  getReadableTextColor,
+  loadStoredCommonBranchHeaders,
   normalizeImportedStudentRow,
   parseSpreadsheetFile,
+  saveCommonBranchHeaders,
   type ExcelColumnMapping,
+  type ExcludedSummaryRow,
   type NormalizedImportStudent,
 } from '../lib/csvUtils';
 import { verifyOperationLocation } from '../lib/securityClient';
@@ -25,6 +32,7 @@ import {
   bulkImportStudentsBatch,
   deleteStudentsBatch,
   getNextSerialNumber,
+  mergeCustomColumnsIntoSharedConfig,
   type BulkImportRowPayload,
 } from '../services/firestoreService';
 import type { CentreId, Student, UserAccount } from '../types/domain';
@@ -37,6 +45,12 @@ interface BulkImportModalProps {
   onClose: () => void;
   onSuccess: (msg: string) => void;
   onError: (title: string, desc: string) => void;
+}
+
+const ALL_SHEETS_KEY = '__ALL_SHEETS__';
+
+function getFirstNameToken(name: string): string {
+  return name.trim().toLowerCase().split(/\s+/)[0] || '';
 }
 
 export const BulkImportModal: React.FC<BulkImportModalProps> = ({
@@ -62,6 +76,15 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
   const [activeSheet, setActiveSheet] = useState<string>('');
   const [rawSheets, setRawSheets] = useState<Record<string, Array<Record<string, string>>>>({});
   const [headersBySheet, setHeadersBySheet] = useState<Record<string, string[]>>({});
+  const [rowColorsBySheet, setRowColorsBySheet] = useState<Record<string, Array<Record<string, string>>>>({});
+  const [summaryRowsFilteredBySheet, setSummaryRowsFilteredBySheet] = useState<Record<string, number>>({});
+  const [excludedSummaryRowsBySheet, setExcludedSummaryRowsBySheet] = useState<
+    Record<string, ExcludedSummaryRow[]>
+  >({});
+  const [includeExcludedRows, setIncludeExcludedRows] = useState<boolean>(false);
+  const [allowDuplicateRowsInSheet, setAllowDuplicateRowsInSheet] = useState<boolean>(false);
+  const [previewFilter, setPreviewFilter] = useState<'all' | 'ready' | 'issues'>('all');
+  const [showAllPreviewRows, setShowAllPreviewRows] = useState<boolean>(true);
   const [columnMapping, setColumnMapping] = useState<ExcelColumnMapping>({});
   const [editedOverrides, setEditedOverrides] = useState<
     Record<number, { studentName?: string; mobileNumber?: string }>
@@ -81,18 +104,57 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
       setImportStatusText('');
       setImportError(null);
       setParseError(null);
+      setPreviewFilter('all');
     }
   }, [open, defaultCentreId, isSuperAdmin, currentUser.centreId]);
+
+  const commonExtraHeadings = useMemo(
+    () => extractCommonBranchExtraHeaders(existingStudents),
+    [existingStudents],
+  );
+
+  useEffect(() => {
+    const lkgKeys: string[] = [];
+    const seen = new Set<string>();
+    for (const s of existingStudents) {
+      if (s.centreId !== 'vp_lookerganj' || !s.extraColumns) continue;
+      for (const k of Object.keys(s.extraColumns)) {
+        const clean = k.trim().slice(0, 50);
+        if (clean && !seen.has(clean)) {
+          seen.add(clean);
+          lkgKeys.push(clean);
+        }
+        if (lkgKeys.length >= 35) break;
+      }
+      if (lkgKeys.length >= 35) break;
+    }
+    if (lkgKeys.length > 0) {
+      saveCommonBranchHeaders(lkgKeys);
+    }
+  }, [existingStudents]);
 
   const fallbackCentre = isSuperAdmin ? selectedCentre : currentUser.centreId;
   const activeHeaders = useMemo(
     () => headersBySheet[activeSheet] || [],
     [headersBySheet, activeSheet],
   );
-  const activeRawRows = useMemo(
-    () => rawSheets[activeSheet] || [],
-    [rawSheets, activeSheet],
+  const activeExcludedRows = useMemo(
+    () => excludedSummaryRowsBySheet[activeSheet] || [],
+    [excludedSummaryRowsBySheet, activeSheet],
   );
+  const activeRawRows = useMemo(() => {
+    const base = rawSheets[activeSheet] || [];
+    if (!includeExcludedRows || activeExcludedRows.length === 0) return base;
+    return [...base, ...activeExcludedRows.map((item) => item.row)];
+  }, [rawSheets, activeSheet, includeExcludedRows, activeExcludedRows]);
+  const activeRowColors = useMemo(() => {
+    const base = rowColorsBySheet[activeSheet] || [];
+    if (!includeExcludedRows || activeExcludedRows.length === 0) return base;
+    return [...base, ...activeExcludedRows.map((item) => item.colors)];
+  }, [rowColorsBySheet, activeSheet, includeExcludedRows, activeExcludedRows]);
+  const activeSummaryFiltered = includeExcludedRows
+    ? 0
+    : summaryRowsFilteredBySheet[activeSheet] || activeExcludedRows.length || 0;
 
   const existingById = useMemo(() => {
     const map = new Map<string, Student>();
@@ -100,12 +162,27 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
     return map;
   }, [existingStudents]);
 
-  const existingByCentreMobile = useMemo(() => {
+  const existingByCentreNameMobile = useMemo(() => {
     const map = new Map<string, Student>();
     existingStudents.forEach((s) => {
       const m = cleanMobileNumber(s.mobileNumber);
+      const name = s.studentName.trim().toLowerCase();
+      if (name && m.length >= 7 && m.toLowerCase() !== 'not provided') {
+        map.set(`${s.centreId}::${name}::${m}`, s);
+      }
+    });
+    return map;
+  }, [existingStudents]);
+
+  const existingMobileListByCentre = useMemo(() => {
+    const map = new Map<string, Student[]>();
+    existingStudents.forEach((s) => {
+      const m = cleanMobileNumber(s.mobileNumber);
       if (m.length >= 7 && m.toLowerCase() !== 'not provided') {
-        map.set(`${s.centreId}::${m}`, s);
+        const key = `${s.centreId}::${m}`;
+        const list = map.get(key) || [];
+        list.push(s);
+        map.set(key, list);
       }
     });
     return map;
@@ -128,6 +205,7 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
   const previewRows = useMemo<
     Array<
       NormalizedImportStudent & {
+        origIndex: number;
         duplicateReason: string | null;
         matchedExisting: Student | null;
         operation: 'create' | 'update';
@@ -135,10 +213,8 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
       }
     >
   >(() => {
-    const seenIds = new Set<string>();
-    const seenCentreMobiles = new Set<string>();
-
-    return activeRawRows.map((raw, idx) => {
+    // Pass 1: normalize rows and detect non-unique Student ID columns (e.g. shared batch codes / "Pending" / ref nos)
+    const preliminary = activeRawRows.map((raw, idx) => {
       const normalized = normalizeImportedStudentRow(
         raw,
         idx + 1,
@@ -147,11 +223,15 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
         columnMapping,
         allowMissingMobile,
         defaultTotalFee,
+        activeRowColors[idx],
+        commonExtraHeadings,
       );
 
       const override = editedOverrides[idx];
       if (override?.studentName !== undefined) {
-        normalized.studentName = override.studentName.trim().slice(0, 120);
+        const trimmedName = override.studentName.trim().slice(0, 120);
+        normalized.studentName =
+          trimmedName.length === 1 && /\p{L}/u.test(trimmedName) ? `${trimmedName}.` : trimmedName;
       }
       if (override?.mobileNumber !== undefined) {
         const cleaned = cleanMobileNumber(override.mobileNumber);
@@ -171,58 +251,128 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
         normalized.validationError = null;
       }
 
+      return { normalized, raw, origIndex: idx };
+    });
+
+    // If the same Student ID appears across rows with DIFFERENT student names, it is a batch/session/placeholder
+    // code rather than a unique primary key — ignore it as ID (keep raw value inside extraColumns) so no students are skipped.
+    const idToDistinctNames = new Map<string, Set<string>>();
+    preliminary.forEach(({ normalized }) => {
+      const idKey = normalized.studentId.trim().toLowerCase();
+      const nameKey = normalized.studentName.trim().toLowerCase();
+      if (!idKey) return;
+      const set = idToDistinctNames.get(idKey) || new Set<string>();
+      if (nameKey) set.add(nameKey);
+      idToDistinctNames.set(idKey, set);
+    });
+
+    const nonUniqueIds = new Set<string>();
+    for (const [idKey, names] of idToDistinctNames.entries()) {
+      if (names.size > 1) nonUniqueIds.add(idKey);
+    }
+
+    const seenIds = new Set<string>();
+    const seenExactSignatures = new Set<string>();
+    const seenMatchedExistingIds = new Set<string>();
+
+    return preliminary.map(({ normalized, raw, origIndex }) => {
+      const idColHeader = columnMapping.studentId;
+      if (normalized.studentId && nonUniqueIds.has(normalized.studentId.trim().toLowerCase())) {
+        if (idColHeader && raw[idColHeader]) {
+          const cleanKey = idColHeader.trim().slice(0, 50);
+          if (cleanKey && normalized.extraColumns[cleanKey] === undefined && Object.keys(normalized.extraColumns).length < 35) {
+            normalized.extraColumns[cleanKey] = String(raw[idColHeader]).trim().slice(0, 300);
+          }
+        }
+        normalized.studentId = '';
+      }
+
       let matchedExisting: Student | null = null;
       if (importMode !== 'replace_all') {
         if (normalized.studentId) {
           matchedExisting = existingById.get(normalized.studentId.toLowerCase()) || null;
         }
-        if (
-          !matchedExisting &&
+        const normNameLower = normalized.studentName.trim().toLowerCase();
+        const hasValidPhone =
           normalized.mobileNumber.length >= 7 &&
-          normalized.mobileNumber.toLowerCase() !== 'not provided'
-        ) {
+          normalized.mobileNumber.toLowerCase() !== 'not provided';
+
+        if (!matchedExisting && hasValidPhone && normNameLower.length >= 2) {
           matchedExisting =
-            existingByCentreMobile.get(`${normalized.centreId}::${normalized.mobileNumber}`) || null;
-        }
-        if (!matchedExisting && normalized.studentName.length >= 2) {
-          const nameMatch =
-            existingUniqueByCentreName.get(
-              `${normalized.centreId}::${normalized.studentName.toLowerCase()}`,
+            existingByCentreNameMobile.get(
+              `${normalized.centreId}::${normNameLower}::${normalized.mobileNumber}`,
             ) || null;
+        }
+
+        if (!matchedExisting && hasValidPhone && normNameLower.length >= 2) {
+          const candidates =
+            existingMobileListByCentre.get(`${normalized.centreId}::${normalized.mobileNumber}`) || [];
+          if (candidates.length === 1) {
+            const cand = candidates[0];
+            const candNameLower = cand.studentName.trim().toLowerCase();
+            const firstA = getFirstNameToken(normNameLower);
+            const firstB = getFirstNameToken(candNameLower);
+            if (
+              (firstA.length >= 3 && firstA === firstB) ||
+              normNameLower.includes(candNameLower) ||
+              candNameLower.includes(normNameLower)
+            ) {
+              matchedExisting = cand;
+            }
+          }
+        }
+
+        if (!matchedExisting && normNameLower.length >= 2) {
+          const nameMatch =
+            existingUniqueByCentreName.get(`${normalized.centreId}::${normNameLower}`) || null;
           if (
             nameMatch &&
-            (normalized.mobileNumber === 'Not Provided' || nameMatch.mobileNumber === normalized.mobileNumber)
+            (normalized.mobileNumber === 'Not Provided' ||
+              nameMatch.mobileNumber === 'Not Provided' ||
+              nameMatch.mobileNumber === normalized.mobileNumber)
           ) {
             matchedExisting = nameMatch;
           }
         }
       }
 
+      // If another row in the sheet already claimed this existing DB student, treat subsequent row as new instead of double-updating
+      if (matchedExisting && allowDuplicateRowsInSheet && seenMatchedExistingIds.has(matchedExisting.studentId)) {
+        matchedExisting = null;
+        normalized.studentId = '';
+      }
+      if (matchedExisting) {
+        seenMatchedExistingIds.add(matchedExisting.studentId);
+      }
+
       let duplicateReason: string | null = null;
       const sheetIdKey = (matchedExisting?.studentId || normalized.studentId).toLowerCase();
-      if (sheetIdKey) {
+      if (!allowDuplicateRowsInSheet && sheetIdKey) {
         if (seenIds.has(sheetIdKey)) {
           duplicateReason = `Duplicate Student ID "${matchedExisting?.studentId || normalized.studentId}" in sheet.`;
         }
         seenIds.add(sheetIdKey);
       }
+
+      // Check identical twin rows in sheet (only treat as duplicate if Name + Mobile + Subject + Fees all match)
       if (
+        !allowDuplicateRowsInSheet &&
         !duplicateReason &&
+        normalized.studentName.trim().length >= 2 &&
         normalized.mobileNumber.length >= 7 &&
         normalized.mobileNumber.toLowerCase() !== 'not provided'
       ) {
-        const mobKey = `${normalized.centreId}::${normalized.mobileNumber}`;
-        if (seenCentreMobiles.has(mobKey)) {
-          duplicateReason = `Duplicate mobile ${maskMobileNumber(normalized.mobileNumber)} in sheet.`;
+        const sig = `${normalized.centreId}::${normalized.studentName.trim().toLowerCase()}::${normalized.mobileNumber}::${normalized.totalFee}::${normalized.paidAmount}::${normalized.subject.trim().toLowerCase()}`;
+        if (seenExactSignatures.has(sig)) {
+          duplicateReason = `Duplicate row "${normalized.studentName}" (${maskMobileNumber(normalized.mobileNumber)}) in sheet.`;
         }
-        seenCentreMobiles.add(mobKey);
+        seenExactSignatures.add(sig);
       }
 
       if (!duplicateReason && matchedExisting && importMode === 'skip_duplicates') {
         duplicateReason = `Already exists (#${matchedExisting.serialNumber} ${matchedExisting.studentName}).`;
       }
 
-      // Centre Head can only update students belonging to their own centre
       if (
         !duplicateReason &&
         matchedExisting &&
@@ -236,22 +386,26 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
       const operation: 'create' | 'update' =
         matchedExisting && importMode === 'upsert' ? 'update' : 'create';
 
-      return { ...normalized, duplicateReason, matchedExisting, operation, raw };
+      return { ...normalized, origIndex, duplicateReason, matchedExisting, operation, raw };
     });
   }, [
     activeRawRows,
+    activeRowColors,
     fallbackCentre,
     isSuperAdmin,
     autoDetectCentre,
     columnMapping,
     allowMissingMobile,
+    allowDuplicateRowsInSheet,
     defaultTotalFee,
     importMode,
     editedOverrides,
     existingById,
-    existingByCentreMobile,
+    existingByCentreNameMobile,
+    existingMobileListByCentre,
     existingUniqueByCentreName,
     currentUser.centreId,
+    commonExtraHeadings,
   ]);
 
   const readyRows = useMemo(
@@ -270,16 +424,35 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
     () => previewRows.filter((r) => r.validationError || r.duplicateReason),
     [previewRows],
   );
+  const duplicateIssueCount = useMemo(
+    () => previewRows.filter((r) => !r.validationError && Boolean(r.duplicateReason)).length,
+    [previewRows],
+  );
+  const filteredPreviewRows = useMemo(() => {
+    if (previewFilter === 'ready') return readyRows;
+    if (previewFilter === 'issues') return issueRows;
+    return previewRows;
+  }, [previewFilter, previewRows, readyRows, issueRows]);
+  const visiblePreviewRows = useMemo(() => {
+    if (showAllPreviewRows || filteredPreviewRows.length <= 500) return filteredPreviewRows;
+    return filteredPreviewRows.slice(0, 150);
+  }, [filteredPreviewRows, showAllPreviewRows]);
+  const coloredRowsCount = useMemo(
+    () =>
+      readyRows.filter((r) => Boolean(r.rowColor) || Object.keys(r.cellColors).length > 0).length,
+    [readyRows],
+  );
 
   const feeSummary = useMemo(() => {
     const total = readyRows.reduce((s, r) => s + r.totalFee, 0);
     const paid = readyRows.reduce((s, r) => s + r.paidAmount, 0);
     const pending = readyRows.reduce((s, r) => s + r.pendingAmount, 0);
+    const tmaFee = readyRows.reduce((s, r) => s + r.tmaFee, 0);
+    const examFee = readyRows.reduce((s, r) => s + r.examFee, 0);
     const pct = total > 0 ? Math.round((paid / total) * 100) : 0;
-    return { total, paid, pending, pct };
+    return { total, paid, pending, tmaFee, examFee, pct };
   }, [readyRows]);
 
-  // Columns beyond Student Name & Mobile No to render the full Excel spreadsheet preview
   const extraPreviewHeaders = useMemo(
     () =>
       activeHeaders.filter(
@@ -288,28 +461,54 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
     [activeHeaders, columnMapping.studentName, columnMapping.mobileNumber],
   );
 
+  const columnSampleMap = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const h of activeHeaders) {
+      for (const row of activeRawRows.slice(0, 20)) {
+        const val = String(row[h] ?? '').trim();
+        if (val) {
+          map.set(h, val.slice(0, 24));
+          break;
+        }
+      }
+    }
+    return map;
+  }, [activeHeaders, activeRawRows]);
+
+  const commonTemplateHeaders = useMemo(() => {
+    const baseHeaders = [
+      'Student Name',
+      'Mobile No',
+      'Centre',
+      'Subjects',
+      'TMA',
+      'Practical',
+      'Attendance (Live Classes)',
+      'TC Status',
+      'Book Status',
+      'Examination',
+      'Admission Date',
+      'Total Fee',
+      'Paid Amount',
+      'TMA Fee',
+      'Exam Fee',
+      'Additional Remarks',
+    ];
+    const baseLower = new Set(baseHeaders.map((h) => h.toLowerCase()));
+    const extraCommon = commonExtraHeadings.filter((h) => !baseLower.has(h.toLowerCase()));
+    return {
+      headers: [...baseHeaders, ...extraCommon],
+      extraCount: extraCommon.length,
+    };
+  }, [commonExtraHeadings]);
+
   if (!open) return null;
 
   const handleDownloadExcelTemplate = () => {
     exportToExcel(
       'vision-point-student-import-template.xlsx',
       'Students',
-      [
-        'Student Name',
-        'Mobile No',
-        'Centre',
-        'Subjects',
-        'TMA',
-        'Practical',
-        'Attendance (Live Classes)',
-        'TC Status',
-        'Book Status',
-        'Examination',
-        'Admission Date',
-        'Total Fee',
-        'Paid Amount',
-        'Additional Remarks',
-      ],
+      commonTemplateHeaders.headers,
       [
         [
           'Aarav Sharma',
@@ -318,14 +517,17 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
           'English, Mathematics, Science, Social Science, Hindi',
           'Submitted',
           'Pending',
-          'Regular',
+          'Not Attending',
           'Received',
           'Received',
           'Not Completed',
           new Date().toISOString().slice(0, 10),
           12000,
           6000,
+          500,
+          1500,
           'Sample Student Row',
+          ...Array.from({ length: commonTemplateHeaders.extraCount }, () => ''),
         ],
       ],
     );
@@ -334,22 +536,7 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
   const handleDownloadCsvTemplate = () => {
     exportToCsv(
       'vision-point-student-import-template.csv',
-      [
-        'Student Name',
-        'Mobile No',
-        'Centre',
-        'Subjects',
-        'TMA',
-        'Practical',
-        'Attendance (Live Classes)',
-        'TC Status',
-        'Book Status',
-        'Examination',
-        'Admission Date',
-        'Total Fee',
-        'Paid Amount',
-        'Additional Remarks',
-      ],
+      commonTemplateHeaders.headers,
       [
         [
           'Aarav Sharma',
@@ -358,14 +545,17 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
           'English, Mathematics, Science, Social Science, Hindi',
           'Submitted',
           'Pending',
-          'Regular',
+          'Not Attending',
           'Received',
           'Received',
           'Not Completed',
           new Date().toISOString().slice(0, 10),
           12000,
           6000,
+          500,
+          1500,
           'Sample Student Row',
+          ...Array.from({ length: commonTemplateHeaders.extraCount }, () => ''),
         ],
       ],
     );
@@ -394,6 +584,9 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
     setParseError(null);
     setImportError(null);
     setEditedOverrides({});
+    setIncludeExcludedRows(false);
+    setAllowDuplicateRowsInSheet(false);
+    setPreviewFilter('all');
     setParsing(true);
     try {
       const result = await parseSpreadsheetFile(file);
@@ -404,13 +597,71 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
         setSheetNames([]);
         setRawSheets({});
         setHeadersBySheet({});
+        setRowColorsBySheet({});
+        setSummaryRowsFilteredBySheet({});
+        setExcludedSummaryRowsBySheet({});
         setActiveSheet('');
         setColumnMapping({});
       } else {
-        setSheetNames(result.sheetNames);
-        setRawSheets(result.sheets);
-        setHeadersBySheet(result.headersBySheet);
-        applySheetSelection(result.sheetNames[0], result.sheets, result.headersBySheet);
+        const nextSheets = { ...result.sheets };
+        const nextHeaders = { ...result.headersBySheet };
+        const nextColors = { ...(result.rowColorsBySheet || {}) };
+        const nextFiltered = { ...(result.summaryRowsFilteredBySheet || {}) };
+        const nextExcluded = { ...(result.excludedSummaryRowsBySheet || {}) };
+        let selectableNames = [...result.sheetNames];
+        let initialSheet = result.sheetNames[0];
+
+        if (result.sheetNames.length > 1) {
+          const allRows: Array<Record<string, string>> = [];
+          const allColors: Array<Record<string, string>> = [];
+          const allExcluded: ExcludedSummaryRow[] = [];
+          const unionHeaders: string[] = [];
+          const headerSet = new Set<string>();
+          let totalSummaryFiltered = 0;
+
+          const firstSet = new Set(result.headersBySheet[result.sheetNames[0]] || []);
+          let overlapSum = 0;
+
+          result.sheetNames.forEach((sName) => {
+            const sRows = result.sheets[sName] || [];
+            const sCols = result.rowColorsBySheet?.[sName] || [];
+            const sHdrs = result.headersBySheet[sName] || [];
+            const sExcl = result.excludedSummaryRowsBySheet?.[sName] || [];
+            sHdrs.forEach((h) => {
+              if (!headerSet.has(h)) {
+                headerSet.add(h);
+                unionHeaders.push(h);
+              }
+            });
+            const shared = sHdrs.filter((h) => firstSet.has(h)).length;
+            overlapSum += sHdrs.length > 0 ? shared / sHdrs.length : 0;
+
+            sRows.forEach((r, rIdx) => {
+              allRows.push(r);
+              allColors.push(sCols[rIdx] || {});
+            });
+            sExcl.forEach((ex) => allExcluded.push(ex));
+            totalSummaryFiltered += result.summaryRowsFilteredBySheet?.[sName] || 0;
+          });
+
+          nextSheets[ALL_SHEETS_KEY] = allRows;
+          nextHeaders[ALL_SHEETS_KEY] = unionHeaders;
+          nextColors[ALL_SHEETS_KEY] = allColors;
+          nextFiltered[ALL_SHEETS_KEY] = totalSummaryFiltered;
+          nextExcluded[ALL_SHEETS_KEY] = allExcluded;
+          selectableNames = [ALL_SHEETS_KEY, ...result.sheetNames];
+          if (overlapSum / result.sheetNames.length >= 0.6) {
+            initialSheet = ALL_SHEETS_KEY;
+          }
+        }
+
+        setSheetNames(selectableNames);
+        setRawSheets(nextSheets);
+        setHeadersBySheet(nextHeaders);
+        setRowColorsBySheet(nextColors);
+        setSummaryRowsFilteredBySheet(nextFiltered);
+        setExcludedSummaryRowsBySheet(nextExcluded);
+        applySheetSelection(initialSheet, nextSheets, nextHeaders);
       }
     } catch (err) {
       setParseError(
@@ -421,6 +672,9 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
       setSheetNames([]);
       setRawSheets({});
       setHeadersBySheet({});
+      setRowColorsBySheet({});
+      setSummaryRowsFilteredBySheet({});
+      setExcludedSummaryRowsBySheet({});
       setActiveSheet('');
       setColumnMapping({});
     } finally {
@@ -452,12 +706,16 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
         });
       }
 
-      setImportStatusText(`Syncing ${readyRows.length} students & fees...`);
+      setImportStatusText(`Syncing 0/${readyRows.length} students & fees...`);
       let nextSerial = shouldReplace ? 1 : await getNextSerialNumber(existingStudents);
       const year = new Date().getFullYear();
+      const usedPayloadIds = new Set<string>(
+        shouldReplace ? [] : existingStudents.map((s) => s.studentId.toLowerCase()),
+      );
 
       const payloads: BulkImportRowPayload[] = readyRows.map((row) => {
         if (row.operation === 'update' && row.matchedExisting) {
+          usedPayloadIds.add(row.matchedExisting.studentId.toLowerCase());
           return {
             operation: 'update',
             serialNumber: row.matchedExisting.serialNumber,
@@ -484,21 +742,37 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
             totalFee: row.totalFee,
             paidAmount: row.paidAmount,
             pendingAmount: row.pendingAmount,
+            tmaFee: row.tmaFee,
+            examFee: row.examFee,
             recoveryStatus: row.recoveryStatus,
             followUpStatus: row.followUpStatus,
             explicitFeeDetected: row.explicitFeeDetected,
+            explicitTmaFeeDetected: row.explicitTmaFeeDetected,
+            explicitExamFeeDetected: row.explicitExamFeeDetected,
             extraColumns: row.extraColumns,
+            rowColor: row.rowColor,
+            cellColors: row.cellColors,
           };
         }
 
         const serialNumber = nextSerial++;
-        const sid =
-          row.studentId && /^[a-zA-Z0-9_-]+$/.test(row.studentId)
-            ? row.studentId
-            : `${CENTRE_MAP[row.centreId].code}-${year}-${String(serialNumber).padStart(4, '0')}-${Math.random()
-                .toString(36)
-                .slice(2, 5)
-                .toUpperCase()}`;
+        const canReuseRawId =
+          Boolean(row.studentId) &&
+          /^[a-zA-Z0-9_-]+$/.test(row.studentId) &&
+          !usedPayloadIds.has(row.studentId.toLowerCase());
+        let sid = canReuseRawId
+          ? row.studentId
+          : `${CENTRE_MAP[row.centreId].code}-${year}-${String(serialNumber).padStart(4, '0')}-${Math.random()
+              .toString(36)
+              .slice(2, 5)
+              .toUpperCase()}`;
+        while (usedPayloadIds.has(sid.toLowerCase())) {
+          sid = `${CENTRE_MAP[row.centreId].code}-${year}-${String(serialNumber).padStart(4, '0')}-${Math.random()
+            .toString(36)
+            .slice(2, 6)
+            .toUpperCase()}`;
+        }
+        usedPayloadIds.add(sid.toLowerCase());
 
         return {
           operation: 'create',
@@ -523,14 +797,22 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
           totalFee: row.totalFee,
           paidAmount: row.paidAmount,
           pendingAmount: row.pendingAmount,
+          tmaFee: row.tmaFee,
+          examFee: row.examFee,
           recoveryStatus: row.recoveryStatus,
           followUpStatus: row.followUpStatus,
           explicitFeeDetected: row.explicitFeeDetected,
+          explicitTmaFeeDetected: row.explicitTmaFeeDetected,
+          explicitExamFeeDetected: row.explicitExamFeeDetected,
           extraColumns: row.extraColumns,
+          rowColor: row.rowColor,
+          cellColors: row.cellColors,
         };
       });
 
-      const result = await bulkImportStudentsBatch(payloads, currentUser, true);
+      const result = await bulkImportStudentsBatch(payloads, currentUser, true, {
+        onProgress: (done, total) => setImportStatusText(`Syncing ${done}/${total} students & fees...`),
+      });
       const totalSkipped = issueRows.length + result.failedRows.length;
 
       if (result.importedCount === 0 && result.updatedCount === 0 && result.failedRows.length > 0) {
@@ -538,13 +820,58 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
         setImportError(errMsg);
         onError('Import Rejected', errMsg);
       } else {
+        const blankAndHeadingOnlyCols = extractBlankAndSparseSheetHeadings(
+          activeHeaders,
+          columnMapping,
+          activeRawRows,
+          fallbackCentre,
+        );
+        if (
+          blankAndHeadingOnlyCols.length > 0 &&
+          (currentUser.role === 'super_admin' || currentUser.role === 'centre_head')
+        ) {
+          await mergeCustomColumnsIntoSharedConfig(
+            blankAndHeadingOnlyCols,
+            currentUser,
+            `Preserved heading-only/blank columns from ${fileName || 'Excel import'}`,
+          ).catch(() => {});
+        }
+
+        const lkgImportedKeys: string[] = [];
+        const lkgSeen = new Set<string>();
+        for (const row of readyRows) {
+          if (row.centreId !== 'vp_lookerganj') continue;
+          for (const k of Object.keys(row.extraColumns)) {
+            if (!lkgSeen.has(k)) {
+              lkgSeen.add(k);
+              lkgImportedKeys.push(k);
+            }
+          }
+        }
+        if (lkgImportedKeys.length > 0) {
+          const merged = [...lkgImportedKeys];
+          for (const oldKey of loadStoredCommonBranchHeaders()) {
+            if (!lkgSeen.has(oldKey)) {
+              lkgSeen.add(oldKey);
+              merged.push(oldKey);
+            }
+          }
+          saveCommonBranchHeaders(merged);
+        }
+
         onSuccess(
-          `Excel sync complete: ${result.importedCount} new added, ${result.updatedCount} existing updated (fees & graphs synced)${
+          `Excel sync complete: ${result.importedCount} new added, ${result.updatedCount} existing updated (colors, fees & graphs synced)${
             totalSkipped > 0 ? `, ${totalSkipped} skipped` : ''
           }.`,
         );
         setRawSheets({});
         setHeadersBySheet({});
+        setRowColorsBySheet({});
+        setSummaryRowsFilteredBySheet({});
+        setExcludedSummaryRowsBySheet({});
+        setIncludeExcludedRows(false);
+        setAllowDuplicateRowsInSheet(false);
+        setPreviewFilter('all');
         setSheetNames([]);
         setActiveSheet('');
         setFileName('');
@@ -573,7 +900,7 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
               Bulk Excel &amp; CSV Student Import
             </h3>
             <p className="text-xs text-slate-200/85 mt-0.5">
-              Supports <strong className="text-white">.xlsx, .xls, .ods, .csv</strong> (any custom Excel columns preserved!) ·{' '}
+              Supports <strong className="text-white">.xlsx, .xls, .ods, .csv</strong> (all Excel columns &amp; cell colours preserved!) ·{' '}
               {isSuperAdmin ? (
                 <span>Super Admin Mode: Multi-centre Excel supported</span>
               ) : (
@@ -595,7 +922,7 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
             <div className="flex items-center gap-2.5 text-xs text-slate-700">
               <FileSpreadsheet className="w-4 h-4 text-[#B45309] shrink-0" />
               <span>
-                Upload your existing Excel sheet directly — all columns open in the live sheet &amp; save to Firestore.
+                Upload your existing Excel sheet directly — all rows, columns, fees &amp; row/cell colours save to Firestore.
               </span>
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -699,8 +1026,8 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
             </span>
             <span className="text-xs text-slate-600 mt-0.5">
               {previewRows.length > 0
-                ? `${previewRows.length} rows found · ${activeHeaders.length} columns · ${newReadyCount} new + ${updateReadyCount} updates`
-                : 'Auto-detects Paid (Jama), Pending (Baki), Total Fee & all custom columns'}
+                ? `${previewRows.length} student rows · ${activeHeaders.length} columns · ${newReadyCount} new + ${updateReadyCount} updates`
+                : 'Auto-detects Paid (Jama), Pending (Baki), Total Fee, Excel Colours & custom columns'}
             </span>
             <input
               type="file"
@@ -724,15 +1051,15 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
           {activeRawRows.length > 0 && (
             <div className="space-y-3">
               {/* Mathematical Fee & Sync Detection Banner */}
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 p-3 rounded-xl bg-slate-900 text-white text-xs">
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-2.5 p-3 rounded-xl bg-slate-900 text-white text-xs">
                 <div>
                   <p className="text-[10px] uppercase tracking-wider text-slate-300">Rows to Sync</p>
                   <p className="font-mono font-bold text-sm mt-0.5">
-                    {newReadyCount} New · {updateReadyCount} Update
+                    {newReadyCount} New · {updateReadyCount} Upd
                   </p>
                 </div>
                 <div>
-                  <p className="text-[10px] uppercase tracking-wider text-slate-300">Detected Total Fee</p>
+                  <p className="text-[10px] uppercase tracking-wider text-slate-300">Total Fee</p>
                   <p className="font-mono font-bold text-sm mt-0.5">₹{feeSummary.total.toLocaleString('en-IN')}</p>
                 </div>
                 <div>
@@ -748,7 +1075,19 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                   </p>
                 </div>
                 <div>
-                  <p className="text-[10px] uppercase tracking-wider text-amber-300">Collection Rate</p>
+                  <p className="text-[10px] uppercase tracking-wider text-amber-300">TMA Fees</p>
+                  <p className="font-mono font-bold text-sm text-amber-300 mt-0.5">
+                    ₹{feeSummary.tmaFee.toLocaleString('en-IN')}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-sky-300">Exam Fees</p>
+                  <p className="font-mono font-bold text-sm text-sky-300 mt-0.5">
+                    ₹{feeSummary.examFee.toLocaleString('en-IN')}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-amber-300">Collection</p>
                   <p className="font-mono font-bold text-sm text-[#FBBF24] mt-0.5">{feeSummary.pct}%</p>
                 </div>
               </div>
@@ -756,15 +1095,75 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
               {/* Toolbar */}
               <div className="flex flex-wrap items-center justify-between gap-2.5">
                 <div className="flex flex-wrap items-center gap-2 text-xs">
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200 font-bold">
+                  <button
+                    type="button"
+                    onClick={() => setPreviewFilter('all')}
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border font-bold transition-colors ${
+                      previewFilter === 'all'
+                        ? 'bg-[#0F172A] text-white border-[#0F172A]'
+                        : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    All ({previewRows.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPreviewFilter((f) => (f === 'ready' ? 'all' : 'ready'))}
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border font-bold transition-colors ${
+                      previewFilter === 'ready'
+                        ? 'bg-emerald-700 text-white border-emerald-700'
+                        : 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+                    }`}
+                  >
                     <CheckCircle2 className="w-3.5 h-3.5" />
                     {readyRows.length} Ready
-                  </span>
-                  {issueRows.length > 0 && (
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-50 text-amber-900 border border-amber-200 font-bold">
-                      <AlertCircle className="w-3.5 h-3.5" />
-                      {issueRows.length} Skipped / Fix Needed
+                  </button>
+                  {coloredRowsCount > 0 && (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 text-indigo-900 border border-indigo-200 font-bold">
+                      {coloredRowsCount} Colored Rows Detected
                     </span>
+                  )}
+                  {(activeSummaryFiltered > 0 || (includeExcludedRows && activeExcludedRows.length > 0)) && (
+                    <button
+                      type="button"
+                      onClick={() => setIncludeExcludedRows((v) => !v)}
+                      title="Click to include or exclude detected summary/footer row"
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border font-semibold transition-colors ${
+                        includeExcludedRows
+                          ? 'bg-emerald-50 text-emerald-900 border-emerald-300'
+                          : 'bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200'
+                      }`}
+                    >
+                      {includeExcludedRows
+                        ? `Included ${activeExcludedRows.length} Footer Row (Click to Exclude)`
+                        : `${activeSummaryFiltered} Footer Total Row Excluded (Click to Include)`}
+                    </button>
+                  )}
+                  {issueRows.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setPreviewFilter((f) => (f === 'issues' ? 'all' : 'issues'))}
+                      title="Click to inspect all skipped rows and fix or include them"
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border font-bold transition-colors ${
+                        previewFilter === 'issues'
+                          ? 'bg-amber-600 text-white border-amber-600'
+                          : 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100'
+                      }`}
+                    >
+                      <AlertCircle className="w-3.5 h-3.5" />
+                      {issueRows.length} Skipped / Fix Needed (Click to View)
+                    </button>
+                  )}
+                  {(duplicateIssueCount > 0 || allowDuplicateRowsInSheet) && (
+                    <label className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-50 text-rose-900 border border-rose-200 font-bold cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={allowDuplicateRowsInSheet}
+                        onChange={(e) => setAllowDuplicateRowsInSheet(e.target.checked)}
+                        className="rounded border-rose-300 text-[#B91C1C]"
+                      />
+                      Import All Repeat/Duplicate Rows ({duplicateIssueCount > 0 ? `+${duplicateIssueCount}` : 'All'})
+                    </label>
                   )}
                   <label className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 text-[#08152E] border border-slate-200 font-semibold cursor-pointer">
                     <input
@@ -799,7 +1198,9 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                     >
                       {sheetNames.map((s) => (
                         <option key={s} value={s}>
-                          Sheet: {s} ({(rawSheets[s] || []).length} rows)
+                          {s === ALL_SHEETS_KEY
+                            ? `All Sheets Combined (${(rawSheets[s] || []).length} rows)`
+                            : `Sheet: ${s} (${(rawSheets[s] || []).length} rows)`}
                         </option>
                       ))}
                     </select>
@@ -810,16 +1211,22 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
               {/* Interactive Column Mapper */}
               {(showColumnMapper || !columnMapping.studentName) && (
                 <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-300 space-y-2.5">
-                  <div className="flex items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="text-xs font-bold text-[#08152E]">
-                      Column Mapping (All other Excel columns up to 35 are also preserved!)
+                      Smart Auto-Mapped Columns (all Excel columns up to 35 are also preserved)
                     </p>
+                    {commonExtraHeadings.length > 0 && (
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-[11px] font-bold text-emerald-800">
+                        Common Lookerganj Headings Synced ({commonExtraHeadings.length})
+                      </span>
+                    )}
                   </div>
                   <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
                     {(
                       [
                         { key: 'studentName', label: 'Student Name *' },
                         { key: 'mobileNumber', label: 'Mobile No' },
+                        { key: 'studentId', label: 'Unique ID / Enrol' },
                         { key: 'centre', label: 'Centre / Branch' },
                         { key: 'subject', label: 'Subjects / Course' },
                         { key: 'tmaStatus', label: 'TMA Status' },
@@ -828,8 +1235,11 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                         { key: 'totalFee', label: 'Total Fee' },
                         { key: 'paidAmount', label: 'Paid (Jama)' },
                         { key: 'pendingAmount', label: 'Pending (Baki)' },
+                        { key: 'tmaFee', label: 'TMA Fee' },
+                        { key: 'examFee', label: 'Exam Fee' },
                         { key: 'feeStatus', label: 'Fee Status' },
                         { key: 'admissionDate', label: 'Admission Date' },
+                        { key: 'additionalRemarks', label: 'Remarks / Notes' },
                       ] as Array<{ key: keyof ExcelColumnMapping; label: string }>
                     ).map((field) => (
                       <div key={field.key}>
@@ -847,15 +1257,142 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                           className="w-full px-2 py-1.5 text-xs bg-white border border-slate-300 rounded-lg text-[#08152E] font-medium"
                         >
                           <option value="">-- Auto / None --</option>
-                          {activeHeaders.map((h) => (
-                            <option key={h} value={h}>
-                              {h}
-                            </option>
-                          ))}
+                          {activeHeaders.map((h) => {
+                            const sample = columnSampleMap.get(h);
+                            return (
+                              <option key={h} value={h}>
+                                {sample ? `${h} (e.g. ${sample})` : h}
+                              </option>
+                            );
+                          })}
                         </select>
                       </div>
                     ))}
                   </div>
+                </div>
+              )}
+
+              {/* Auto-surfaced Inspector for Any Skipped / Excluded Rows */}
+              {(issueRows.length > 0 || (!includeExcludedRows && activeExcludedRows.length > 0)) && (
+                <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 space-y-2.5 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 font-bold text-amber-950">
+                      <AlertCircle className="w-4 h-4 text-amber-700 shrink-0" />
+                      <span>
+                        Why {issueRows.length + (!includeExcludedRows ? activeExcludedRows.length : 0)} row(s) are not yet in Ready ({readyRows.length}):
+                      </span>
+                    </div>
+                    {!includeExcludedRows && activeExcludedRows.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setIncludeExcludedRows(true)}
+                        className="px-2.5 py-1 text-[11px] font-bold bg-emerald-700 text-white rounded-lg hover:bg-emerald-800"
+                      >
+                        Include {activeExcludedRows.length} Footer Row
+                      </button>
+                    )}
+                  </div>
+
+                  {issueRows.slice(0, 10).map((row) => {
+                    const rowOrigIdx = row.origIndex;
+                    const errReason = row.validationError || row.duplicateReason || 'Needs attention';
+                    const filledCells = Object.entries(row.raw)
+                      .map(([k, v]) => [k, String(v ?? '').trim()] as const)
+                      .filter(([, v]) => v.length > 0);
+                    const suggestedFallback =
+                      filledCells.find(([k, v]) => /father|guardian|candidate|name|remark/i.test(k) && v.length >= 2)?.[1] ||
+                      `Student #${row.rowIndex}`;
+
+                    return (
+                      <div
+                        key={`issue-${rowOrigIdx}`}
+                        className="p-2.5 rounded-lg bg-white border border-amber-200 flex flex-col lg:flex-row lg:items-center justify-between gap-2"
+                      >
+                        <div className="space-y-1 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-950 font-mono font-bold">
+                              Row #{row.rowIndex}
+                            </span>
+                            <span className="font-bold text-rose-700">{errReason}</span>
+                          </div>
+                          <p className="text-[11px] text-slate-600 truncate">
+                            {filledCells.length > 0
+                              ? filledCells
+                                  .slice(0, 8)
+                                  .map(([k, v]) => `${k}: ${v}`)
+                                  .join(' · ')
+                              : 'Empty row'}
+                          </p>
+                        </div>
+
+                        {row.validationError?.includes('Student Name') && (
+                          <div className="flex flex-wrap items-center gap-2 shrink-0">
+                            <input
+                              type="text"
+                              value={editedOverrides[rowOrigIdx]?.studentName ?? row.studentName}
+                              onChange={(e) =>
+                                setEditedOverrides((prev) => ({
+                                  ...prev,
+                                  [rowOrigIdx]: { ...prev[rowOrigIdx], studentName: e.target.value },
+                                }))
+                              }
+                              placeholder="Type Student Name..."
+                              className="px-2.5 py-1 text-xs bg-white border border-amber-400 rounded-lg font-semibold text-[#08152E] w-44"
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setEditedOverrides((prev) => ({
+                                  ...prev,
+                                  [rowOrigIdx]: {
+                                    ...prev[rowOrigIdx],
+                                    studentName: suggestedFallback.slice(0, 120),
+                                  },
+                                }))
+                              }
+                              className="px-2.5 py-1 text-[11px] font-bold bg-[#0F2F6B] text-white rounded-lg hover:bg-[#172554]"
+                            >
+                              Auto-Fix (&ldquo;{suggestedFallback.slice(0, 18)}&rdquo;)
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  {!includeExcludedRows &&
+                    activeExcludedRows.slice(0, 3).map((ex, exIdx) => {
+                      const exCells = Object.entries(ex.row)
+                        .map(([k, v]) => [k, String(v ?? '').trim()] as const)
+                        .filter(([, v]) => v.length > 0);
+                      return (
+                        <div
+                          key={`excl-${exIdx}`}
+                          className="p-2.5 rounded-lg bg-white/90 border border-slate-300 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                        >
+                          <div className="space-y-0.5 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="px-1.5 py-0.5 rounded bg-slate-200 text-slate-800 font-bold text-[10px] uppercase">
+                                Auto-Excluded Footer / Summary Row
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-slate-700 truncate">
+                              {exCells
+                                .slice(0, 8)
+                                .map(([k, v]) => `${k}: ${v}`)
+                                .join(' · ')}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setIncludeExcludedRows(true)}
+                            className="px-2.5 py-1 text-[11px] font-bold bg-slate-800 text-white rounded-lg hover:bg-slate-900 shrink-0"
+                          >
+                            Include If Student
+                          </button>
+                        </div>
+                      );
+                    })}
                 </div>
               )}
 
@@ -885,6 +1422,12 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                           Pending (Baki)
                         </th>
                         <th className="px-2.5 py-2 font-semibold border-r border-slate-700 whitespace-nowrap bg-[#172554]">
+                          TMA Fee
+                        </th>
+                        <th className="px-2.5 py-2 font-semibold border-r border-slate-700 whitespace-nowrap bg-[#172554]">
+                          Exam Fee
+                        </th>
+                        <th className="px-2.5 py-2 font-semibold border-r border-slate-700 whitespace-nowrap bg-[#172554]">
                           Fee Status
                         </th>
                         {extraPreviewHeaders.map((h) => (
@@ -892,46 +1435,74 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                             key={h}
                             className="px-2.5 py-2 font-semibold border-r border-slate-700 whitespace-nowrap bg-[#1E293B]"
                           >
-                            {h}
+                            {alignHeaderToCommonSchema(h, commonExtraHeadings)}
                           </th>
                         ))}
                         <th className="px-2.5 py-2 font-semibold whitespace-nowrap">Sync Action</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200 bg-white">
-                      {previewRows.slice(0, 150).map((row, idx) => {
+                      {visiblePreviewRows.map((row) => {
+                        const rowOrigIdx = row.origIndex;
                         const errMsg = row.validationError || row.duplicateReason;
+                        const getCellPreviewStyle = (fieldKey: string): React.CSSProperties | undefined => {
+                          const bg = row.cellColors?.[fieldKey] || row.rowColor;
+                          if (!bg) return undefined;
+                          return { backgroundColor: bg, color: getReadableTextColor(bg) };
+                        };
                         return (
                           <tr
-                            key={`${idx}-${row.studentId}`}
-                            className={errMsg ? 'bg-amber-50/75' : row.operation === 'update' ? 'bg-sky-50/50 hover:bg-sky-50' : 'hover:bg-slate-50'}
+                            key={`${rowOrigIdx}-${row.studentId}`}
+                            style={
+                              !errMsg && row.rowColor
+                                ? { backgroundColor: row.rowColor, color: getReadableTextColor(row.rowColor) }
+                                : undefined
+                            }
+                            className={
+                              errMsg
+                                ? 'bg-amber-50/75'
+                                : row.rowColor
+                                  ? ''
+                                  : row.operation === 'update'
+                                    ? 'bg-sky-50/50 hover:bg-sky-50'
+                                    : 'hover:bg-slate-50'
+                            }
                           >
-                            <td className="px-2.5 py-1.5 font-mono text-slate-500 border-r border-slate-200">
+                            <td
+                              style={getCellPreviewStyle('serialNumber')}
+                              className="px-2.5 py-1.5 font-mono text-slate-500 border-r border-slate-200"
+                            >
                               {row.rowIndex}
                             </td>
-                            <td className="px-2 py-1 border-r border-slate-200">
+                            <td
+                              style={getCellPreviewStyle('studentName')}
+                              className="px-2 py-1 border-r border-slate-200"
+                            >
                               <input
                                 type="text"
-                                value={editedOverrides[idx]?.studentName ?? row.studentName}
+                                value={editedOverrides[rowOrigIdx]?.studentName ?? row.studentName}
                                 onChange={(e) =>
                                   setEditedOverrides((prev) => ({
                                     ...prev,
-                                    [idx]: { ...prev[idx], studentName: e.target.value },
+                                    [rowOrigIdx]: { ...prev[rowOrigIdx], studentName: e.target.value },
                                   }))
                                 }
                                 placeholder="Enter Name"
-                                className="w-full px-2 py-1 text-xs bg-white border border-slate-200 rounded focus:border-[#0F2F6B] focus:outline-none font-semibold text-[#08152E]"
+                                className="w-full px-2 py-1 text-xs bg-white/90 border border-slate-200 rounded focus:border-[#0F2F6B] focus:outline-none font-semibold text-[#08152E]"
                               />
                             </td>
-                            <td className="px-2.5 py-1.5 font-mono text-slate-800 whitespace-nowrap border-r border-slate-200">
+                            <td
+                              style={getCellPreviewStyle('mobileNumber')}
+                              className="px-2.5 py-1.5 font-mono text-slate-800 whitespace-nowrap border-r border-slate-200"
+                            >
                               {row.validationError?.includes('Mobile') ? (
                                 <input
                                   type="text"
-                                  value={editedOverrides[idx]?.mobileNumber ?? ''}
+                                  value={editedOverrides[rowOrigIdx]?.mobileNumber ?? ''}
                                   onChange={(e) =>
                                     setEditedOverrides((prev) => ({
                                       ...prev,
-                                      [idx]: { ...prev[idx], mobileNumber: e.target.value },
+                                      [rowOrigIdx]: { ...prev[rowOrigIdx], mobileNumber: e.target.value },
                                     }))
                                   }
                                   placeholder="Enter Mobile"
@@ -944,37 +1515,73 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                             <td className="px-2.5 py-1.5 font-medium text-[#0B2454] whitespace-nowrap border-r border-slate-200">
                               {CENTRE_MAP[row.centreId].code} · {row.centreName}
                             </td>
-                            <td className="px-2.5 py-1.5 font-mono font-semibold text-slate-900 whitespace-nowrap border-r border-slate-200">
+                            <td
+                              style={getCellPreviewStyle('totalFee')}
+                              className="px-2.5 py-1.5 font-mono font-semibold text-slate-900 whitespace-nowrap border-r border-slate-200"
+                            >
                               ₹{row.totalFee.toLocaleString('en-IN')}
                             </td>
-                            <td className="px-2.5 py-1.5 font-mono font-bold text-emerald-700 whitespace-nowrap border-r border-slate-200">
+                            <td
+                              style={getCellPreviewStyle('paidAmount')}
+                              className="px-2.5 py-1.5 font-mono font-bold text-emerald-700 whitespace-nowrap border-r border-slate-200"
+                            >
                               ₹{row.paidAmount.toLocaleString('en-IN')}
                             </td>
-                            <td className="px-2.5 py-1.5 font-mono font-bold text-rose-700 whitespace-nowrap border-r border-slate-200">
+                            <td
+                              style={getCellPreviewStyle('pendingAmount')}
+                              className="px-2.5 py-1.5 font-mono font-bold text-rose-700 whitespace-nowrap border-r border-slate-200"
+                            >
                               ₹{row.pendingAmount.toLocaleString('en-IN')}
                             </td>
-                            <td className="px-2.5 py-1.5 whitespace-nowrap border-r border-slate-200">
+                            <td
+                              style={getCellPreviewStyle('tmaFee')}
+                              className="px-2.5 py-1.5 font-mono font-semibold text-amber-800 whitespace-nowrap border-r border-slate-200"
+                            >
+                              ₹{row.tmaFee.toLocaleString('en-IN')}
+                            </td>
+                            <td
+                              style={getCellPreviewStyle('examFee')}
+                              className="px-2.5 py-1.5 font-mono font-semibold text-indigo-800 whitespace-nowrap border-r border-slate-200"
+                            >
+                              ₹{row.examFee.toLocaleString('en-IN')}
+                            </td>
+                            <td
+                              style={getCellPreviewStyle('feeStatus')}
+                              className="px-2.5 py-1.5 whitespace-nowrap border-r border-slate-200"
+                            >
                               <span
+                                style={
+                                  row.cellColors?.feeStatus || row.rowColor
+                                    ? { color: getReadableTextColor(row.cellColors?.feeStatus || row.rowColor) }
+                                    : undefined
+                                }
                                 className={`font-bold ${
-                                  row.recoveryStatus === 'Paid'
-                                    ? 'text-emerald-700'
-                                    : row.recoveryStatus === 'Partial'
-                                      ? 'text-amber-700'
-                                      : 'text-rose-700'
+                                  row.cellColors?.feeStatus || row.rowColor
+                                    ? ''
+                                    : row.recoveryStatus === 'Paid'
+                                      ? 'text-emerald-700'
+                                      : row.recoveryStatus === 'Partial'
+                                        ? 'text-amber-700'
+                                        : 'text-rose-700'
                                 }`}
                               >
                                 {row.recoveryStatus}
                               </span>
                             </td>
-                            {extraPreviewHeaders.map((h) => (
-                              <td
-                                key={h}
-                                className="px-2.5 py-1.5 text-slate-700 whitespace-nowrap max-w-[200px] truncate border-r border-slate-200"
-                              >
-                                {row.raw[h] || '—'}
-                              </td>
-                            ))}
-                            <td className="px-2.5 py-1.5 whitespace-nowrap">
+                            {extraPreviewHeaders.map((h) => {
+                              const cleanKey = alignHeaderToCommonSchema(h, commonExtraHeadings).trim().slice(0, 50);
+                              const extraStyle = getCellPreviewStyle(`extra:${cleanKey}`);
+                              return (
+                                <td
+                                  key={h}
+                                  style={extraStyle}
+                                  className="px-2.5 py-1.5 text-slate-700 whitespace-nowrap max-w-[200px] truncate border-r border-slate-200"
+                                >
+                                  {row.raw[h] || '—'}
+                                </td>
+                              );
+                            })}
+                            <td className="px-2.5 py-1.5 whitespace-nowrap bg-white/85">
                               {errMsg ? (
                                 <span className="text-[11px] font-semibold text-amber-900">{errMsg}</span>
                               ) : row.operation === 'update' ? (
@@ -991,11 +1598,20 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                     </tbody>
                   </table>
                 </div>
-                {previewRows.length > 150 && (
-                  <div className="px-3 py-1.5 bg-slate-50 border-t border-slate-200 text-[11px] text-slate-600">
-                    Showing first 150 of {previewRows.length} rows in preview (all {readyRows.length} ready rows will be synced into the database).
-                  </div>
-                )}
+                <div className="px-3 py-1.5 bg-slate-50 border-t border-slate-200 text-[11px] text-slate-600 flex flex-wrap items-center justify-between gap-2">
+                  <span>
+                    Showing {visiblePreviewRows.length} of {filteredPreviewRows.length} rows in preview (all {readyRows.length} ready rows will be synced into the database).
+                  </span>
+                  {filteredPreviewRows.length > 500 && !showAllPreviewRows && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAllPreviewRows(true)}
+                      className="text-xs font-bold text-[#0F2F6B] hover:underline"
+                    >
+                      Show All {filteredPreviewRows.length} Rows
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           )}

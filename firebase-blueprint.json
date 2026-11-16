@@ -77,7 +77,11 @@
         "lockedByUid": { "type": "string", "maxLength": 128 },
         "lockedByName": { "type": "string", "maxLength": 100 },
         "superAdminAccessGranted": { "type": "boolean" },
+        "tmaFee": { "type": "number", "minimum": 0, "maximum": 1000000 },
+        "examFee": { "type": "number", "minimum": 0, "maximum": 1000000 },
         "extraColumns": { "type": "object", "description": "Preserved extra columns imported from Excel/CSV workbooks" },
+        "rowColor": { "type": "string", "maxLength": 20 },
+        "cellColors": { "type": "object", "description": "Preserved Excel background fill colors per field/column" },
         "createdBy": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedBy": { "type": "string", "maxLength": 128 },
@@ -106,6 +110,8 @@
         "totalFee": { "type": "number" },
         "paidAmount": { "type": "number" },
         "pendingAmount": { "type": "number" },
+        "tmaFee": { "type": "number", "minimum": 0, "maximum": 1000000 },
+        "examFee": { "type": "number", "minimum": 0, "maximum": 1000000 },
         "assignedEmployeeUid": { "type": "string", "maxLength": 128 },
         "assignedEmployeeName": { "type": "string", "maxLength": 100 },
         "followUpNotes": { "type": "string", "maxLength": 1000 },
@@ -423,6 +429,21 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["messageId", "staffUid", "staffName", "staffEmail", "staffRole", "centreId", "department", "senderUid", "senderName", "senderRole", "messageType", "text", "readByStaff", "readByAdmin", "createdAt"]
+    },
+    "ExcelSheetConfig": {
+      "title": "ExcelSheetConfig",
+      "description": "Shared Excel column schema, custom column definitions, hidden core columns, and editable column headings",
+      "type": "object",
+      "properties": {
+        "configId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "headerLabels": { "type": "object", "description": "Custom display headings mapped by core column key" },
+        "customColumns": { "type": "array", "description": "Ordered custom extra column headings" },
+        "hiddenCoreColumns": { "type": "array", "description": "Core column keys hidden from sheet view" },
+        "deletedExtraColumns": { "type": "array", "description": "Deleted custom column keys excluded from merge" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["configId", "headerLabels", "customColumns", "hiddenCoreColumns", "deletedExtraColumns", "updatedBy", "updatedAt"]
     }
   },
   "firestore": {
@@ -497,6 +518,10 @@
     "/direct_messages/{messageId}": {
       "schema": { "$ref": "#/entities/DirectMessage" },
       "description": "Isolated Super Admin <-> Staff direct chat and walkie-talkie activity messages"
+    },
+    "/excel_sheet_configs/{configId}": {
+      "schema": { "$ref": "#/entities/ExcelSheetConfig" },
+      "description": "Persisted Excel column definitions, custom headings, and visibility preferences"
     }
   }
 }

@@ -14,7 +14,8 @@ import {
   Menu,
   MessageSquare,
   MonitorPlay,
-  Radio,
+  PanelLeftClose,
+  PanelLeftOpen,
   Search,
   Settings,
   User,
@@ -34,7 +35,6 @@ interface DashboardShellProps {
   globalSearch: string;
   notifications: NotificationItem[];
   unreadCommsCount?: number;
-  isWalkieLive?: boolean;
   onSelectSection: (section: NavSection) => void;
   onChangeCentreFilter: (centreId: CentreId | 'all') => void;
   onChangeGlobalSearch: (value: string) => void;
@@ -46,7 +46,7 @@ const SHUKRA_LOGO_PATH = '/assets/aistudio/Chat-GPT-Image-Sep-16-2026-06-23-59-P
 
 const SECTION_ICONS: Record<NavSection, React.FC<{ className?: string }>> = {
   overview: LayoutDashboard,
-  communication: Radio,
+  communication: MessageSquare,
   centre_management: Building2,
   student_database: Database,
   fee_recovery: IndianRupee,
@@ -84,7 +84,6 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
   globalSearch,
   notifications,
   unreadCommsCount = 0,
-  isWalkieLive = false,
   onSelectSection,
   onChangeCentreFilter,
   onChangeGlobalSearch,
@@ -92,6 +91,7 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
   children,
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showNotifs, setShowNotifs] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -151,7 +151,7 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
           const active = activeSection === item.id;
           const label =
             item.id === 'communication' && currentUser.role === 'super_admin'
-              ? 'Staff Comms & Walkie'
+              ? 'Staff Direct Chat'
               : item.label;
           return (
             <button
@@ -214,10 +214,12 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
 
   return (
     <div className="min-h-screen flex light-grid-bg text-[#0F172A]">
-      {/* Desktop Fixed Sidebar */}
-      <aside className="hidden lg:block w-68 shrink-0 no-print">
-        <div className="sticky top-0 h-screen">{sidebarContent}</div>
-      </aside>
+      {/* Desktop Fixed Sidebar (Collapsible for Full-Width Excel View) */}
+      {!sidebarCollapsed && (
+        <aside className="hidden lg:block w-68 shrink-0 no-print">
+          <div className="sticky top-0 h-screen">{sidebarContent}</div>
+        </aside>
+      )}
 
       {/* Mobile Drawer */}
       {mobileMenuOpen && (
@@ -249,6 +251,16 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
               aria-label="Open navigation menu"
             >
               <Menu className="w-5 h-5" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setSidebarCollapsed((c) => !c)}
+              className="hidden lg:inline-flex items-center justify-center p-2 text-[#0F172A] hover:bg-slate-100 rounded-xl border border-slate-200 bg-white shadow-2xs shrink-0"
+              aria-label={sidebarCollapsed ? 'Show sidebar navigation' : 'Hide sidebar for full-width view'}
+              title={sidebarCollapsed ? 'Show Sidebar' : 'Hide Sidebar (Full-Width Workspace)'}
+            >
+              {sidebarCollapsed ? <PanelLeftOpen className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
             </button>
 
             <div className="relative flex-1 max-w-lg">
@@ -287,17 +299,13 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
               </div>
             )}
 
-            {/* Quick Sir Connect / Walkie Button */}
+            {/* Quick Direct Chat Button */}
             <button
               type="button"
               onClick={() => onSelectSection('communication')}
-              className={`relative p-2 rounded-xl border shadow-2xs transition-colors ${
-                isWalkieLive
-                  ? 'bg-[#DC2626] text-white border-[#DC2626]'
-                  : 'bg-white text-[#0F172A] hover:bg-slate-100 border-slate-200'
-              }`}
-              aria-label="Open Sir Connect & Walkie-Talkie"
-              title="Open Communications & Walkie-Talkie"
+              className="relative p-2 rounded-xl border shadow-2xs transition-colors bg-white text-[#0F172A] hover:bg-slate-100 border-slate-200"
+              aria-label="Open Direct Chat"
+              title="Open Direct Chat"
             >
               <MessageSquare className="w-4 h-4" />
               {unreadCommsCount > 0 && (
@@ -394,8 +402,16 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
           </div>
         )}
 
-        {/* Main Viewport */}
-        <main className="flex-1 p-4 sm:p-6 max-w-[1440px] w-full mx-auto">{children}</main>
+        {/* Main Viewport — Expanded full-width on Student Excel Sheet */}
+        <main
+          className={`flex-1 w-full mx-auto ${
+            activeSection === 'student_database'
+              ? 'p-3 sm:p-4 max-w-none'
+              : 'p-4 sm:p-6 max-w-[1440px]'
+          }`}
+        >
+          {children}
+        </main>
 
         {/* Clean Institutional Footer with Crimson Architectural Corner Trim */}
         <footer className="relative overflow-hidden border-t border-slate-200 bg-white/95 px-6 py-4 flex flex-col sm:flex-row items-center justify-between gap-4 no-print">

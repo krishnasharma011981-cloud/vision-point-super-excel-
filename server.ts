@@ -619,7 +619,7 @@ async function startServer() {
 
   const httpServer = http.createServer(app);
 
-  // Real-time WebSocket hub for Walkie-Talkie voice streaming & isolated Super Admin <-> Staff comms
+  // Real-time WebSocket hub for isolated Super Admin <-> Staff chat & presence
   interface CommsClient {
     ws: WebSocket;
     uid: string;
@@ -631,56 +631,13 @@ async function startServer() {
     connectedAt: number;
   }
 
-  interface WalkieSession {
-    sessionId: string;
-    fromUid: string;
-    fromName: string;
-    fromRole: 'super_admin' | 'centre_head' | 'employee';
-    fromCentreId: string;
-    fromDepartment: string;
-    targetMode: 'staff' | 'centre' | 'all' | 'super_admin';
-    targetUid?: string;
-    targetCentreId?: string;
-    createdAt: number;
-  }
-
   const wss = new WebSocketServer({ noServer: true });
   const commsClients = new Map<WebSocket, CommsClient>();
-  const activeWalkieSessions = new Map<string, WalkieSession>();
 
   function safeWsSend(ws: WebSocket, payload: unknown): void {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(payload));
     }
-  }
-
-  function resolveWalkieRecipients(session: WalkieSession, senderWs?: WebSocket): CommsClient[] {
-    const targets: CommsClient[] = [];
-    for (const client of commsClients.values()) {
-      if (client.ws.readyState !== WebSocket.OPEN) continue;
-      if (senderWs && client.ws === senderWs) continue;
-      if (client.uid === session.fromUid) continue;
-
-      if (session.targetMode === 'super_admin') {
-        if (client.role === 'super_admin') {
-          targets.push(client);
-        }
-      } else if (session.fromRole === 'super_admin') {
-        if (session.targetMode === 'staff' && session.targetUid && client.uid === session.targetUid) {
-          targets.push(client);
-        } else if (
-          session.targetMode === 'centre' &&
-          session.targetCentreId &&
-          client.role !== 'super_admin' &&
-          client.centreId === session.targetCentreId
-        ) {
-          targets.push(client);
-        } else if (session.targetMode === 'all' && client.role !== 'super_admin') {
-          targets.push(client);
-        }
-      }
-    }
-    return targets;
   }
 
   function broadcastCommsPresence(): void {
@@ -724,24 +681,6 @@ async function startServer() {
       }
     }
   }
-
-  setInterval(() => {
-    const now = Date.now();
-    for (const [sid, session] of activeWalkieSessions.entries()) {
-      if (now - session.createdAt > 120_000) {
-        const recipients = resolveWalkieRecipients(session);
-        for (const r of recipients) {
-          safeWsSend(r.ws, {
-            type: 'wt:end',
-            sessionId: sid,
-            fromUid: session.fromUid,
-            fromName: session.fromName,
-          });
-        }
-        activeWalkieSessions.delete(sid);
-      }
-    }
-  }, 30_000).unref();
 
   httpServer.on('upgrade', (request, socket, head) => {
     try {
@@ -845,121 +784,6 @@ async function startServer() {
         return;
       }
 
-      if (msgType === 'wt:start') {
-        const requestedMode = String(msg.targetMode || '') as WalkieSession['targetMode'];
-        // Strict Hub-and-Spoke enforcement: staff may ONLY speak to super_admin
-        if (client.role !== 'super_admin' && requestedMode !== 'super_admin') {
-          safeWsSend(ws, {
-            type: 'wt:error',
-            error: 'Staff and Centre Heads can only transmit Walkie-Talkie audio directly to Super Admin.',
-          });
-          return;
-        }
-        if (
-          client.role === 'super_admin' &&
-          requestedMode !== 'staff' &&
-          requestedMode !== 'centre' &&
-          requestedMode !== 'all'
-        ) {
-          safeWsSend(ws, { type: 'wt:error', error: 'Invalid Walkie-Talkie target mode.' });
-          return;
-        }
-
-        const sessionId = `wt_${crypto.randomBytes(8).toString('hex')}`;
-        const session: WalkieSession = {
-          sessionId,
-          fromUid: client.uid,
-          fromName: client.fullName,
-          fromRole: client.role,
-          fromCentreId: client.centreId,
-          fromDepartment: client.department,
-          targetMode: client.role === 'super_admin' ? requestedMode : 'super_admin',
-          targetUid: msg.targetUid ? String(msg.targetUid) : undefined,
-          targetCentreId: msg.targetCentreId ? String(msg.targetCentreId) : undefined,
-          createdAt: Date.now(),
-        };
-
-        // End any stale prior session from this same speaker
-        for (const [oldId, oldSess] of activeWalkieSessions.entries()) {
-          if (oldSess.fromUid === client.uid) {
-            for (const r of resolveWalkieRecipients(oldSess, ws)) {
-              safeWsSend(r.ws, {
-                type: 'wt:end',
-                sessionId: oldId,
-                fromUid: client.uid,
-                fromName: client.fullName,
-              });
-            }
-            activeWalkieSessions.delete(oldId);
-          }
-        }
-
-        activeWalkieSessions.set(sessionId, session);
-        const recipients = resolveWalkieRecipients(session, ws);
-        for (const r of recipients) {
-          safeWsSend(r.ws, {
-            type: 'wt:start',
-            sessionId,
-            fromUid: client.uid,
-            fromName: client.fullName,
-            fromRole: client.role,
-            fromCentreId: client.centreId,
-            fromDepartment: client.department,
-            targetMode: session.targetMode,
-            targetCentreId: session.targetCentreId,
-          });
-        }
-        safeWsSend(ws, {
-          type: 'wt:ack',
-          sessionId,
-          recipientCount: recipients.length,
-        });
-        return;
-      }
-
-      if (msgType === 'wt:audio') {
-        const sessionId = String(msg.sessionId || '');
-        const session = activeWalkieSessions.get(sessionId);
-        if (!session || session.fromUid !== client.uid) return;
-
-        const pcmBase64 = String(msg.pcmBase64 || '');
-        if (!pcmBase64 || pcmBase64.length > 64_000) return;
-
-        const recipients = resolveWalkieRecipients(session, ws);
-        for (const r of recipients) {
-          safeWsSend(r.ws, {
-            type: 'wt:audio',
-            sessionId,
-            fromUid: client.uid,
-            fromName: client.fullName,
-            fromRole: client.role,
-            fromCentreId: client.centreId,
-            fromDepartment: client.department,
-            sampleRate: Number(msg.sampleRate) || 16000,
-            pcmBase64,
-          });
-        }
-        return;
-      }
-
-      if (msgType === 'wt:end') {
-        const sessionId = String(msg.sessionId || '');
-        const session = activeWalkieSessions.get(sessionId);
-        if (!session || session.fromUid !== client.uid) return;
-
-        const recipients = resolveWalkieRecipients(session, ws);
-        for (const r of recipients) {
-          safeWsSend(r.ws, {
-            type: 'wt:end',
-            sessionId,
-            fromUid: client.uid,
-            fromName: client.fullName,
-          });
-        }
-        activeWalkieSessions.delete(sessionId);
-        return;
-      }
-
       if (msgType === 'chat:ping') {
         const targetStaffUid = client.role === 'super_admin' ? String(msg.staffUid || '') : client.uid;
         const preview = String(msg.preview || '').slice(0, 120);
@@ -992,19 +816,6 @@ async function startServer() {
       clearTimeout(authTimeout);
       const client = commsClients.get(ws);
       if (client) {
-        for (const [sid, session] of activeWalkieSessions.entries()) {
-          if (session.fromUid === client.uid) {
-            for (const r of resolveWalkieRecipients(session, ws)) {
-              safeWsSend(r.ws, {
-                type: 'wt:end',
-                sessionId: sid,
-                fromUid: client.uid,
-                fromName: client.fullName,
-              });
-            }
-            activeWalkieSessions.delete(sid);
-          }
-        }
         commsClients.delete(ws);
         broadcastCommsPresence();
       }

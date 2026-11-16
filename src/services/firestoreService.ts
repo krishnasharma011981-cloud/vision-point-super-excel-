@@ -32,6 +32,7 @@ import type {
   EditRequest,
   EmployeeReport,
   EmployeeReportStatus,
+  ExcelSheetConfig,
   FeeFollowUpStatus,
   FeeRecoveryRecord,
   LocationVerification,
@@ -81,6 +82,12 @@ const DEPT_COLLECTION_MAP: Partial<Record<DepartmentId, string>> = {
   online_classes: 'online_class_records',
   admission: 'admission_records',
 };
+
+function clampFeeValue(val: unknown): number {
+  const n = Number(val);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(1000000, Math.round(n));
+}
 
 export async function logActivity(entry: Omit<ActivityLog, 'createdAt' | 'id'>): Promise<void> {
   const path = 'activity_logs';
@@ -508,16 +515,30 @@ export async function createStudentRecord(
   options?: {
     totalFee?: number;
     paidAmount?: number;
+    tmaFee?: number;
+    examFee?: number;
     stream?: string;
     createDepartmentSkeletons?: boolean;
   },
 ): Promise<void> {
   const sid = studentInput.studentId.trim();
   const path = `students/${sid}`;
+  const resolvedTmaFee =
+    options?.tmaFee !== undefined
+      ? clampFeeValue(options.tmaFee)
+      : studentInput.tmaFee !== undefined
+        ? clampFeeValue(studentInput.tmaFee)
+        : undefined;
+  const resolvedExamFee =
+    options?.examFee !== undefined
+      ? clampFeeValue(options.examFee)
+      : studentInput.examFee !== undefined
+        ? clampFeeValue(studentInput.examFee)
+        : undefined;
 
   try {
     const isEmployeeActor = actor.role === 'employee';
-    await setDoc(doc(db, 'students', sid), {
+    const studentDocPayload: Record<string, unknown> = {
       ...studentInput,
       studentId: sid,
       employeeLocked: isEmployeeActor ? false : Boolean(studentInput.employeeLocked ?? false),
@@ -532,7 +553,13 @@ export async function createStudentRecord(
       createdAt: serverTimestamp(),
       updatedBy: actor.uid,
       updatedAt: serverTimestamp(),
-    });
+    };
+    if (resolvedTmaFee !== undefined) studentDocPayload.tmaFee = resolvedTmaFee;
+    else delete studentDocPayload.tmaFee;
+    if (resolvedExamFee !== undefined) studentDocPayload.examFee = resolvedExamFee;
+    else delete studentDocPayload.examFee;
+
+    await setDoc(doc(db, 'students', sid), studentDocPayload);
 
     // If Super Admin, Centre Head, or Admission Employee, initialize admission record;
     // Super Admin and Centre Head can also initialize linked department records.
@@ -579,6 +606,8 @@ export async function createStudentRecord(
         totalFee,
         paidAmount,
         pendingAmount,
+        ...(resolvedTmaFee !== undefined ? { tmaFee: resolvedTmaFee } : {}),
+        ...(resolvedExamFee !== undefined ? { examFee: resolvedExamFee } : {}),
         assignedEmployeeUid: studentInput.assignedEmployeeUid,
         assignedEmployeeName: studentInput.assignedEmployeeName,
         followUpNotes: 'Initial fee schedule created on admission.',
@@ -625,8 +654,18 @@ export async function createStudentRecord(
         studentName: studentInput.studentName,
         centreId: studentInput.centreId,
         attendanceStatus: studentInput.classAttendanceStatus,
-        participationLevel: studentInput.classAttendanceStatus === 'Regular' ? 'High' : 'Moderate',
-        attendancePercentage: studentInput.classAttendanceStatus === 'Regular' ? 90 : 50,
+        participationLevel:
+          studentInput.classAttendanceStatus === 'Regular'
+            ? 'High'
+            : studentInput.classAttendanceStatus === 'Irregular'
+              ? 'Moderate'
+              : 'Inactive',
+        attendancePercentage:
+          studentInput.classAttendanceStatus === 'Regular'
+            ? 90
+            : studentInput.classAttendanceStatus === 'Irregular'
+              ? 50
+              : 0,
         lastAttendanceUpdate: studentInput.admissionDate,
         followUpNotes: '',
         assignedEmployeeUid: studentInput.assignedEmployeeUid,
@@ -680,10 +719,16 @@ export interface BulkImportRowPayload {
   totalFee: number;
   paidAmount: number;
   pendingAmount?: number;
+  tmaFee?: number;
+  examFee?: number;
   recoveryStatus?: RecoveryStatus;
   followUpStatus?: FeeFollowUpStatus;
   explicitFeeDetected?: boolean;
+  explicitTmaFeeDetected?: boolean;
+  explicitExamFeeDetected?: boolean;
   extraColumns?: Record<string, string>;
+  rowColor?: string;
+  cellColors?: Record<string, string>;
 }
 
 export interface BulkImportExecutionResult {
@@ -705,10 +750,29 @@ function sanitizeExtraColumns(extra?: Record<string, string>): Record<string, st
   return Object.keys(cleaned).length > 0 ? cleaned : undefined;
 }
 
+function sanitizeRowColor(color?: string): string {
+  const clean = String(color ?? '').trim().toUpperCase();
+  return /^#[0-9A-F]{6}$/.test(clean) ? clean : '';
+}
+
+function sanitizeCellColors(colors?: Record<string, string>): Record<string, string> {
+  if (!colors) return {};
+  const cleaned: Record<string, string> = {};
+  for (const [k, v] of Object.entries(colors)) {
+    const key = String(k ?? '').trim().slice(0, 60);
+    const val = String(v ?? '').trim().toUpperCase();
+    if (key && /^#[0-9A-F]{6}$/.test(val) && Object.keys(cleaned).length < 45) {
+      cleaned[key] = val;
+    }
+  }
+  return cleaned;
+}
+
 export async function bulkImportStudentsBatch(
   rows: BulkImportRowPayload[],
   actor: UserAccount,
   locationVerified: boolean,
+  options?: { onProgress?: (done: number, total: number) => void },
 ): Promise<BulkImportExecutionResult> {
   if (rows.length === 0) return { importedCount: 0, updatedCount: 0, failedRows: [] };
 
@@ -758,12 +822,15 @@ export async function bulkImportStudentsBatch(
 
   const buildStudentCreateDoc = (r: BulkImportRowPayload) => {
     const cleanExtras = sanitizeExtraColumns(r.extraColumns);
+    const cleanRowColor = sanitizeRowColor(r.rowColor);
+    const cleanCellColors = sanitizeCellColors(r.cellColors);
+    const safeSubject = (r.subject || '').trim().slice(0, 200) || 'General NIOS Stream';
     return {
       serialNumber: Math.max(1, Math.round(Number(r.serialNumber || 1))),
       studentId: r.studentId,
-      studentName: r.studentName.slice(0, 120),
-      mobileNumber: r.mobileNumber.slice(0, 20),
-      subject: (r.subject || 'General NIOS Stream').slice(0, 200),
+      studentName: r.studentName.trim().slice(0, 120),
+      mobileNumber: r.mobileNumber.trim().slice(0, 20),
+      subject: safeSubject,
       tcStatus: r.tcStatus,
       bookStatus: r.bookStatus,
       classAttendanceStatus: r.classAttendanceStatus,
@@ -787,7 +854,15 @@ export async function bulkImportStudentsBatch(
       lockedByUid: '',
       lockedByName: '',
       superAdminAccessGranted: true,
+      ...(r.explicitTmaFeeDetected || (r.tmaFee !== undefined && r.tmaFee > 0)
+        ? { tmaFee: clampFeeValue(r.tmaFee) }
+        : {}),
+      ...(r.explicitExamFeeDetected || (r.examFee !== undefined && r.examFee > 0)
+        ? { examFee: clampFeeValue(r.examFee) }
+        : {}),
       ...(cleanExtras ? { extraColumns: cleanExtras } : {}),
+      ...(cleanRowColor ? { rowColor: cleanRowColor } : {}),
+      ...(Object.keys(cleanCellColors).length > 0 ? { cellColors: cleanCellColors } : {}),
       createdBy: actor.uid,
       createdAt: serverTimestamp(),
       updatedBy: actor.uid,
@@ -797,10 +872,13 @@ export async function bulkImportStudentsBatch(
 
   const buildStudentUpdateDoc = (r: BulkImportRowPayload) => {
     const cleanExtras = sanitizeExtraColumns(r.extraColumns);
+    const cleanRowColor = sanitizeRowColor(r.rowColor);
+    const cleanCellColors = sanitizeCellColors(r.cellColors);
+    const safeSubject = (r.subject || '').trim().slice(0, 200) || 'General NIOS Stream';
     return {
-      studentName: r.studentName.slice(0, 120),
-      mobileNumber: r.mobileNumber.slice(0, 20),
-      subject: (r.subject || 'General NIOS Stream').slice(0, 200),
+      studentName: r.studentName.trim().slice(0, 120),
+      mobileNumber: r.mobileNumber.trim().slice(0, 20),
+      subject: safeSubject,
       tcStatus: r.tcStatus,
       bookStatus: r.bookStatus,
       classAttendanceStatus: r.classAttendanceStatus,
@@ -818,7 +896,11 @@ export async function bulkImportStudentsBatch(
         : {}),
       admissionDate: r.admissionDate.slice(0, 30),
       additionalRemarks: (r.additionalRemarks || 'Excel Sheet Updated').slice(0, 1000),
+      ...(r.explicitTmaFeeDetected ? { tmaFee: clampFeeValue(r.tmaFee) } : {}),
+      ...(r.explicitExamFeeDetected ? { examFee: clampFeeValue(r.examFee) } : {}),
       ...(cleanExtras ? { extraColumns: cleanExtras } : {}),
+      rowColor: cleanRowColor,
+      cellColors: cleanCellColors,
       updatedBy: actor.uid,
       updatedAt: serverTimestamp(),
     };
@@ -856,6 +938,12 @@ export async function bulkImportStudentsBatch(
       totalFee,
       paidAmount,
       pendingAmount,
+      ...(r.explicitTmaFeeDetected || (r.tmaFee !== undefined && r.tmaFee > 0)
+        ? { tmaFee: clampFeeValue(r.tmaFee) }
+        : {}),
+      ...(r.explicitExamFeeDetected || (r.examFee !== undefined && r.examFee > 0)
+        ? { examFee: clampFeeValue(r.examFee) }
+        : {}),
       assignedEmployeeUid: actor.uid,
       assignedEmployeeName: actorName,
       followUpNotes: 'Imported via Excel Bulk Import.',
@@ -902,9 +990,14 @@ export async function bulkImportStudentsBatch(
       studentName: r.studentName.slice(0, 120),
       centreId: r.centreId,
       attendanceStatus: r.classAttendanceStatus,
-      participationLevel: r.classAttendanceStatus === 'Regular' ? 'High' : 'Moderate',
+      participationLevel:
+        r.classAttendanceStatus === 'Regular'
+          ? 'High'
+          : r.classAttendanceStatus === 'Irregular'
+            ? 'Moderate'
+            : 'Inactive',
       attendancePercentage:
-        r.classAttendanceStatus === 'Regular' ? 90 : r.classAttendanceStatus === 'Irregular' ? 50 : 10,
+        r.classAttendanceStatus === 'Regular' ? 90 : r.classAttendanceStatus === 'Irregular' ? 50 : 0,
       lastAttendanceUpdate: r.admissionDate.slice(0, 30),
       followUpNotes: '',
       assignedEmployeeUid: actor.uid,
@@ -938,6 +1031,8 @@ export async function bulkImportStudentsBatch(
               followUpNotes: 'Fees synced from updated Excel sheet.',
             }
           : {}),
+        ...(r.explicitTmaFeeDetected ? { tmaFee: clampFeeValue(r.tmaFee) } : {}),
+        ...(r.explicitExamFeeDetected ? { examFee: clampFeeValue(r.examFee) } : {}),
         updatedBy: actor.uid,
         updatedAt: serverTimestamp(),
       }).catch(() => {});
@@ -952,6 +1047,12 @@ export async function bulkImportStudentsBatch(
         totalFee,
         paidAmount,
         pendingAmount,
+        ...(r.explicitTmaFeeDetected || (r.tmaFee !== undefined && r.tmaFee > 0)
+          ? { tmaFee: clampFeeValue(r.tmaFee) }
+          : {}),
+        ...(r.explicitExamFeeDetected || (r.examFee !== undefined && r.examFee > 0)
+          ? { examFee: clampFeeValue(r.examFee) }
+          : {}),
         assignedEmployeeUid: actor.uid,
         assignedEmployeeName: actorName,
         followUpNotes: 'Created from updated Excel sheet.',
@@ -996,8 +1097,14 @@ export async function bulkImportStudentsBatch(
       await updateDoc(clsRef, {
         studentName: r.studentName.slice(0, 120),
         attendanceStatus: r.classAttendanceStatus,
+        participationLevel:
+          r.classAttendanceStatus === 'Regular'
+            ? 'High'
+            : r.classAttendanceStatus === 'Irregular'
+              ? 'Moderate'
+              : 'Inactive',
         attendancePercentage:
-          r.classAttendanceStatus === 'Regular' ? 90 : r.classAttendanceStatus === 'Irregular' ? 50 : 10,
+          r.classAttendanceStatus === 'Regular' ? 90 : r.classAttendanceStatus === 'Irregular' ? 50 : 0,
         updatedBy: actor.uid,
         updatedAt: serverTimestamp(),
       }).catch(() => {});
@@ -1074,6 +1181,7 @@ export async function bulkImportStudentsBatch(
 
     importedCount += committedCreates.length;
     updatedCount += committedUpdates.length;
+    options?.onProgress?.(Math.min(i + chunk.length, rows.length), rows.length);
   }
 
   if (importedCount > 0 || updatedCount > 0) {
@@ -1147,11 +1255,14 @@ export async function updateStudentRecord(
           'assignedEmployeeUid',
           'assignedEmployeeName',
           'additionalRemarks',
+          'tmaFee',
+          'examFee',
         ];
         const filtered: Record<string, unknown> = {};
         for (const key of allowedAdmissionKeys) {
           if (updates[key] !== undefined) {
-            filtered[key] = updates[key];
+            filtered[key] =
+              key === 'tmaFee' || key === 'examFee' ? clampFeeValue(updates[key]) : updates[key];
           }
         }
         scopedUpdates = {
@@ -1164,11 +1275,33 @@ export async function updateStudentRecord(
       }
     }
 
+    if (scopedUpdates.tmaFee !== undefined) {
+      scopedUpdates.tmaFee = clampFeeValue(scopedUpdates.tmaFee);
+    }
+    if (scopedUpdates.examFee !== undefined) {
+      scopedUpdates.examFee = clampFeeValue(scopedUpdates.examFee);
+    }
+
     await updateDoc(doc(db, 'students', studentId), {
       ...scopedUpdates,
       updatedBy: actor.uid,
       updatedAt: serverTimestamp(),
     });
+    if (scopedUpdates.classAttendanceStatus !== undefined) {
+      const nextAtt = scopedUpdates.classAttendanceStatus as Student['classAttendanceStatus'];
+      const clsRef = doc(db, 'online_class_records', studentId);
+      const clsSnap = await getDoc(clsRef).catch(() => null);
+      if (clsSnap && clsSnap.exists()) {
+        await updateDoc(clsRef, {
+          attendanceStatus: nextAtt,
+          participationLevel:
+            nextAtt === 'Regular' ? 'High' : nextAtt === 'Irregular' ? 'Moderate' : 'Inactive',
+          attendancePercentage: nextAtt === 'Regular' ? 90 : nextAtt === 'Irregular' ? 50 : 0,
+          updatedBy: actor.uid,
+          updatedAt: serverTimestamp(),
+        }).catch(() => {});
+      }
+    }
     await logActivity({
       actorUid: actor.uid,
       actorName: actor.fullName,
@@ -1184,6 +1317,232 @@ export async function updateStudentRecord(
     });
   } catch (err) {
     handleFirestoreError(err, OperationType.UPDATE, path);
+  }
+}
+
+export async function updateStudentsSerialOrderBatch(
+  updates: Array<{ studentId: string; serialNumber: number }>,
+  actor: UserAccount,
+  actionReason = 'Reordered Excel student rows',
+): Promise<number> {
+  if (updates.length === 0) return 0;
+  if (actor.role !== 'super_admin' && actor.role !== 'centre_head') {
+    throw new Error('Only Super Admin or Centre Head can reorder or shuffle Excel rows.');
+  }
+
+  const sanitized = updates
+    .map((u) => ({
+      studentId: String(u.studentId || '').trim(),
+      serialNumber: Math.max(1, Math.round(Number(u.serialNumber || 1))),
+    }))
+    .filter((u) => u.studentId.length > 0 && Number.isFinite(u.serialNumber) && u.serialNumber >= 1);
+
+  if (sanitized.length === 0) return 0;
+
+  let committedCount = 0;
+  try {
+    const chunkSize = 400;
+    for (let i = 0; i < sanitized.length; i += chunkSize) {
+      const chunk = sanitized.slice(i, i + chunkSize);
+      const batch = writeBatch(db);
+      for (const item of chunk) {
+        batch.update(doc(db, 'students', item.studentId), {
+          serialNumber: item.serialNumber,
+          updatedBy: actor.uid,
+          updatedAt: serverTimestamp(),
+        });
+      }
+      await batch.commit();
+      committedCount += chunk.length;
+    }
+
+    await logActivity({
+      actorUid: actor.uid,
+      actorName: actor.fullName,
+      actorEmail: actor.email,
+      actorRole: actor.role,
+      centreId: actor.role === 'super_admin' ? 'all' : actor.centreId,
+      department: actor.department,
+      action: 'ROWS_REORDERED',
+      targetCollection: 'students',
+      targetId: actor.role === 'super_admin' ? 'multi_centre' : actor.centreId,
+      details: `${actionReason} (${committedCount} row serial positions updated).`,
+      locationVerified: true,
+    });
+    return committedCount;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, 'students');
+    return committedCount;
+  }
+}
+
+export async function saveExcelSheetConfig(
+  configId: string,
+  config: Omit<ExcelSheetConfig, 'configId' | 'updatedBy' | 'updatedAt'>,
+  actor: UserAccount,
+  actionReason = 'Updated Excel columns & headings',
+): Promise<void> {
+  const cleanId = String(configId || 'global').trim();
+  const path = `excel_sheet_configs/${cleanId}`;
+  if (actor.role !== 'super_admin' && !(actor.role === 'centre_head' && actor.centreId === cleanId)) {
+    throw new Error('Only Super Admin or Centre Head can modify Excel columns and headings.');
+  }
+
+  const sanitizedHeaderLabels: Record<string, string> = {};
+  for (const [k, v] of Object.entries(config.headerLabels || {})) {
+    const key = String(k ?? '').trim().slice(0, 60);
+    const val = String(v ?? '').trim().slice(0, 60);
+    if (key && val && Object.keys(sanitizedHeaderLabels).length < 50) {
+      sanitizedHeaderLabels[key] = val;
+    }
+  }
+
+  const sanitizeList = (arr: string[], limitCount: number, maxLen: number) => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const item of arr || []) {
+      const clean = String(item ?? '').trim().slice(0, maxLen);
+      if (clean && !seen.has(clean) && out.length < limitCount) {
+        seen.add(clean);
+        out.push(clean);
+      }
+    }
+    return out;
+  };
+
+  const payload = {
+    configId: cleanId,
+    headerLabels: sanitizedHeaderLabels,
+    customColumns: sanitizeList(config.customColumns, 35, 50),
+    hiddenCoreColumns: sanitizeList(config.hiddenCoreColumns, 20, 50),
+    deletedExtraColumns: sanitizeList(config.deletedExtraColumns, 60, 50),
+    updatedBy: actor.uid,
+    updatedAt: serverTimestamp(),
+  };
+
+  try {
+    const ref = doc(db, 'excel_sheet_configs', cleanId);
+    const existing = await getDoc(ref).catch(() => null);
+    if (existing && existing.exists()) {
+      await updateDoc(ref, payload);
+    } else {
+      await setDoc(ref, payload);
+    }
+    await logActivity({
+      actorUid: actor.uid,
+      actorName: actor.fullName,
+      actorEmail: actor.email,
+      actorRole: actor.role,
+      centreId: cleanId === 'global' ? 'all' : cleanId,
+      department: actor.department,
+      action: 'EXCEL_COLUMNS_UPDATED',
+      targetCollection: 'excel_sheet_configs',
+      targetId: cleanId,
+      details: actionReason,
+      locationVerified: true,
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+  }
+}
+
+export async function mergeCustomColumnsIntoSharedConfig(
+  headings: string[],
+  actor: UserAccount,
+  actionReason = 'Synced blank/heading-only Excel columns across centres',
+): Promise<string[]> {
+  if (actor.role !== 'super_admin' && actor.role !== 'centre_head') return [];
+  const cleanInputs = headings.map((h) => String(h ?? '').trim().slice(0, 50)).filter(Boolean);
+  if (cleanInputs.length === 0) return [];
+
+  const targetConfigId = actor.role === 'super_admin' ? 'global' : actor.centreId;
+  const ref = doc(db, 'excel_sheet_configs', targetConfigId);
+  const snap = await getDoc(ref).catch(() => null);
+  const existing = snap && snap.exists() ? (snap.data() as ExcelSheetConfig) : null;
+
+  const existingCustom = [...(existing?.customColumns || [])];
+  const deletedSet = new Set((existing?.deletedExtraColumns || []).map((k) => k.trim().toLowerCase()));
+  const seen = new Set(existingCustom.map((k) => k.trim().toLowerCase()));
+  const added: string[] = [];
+
+  for (const h of cleanInputs) {
+    const low = h.toLowerCase();
+    if (!deletedSet.has(low) && !seen.has(low) && existingCustom.length < 35) {
+      seen.add(low);
+      existingCustom.push(h);
+      added.push(h);
+    }
+  }
+
+  if (added.length === 0) return [];
+
+  await saveExcelSheetConfig(
+    targetConfigId,
+    {
+      headerLabels: { ...(existing?.headerLabels || {}) },
+      customColumns: existingCustom,
+      hiddenCoreColumns: [...(existing?.hiddenCoreColumns || [])],
+      deletedExtraColumns: [...(existing?.deletedExtraColumns || [])],
+    },
+    actor,
+    `${actionReason}: ${added.join(', ')}`,
+  );
+  return added;
+}
+
+export async function batchUpdateStudentExtraColumns(
+  updates: Array<{
+    studentId: string;
+    extraColumns: Record<string, string>;
+    cellColors?: Record<string, string>;
+  }>,
+  actor: UserAccount,
+  actionReason = 'Updated extra columns across Excel rows',
+): Promise<number> {
+  if (updates.length === 0) return 0;
+  if (actor.role !== 'super_admin' && actor.role !== 'centre_head') {
+    throw new Error('Only Super Admin or Centre Head can rename or delete columns across rows.');
+  }
+
+  let committed = 0;
+  try {
+    const chunkSize = 400;
+    for (let i = 0; i < updates.length; i += chunkSize) {
+      const chunk = updates.slice(i, i + chunkSize);
+      const batch = writeBatch(db);
+      for (const item of chunk) {
+        const cleanExtras = sanitizeExtraColumns(item.extraColumns) || {};
+        const patch: Record<string, unknown> = {
+          extraColumns: cleanExtras,
+          updatedBy: actor.uid,
+          updatedAt: serverTimestamp(),
+        };
+        if (item.cellColors !== undefined) {
+          patch.cellColors = sanitizeCellColors(item.cellColors);
+        }
+        batch.update(doc(db, 'students', item.studentId), patch);
+      }
+      await batch.commit();
+      committed += chunk.length;
+    }
+
+    await logActivity({
+      actorUid: actor.uid,
+      actorName: actor.fullName,
+      actorEmail: actor.email,
+      actorRole: actor.role,
+      centreId: actor.role === 'super_admin' ? 'all' : actor.centreId,
+      department: actor.department,
+      action: 'EXCEL_COLUMN_DATA_MIGRATED',
+      targetCollection: 'students',
+      targetId: actor.role === 'super_admin' ? 'multi_centre' : actor.centreId,
+      details: `${actionReason} (${committed} student rows updated).`,
+      locationVerified: true,
+    });
+    return committed;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, 'students');
+    return committed;
   }
 }
 
@@ -1450,22 +1809,44 @@ export async function upsertFeeRecoveryRecord(
             lockedByName: actor.fullName.slice(0, 100),
           }
         : {};
+    const sanitizedRecord: Record<string, unknown> = {
+      ...record,
+      totalFee: clampFeeValue(record.totalFee),
+      paidAmount: clampFeeValue(record.paidAmount),
+      pendingAmount: clampFeeValue(record.pendingAmount),
+    };
+    if (record.tmaFee !== undefined) sanitizedRecord.tmaFee = clampFeeValue(record.tmaFee);
+    else delete sanitizedRecord.tmaFee;
+    if (record.examFee !== undefined) sanitizedRecord.examFee = clampFeeValue(record.examFee);
+    else delete sanitizedRecord.examFee;
+
     if (snap.exists()) {
       await updateDoc(ref, {
-        ...record,
+        ...sanitizedRecord,
         ...empLockMeta,
         updatedBy: actor.uid,
         updatedAt: serverTimestamp(),
       });
     } else {
       await setDoc(ref, {
-        ...record,
+        ...sanitizedRecord,
         ...empLockMeta,
         createdBy: actor.uid,
         createdAt: serverTimestamp(),
         updatedBy: actor.uid,
         updatedAt: serverTimestamp(),
       });
+    }
+    if (
+      (actor.role === 'super_admin' || actor.role === 'centre_head') &&
+      (record.tmaFee !== undefined || record.examFee !== undefined)
+    ) {
+      await updateDoc(doc(db, 'students', record.studentId), {
+        ...(record.tmaFee !== undefined ? { tmaFee: clampFeeValue(record.tmaFee) } : {}),
+        ...(record.examFee !== undefined ? { examFee: clampFeeValue(record.examFee) } : {}),
+        updatedBy: actor.uid,
+        updatedAt: serverTimestamp(),
+      }).catch(() => {});
     }
     await logActivity({
       actorUid: actor.uid,
@@ -1675,6 +2056,124 @@ export async function upsertOnlineClassRecord(
     });
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, path);
+  }
+}
+
+export async function resetOnlineAttendanceToZeroBatch(
+  students: Student[],
+  onlineClassRecords: OnlineClassRecord[],
+  actor: UserAccount,
+  actionReason = 'Reset online class attendance to 0%',
+): Promise<{ studentsUpdated: number; recordsUpdated: number }> {
+  if (actor.role !== 'super_admin' && actor.role !== 'centre_head') {
+    throw new Error('Only Super Admin or Centre Head can reset online attendance.');
+  }
+
+  const scopedStudents =
+    actor.role === 'super_admin'
+      ? students
+      : students.filter((s) => s.centreId === actor.centreId);
+  const scopedRecords =
+    actor.role === 'super_admin'
+      ? onlineClassRecords
+      : onlineClassRecords.filter((r) => r.centreId === actor.centreId);
+
+  const studentsToReset = scopedStudents.filter((s) => s.classAttendanceStatus !== 'Not Attending');
+  const recordsToReset = scopedRecords.filter(
+    (r) =>
+      r.attendanceStatus !== 'Not Attending' ||
+      Number(r.attendancePercentage ?? 0) !== 0 ||
+      r.participationLevel !== 'Inactive',
+  );
+
+  let studentsUpdated = 0;
+  let recordsUpdated = 0;
+
+  try {
+    const chunkSize = 350;
+
+    for (let i = 0; i < studentsToReset.length; i += chunkSize) {
+      const chunk = studentsToReset.slice(i, i + chunkSize);
+      try {
+        const batch = writeBatch(db);
+        for (const s of chunk) {
+          batch.update(doc(db, 'students', s.studentId), {
+            classAttendanceStatus: 'Not Attending',
+            updatedBy: actor.uid,
+            updatedAt: serverTimestamp(),
+          });
+        }
+        await batch.commit();
+        studentsUpdated += chunk.length;
+      } catch {
+        for (const s of chunk) {
+          try {
+            await updateDoc(doc(db, 'students', s.studentId), {
+              classAttendanceStatus: 'Not Attending',
+              updatedBy: actor.uid,
+              updatedAt: serverTimestamp(),
+            });
+            studentsUpdated += 1;
+          } catch {
+            // Skip any orphaned/deleted doc
+          }
+        }
+      }
+    }
+
+    for (let i = 0; i < recordsToReset.length; i += chunkSize) {
+      const chunk = recordsToReset.slice(i, i + chunkSize);
+      try {
+        const batch = writeBatch(db);
+        for (const r of chunk) {
+          batch.update(doc(db, 'online_class_records', r.studentId), {
+            attendanceStatus: 'Not Attending',
+            participationLevel: 'Inactive',
+            attendancePercentage: 0,
+            updatedBy: actor.uid,
+            updatedAt: serverTimestamp(),
+          });
+        }
+        await batch.commit();
+        recordsUpdated += chunk.length;
+      } catch {
+        for (const r of chunk) {
+          try {
+            await updateDoc(doc(db, 'online_class_records', r.studentId), {
+              attendanceStatus: 'Not Attending',
+              participationLevel: 'Inactive',
+              attendancePercentage: 0,
+              updatedBy: actor.uid,
+              updatedAt: serverTimestamp(),
+            });
+            recordsUpdated += 1;
+          } catch {
+            // Skip any orphaned/deleted doc
+          }
+        }
+      }
+    }
+
+    if (studentsUpdated > 0 || recordsUpdated > 0) {
+      await logActivity({
+        actorUid: actor.uid,
+        actorName: actor.fullName,
+        actorEmail: actor.email,
+        actorRole: actor.role,
+        centreId: actor.role === 'super_admin' ? 'all' : actor.centreId,
+        department: 'online_classes',
+        action: 'ONLINE_ATTENDANCE_RESET_ZERO',
+        targetCollection: 'online_class_records',
+        targetId: actor.role === 'super_admin' ? 'all' : actor.centreId,
+        details: `${actionReason} (${studentsUpdated} student rows, ${recordsUpdated} online class records set to 0% / Not Attending).`,
+        locationVerified: true,
+      }).catch(() => {});
+    }
+
+    return { studentsUpdated, recordsUpdated };
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, 'online_class_records');
+    return { studentsUpdated, recordsUpdated };
   }
 }
 

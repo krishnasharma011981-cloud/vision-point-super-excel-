@@ -127,7 +127,8 @@ service cloud.firestore {
         'examinationStatus', 'centreId', 'centreName', 'admissionDate',
         'assignedEmployeeUid', 'assignedEmployeeName', 'additionalRemarks',
         'employeeLocked', 'tmaLocked', 'practicalLocked', 'onlineClassesLocked', 'admissionLocked',
-        'lockedByUid', 'lockedByName', 'superAdminAccessGranted', 'extraColumns',
+        'lockedByUid', 'lockedByName', 'superAdminAccessGranted', 'tmaFee', 'examFee', 'extraColumns',
+        'rowColor', 'cellColors',
         'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
       ])
       && data.serialNumber is number && data.serialNumber >= 1
@@ -158,7 +159,11 @@ service cloud.firestore {
       && (!('lockedByUid' in data) || isValidStr(data.lockedByUid, 0, 128))
       && (!('lockedByName' in data) || isValidStr(data.lockedByName, 0, 100))
       && (!('superAdminAccessGranted' in data) || data.superAdminAccessGranted is bool)
+      && (!('tmaFee' in data) || (data.tmaFee is number && data.tmaFee >= 0 && data.tmaFee <= 1000000))
+      && (!('examFee' in data) || (data.examFee is number && data.examFee >= 0 && data.examFee <= 1000000))
       && (!('extraColumns' in data) || (data.extraColumns is map && data.extraColumns.size() <= 35))
+      && (!('rowColor' in data) || (data.rowColor is string && data.rowColor.size() <= 20))
+      && (!('cellColors' in data) || (data.cellColors is map && data.cellColors.size() <= 45))
       && isValidStr(data.createdBy, 1, 128)
       && data.createdAt is timestamp
       && isValidStr(data.updatedBy, 1, 128)
@@ -175,7 +180,7 @@ service cloud.firestore {
         'studentId', 'studentName', 'mobileNumber', 'centreId', 'recoveryStatus',
         'followUpStatus', 'totalFee', 'paidAmount', 'pendingAmount',
         'assignedEmployeeUid', 'assignedEmployeeName', 'followUpNotes',
-        'lastContactDate', 'nextFollowUpDate', 'employeeLocked', 'lockedByUid', 'lockedByName',
+        'lastContactDate', 'nextFollowUpDate', 'tmaFee', 'examFee', 'employeeLocked', 'lockedByUid', 'lockedByName',
         'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
       ])
       && isValidId(data.studentId)
@@ -187,6 +192,8 @@ service cloud.firestore {
       && data.totalFee is number && data.totalFee >= 0
       && data.paidAmount is number && data.paidAmount >= 0
       && data.pendingAmount is number && data.pendingAmount >= 0
+      && (!('tmaFee' in data) || (data.tmaFee is number && data.tmaFee >= 0 && data.tmaFee <= 1000000))
+      && (!('examFee' in data) || (data.examFee is number && data.examFee >= 0 && data.examFee <= 1000000))
       && isValidStr(data.assignedEmployeeUid, 0, 128)
       && isValidStr(data.assignedEmployeeName, 0, 100)
       && isValidStr(data.followUpNotes, 0, 1000)
@@ -570,6 +577,21 @@ service cloud.firestore {
         && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.centreId == centreId;
     }
 
+    function isValidExcelSheetConfig(data) {
+      return data.keys().hasAll([
+        'configId', 'headerLabels', 'customColumns', 'hiddenCoreColumns', 'deletedExtraColumns', 'updatedBy', 'updatedAt'
+      ]) && data.keys().hasOnly([
+        'configId', 'headerLabels', 'customColumns', 'hiddenCoreColumns', 'deletedExtraColumns', 'updatedBy', 'updatedAt'
+      ])
+      && isValidId(data.configId)
+      && data.headerLabels is map && data.headerLabels.size() <= 50
+      && data.customColumns is list && data.customColumns.size() <= 35
+      && data.hiddenCoreColumns is list && data.hiddenCoreColumns.size() <= 20
+      && data.deletedExtraColumns is list && data.deletedExtraColumns.size() <= 60
+      && isValidStr(data.updatedBy, 1, 128)
+      && data.updatedAt is timestamp;
+    }
+
     // 4. Collection Rules
     match /centres/{centreId} {
       allow get: if isValidId(centreId) && (isSuperAdmin() || (isActiveUser() && userDoc().centreId == centreId));
@@ -603,13 +625,13 @@ service cloud.firestore {
         (isCentreHeadOf(incoming().centreId) && incoming().createdBy == request.auth.uid) ||
         (isEmployeeOf(incoming().centreId, 'admission') && incoming().createdBy == request.auth.uid && incoming().admissionLocked == true && incoming().lockedByUid == request.auth.uid && (!('tmaLocked' in incoming()) || incoming().tmaLocked == false) && (!('practicalLocked' in incoming()) || incoming().practicalLocked == false) && (!('onlineClassesLocked' in incoming()) || incoming().onlineClassesLocked == false))
       );
-      allow update: if isValidId(studentId) && isActiveUser() && isValidStudent(incoming()) && incoming().studentId == existing().studentId && incoming().serialNumber == existing().serialNumber && incoming().createdAt == existing().createdAt && incoming().createdBy == existing().createdBy && incoming().updatedAt == request.time && (
+      allow update: if isValidId(studentId) && isActiveUser() && isValidStudent(incoming()) && incoming().studentId == existing().studentId && incoming().createdAt == existing().createdAt && incoming().createdBy == existing().createdBy && incoming().updatedAt == request.time && (
         isSuperAdmin() ||
         (isCentreHeadOf(existing().centreId) && incoming().centreId == existing().centreId) ||
-        (isEmployeeOf(existing().centreId, 'tma') && incoming().centreId == existing().centreId && (!('tmaLocked' in existing()) || existing().tmaLocked == false) && incoming().tmaLocked == true && incoming().updatedBy == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['tmaStatus', 'tmaLocked', 'lockedByUid', 'lockedByName', 'updatedBy', 'updatedAt'])) ||
-        (isEmployeeOf(existing().centreId, 'practical') && incoming().centreId == existing().centreId && (!('practicalLocked' in existing()) || existing().practicalLocked == false) && incoming().practicalLocked == true && incoming().updatedBy == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['practicalStatus', 'practicalLocked', 'lockedByUid', 'lockedByName', 'updatedBy', 'updatedAt'])) ||
-        (isEmployeeOf(existing().centreId, 'online_classes') && incoming().centreId == existing().centreId && (!('onlineClassesLocked' in existing()) || existing().onlineClassesLocked == false) && incoming().onlineClassesLocked == true && incoming().updatedBy == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['classAttendanceStatus', 'onlineClassesLocked', 'lockedByUid', 'lockedByName', 'updatedBy', 'updatedAt'])) ||
-        (isEmployeeOf(existing().centreId, 'admission') && incoming().centreId == existing().centreId && (!('admissionLocked' in existing()) || existing().admissionLocked == false) && incoming().admissionLocked == true && incoming().updatedBy == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['studentName', 'mobileNumber', 'subject', 'tcStatus', 'bookStatus', 'whyNios', 'currentEducationStatus', 'futurePlanning', 'examinationStatus', 'admissionDate', 'assignedEmployeeUid', 'assignedEmployeeName', 'additionalRemarks', 'admissionLocked', 'lockedByUid', 'lockedByName', 'updatedBy', 'updatedAt']))
+        (incoming().serialNumber == existing().serialNumber && isEmployeeOf(existing().centreId, 'tma') && incoming().centreId == existing().centreId && (!('tmaLocked' in existing()) || existing().tmaLocked == false) && incoming().tmaLocked == true && incoming().updatedBy == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['tmaStatus', 'tmaLocked', 'lockedByUid', 'lockedByName', 'updatedBy', 'updatedAt'])) ||
+        (incoming().serialNumber == existing().serialNumber && isEmployeeOf(existing().centreId, 'practical') && incoming().centreId == existing().centreId && (!('practicalLocked' in existing()) || existing().practicalLocked == false) && incoming().practicalLocked == true && incoming().updatedBy == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['practicalStatus', 'practicalLocked', 'lockedByUid', 'lockedByName', 'updatedBy', 'updatedAt'])) ||
+        (incoming().serialNumber == existing().serialNumber && isEmployeeOf(existing().centreId, 'online_classes') && incoming().centreId == existing().centreId && (!('onlineClassesLocked' in existing()) || existing().onlineClassesLocked == false) && incoming().onlineClassesLocked == true && incoming().updatedBy == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['classAttendanceStatus', 'onlineClassesLocked', 'lockedByUid', 'lockedByName', 'updatedBy', 'updatedAt'])) ||
+        (incoming().serialNumber == existing().serialNumber && isEmployeeOf(existing().centreId, 'admission') && incoming().centreId == existing().centreId && (!('admissionLocked' in existing()) || existing().admissionLocked == false) && incoming().admissionLocked == true && incoming().updatedBy == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['studentName', 'mobileNumber', 'subject', 'tcStatus', 'bookStatus', 'whyNios', 'currentEducationStatus', 'futurePlanning', 'examinationStatus', 'admissionDate', 'assignedEmployeeUid', 'assignedEmployeeName', 'additionalRemarks', 'tmaFee', 'examFee', 'admissionLocked', 'lockedByUid', 'lockedByName', 'updatedBy', 'updatedAt']))
       );
       allow delete: if isValidId(studentId) && isSuperAdmin();
     }
@@ -884,6 +906,20 @@ service cloud.firestore {
           (!isSuperAdmin() && existing().staffUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['readByStaff']) && incoming().readByStaff == true)
         );
       allow delete: if isValidId(messageId) && isSuperAdmin();
+    }
+
+    match /excel_sheet_configs/{configId} {
+      allow get: if isValidId(configId) && isActiveUser();
+      allow list: if isActiveUser();
+      allow create: if isValidId(configId) && isActiveUser() && isValidExcelSheetConfig(incoming())
+        && incoming().configId == configId
+        && incoming().updatedAt == request.time
+        && (isSuperAdmin() || isCentreHeadOf(configId));
+      allow update: if isValidId(configId) && isActiveUser() && isValidExcelSheetConfig(incoming())
+        && incoming().configId == existing().configId
+        && incoming().updatedAt == request.time
+        && (isSuperAdmin() || isCentreHeadOf(configId));
+      allow delete: if isValidId(configId) && isSuperAdmin();
     }
   }
 }

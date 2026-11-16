@@ -17,6 +17,39 @@ export interface ReconciledFeeResult {
   explicitFeeDetected: boolean;
 }
 
+export interface ResolvedStudentFeeSummary {
+  totalFee: number;
+  paidAmount: number;
+  pendingAmount: number;
+  tmaFee: number;
+  examFee: number;
+  recoveryStatus: RecoveryStatus;
+  followUpStatus: FeeFollowUpStatus;
+  hasFeeData: boolean;
+  hasTmaFee: boolean;
+  hasExamFee: boolean;
+}
+
+export function clampFeeNumber(val: unknown): number {
+  const n = Number(val);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(1000000, Math.round(n));
+}
+
+export function formatCompactInr(val: unknown): string {
+  const n = Number(val || 0);
+  if (!Number.isFinite(n) || n <= 0) return '₹0';
+  if (n >= 100000) {
+    const lakhs = n / 100000;
+    return `₹${Number.isInteger(lakhs) ? lakhs : lakhs.toFixed(1)}L`;
+  }
+  if (n >= 1000) {
+    const k = n / 1000;
+    return `₹${Number.isInteger(k) ? k : k.toFixed(1)}k`;
+  }
+  return `₹${Math.round(n)}`;
+}
+
 /**
  * Masks a mobile number for UI privacy while preserving only the first 2 digits.
  * Example: "9612345678" -> "96********"
@@ -250,6 +283,111 @@ export function reconcileFeeNumbers(params: {
   };
 }
 
+export function resolveStudentFeeSummary(
+  student: Pick<Student, 'tmaFee' | 'examFee' | 'extraColumns'>,
+  rec?: FeeRecoveryRecord,
+): ResolvedStudentFeeSummary {
+  const extras = student.extraColumns || {};
+  const pickExtra = (rx: RegExp): string => {
+    for (const [k, v] of Object.entries(extras)) {
+      if (rx.test(k.toLowerCase())) return v;
+    }
+    return '';
+  };
+
+  const tmaFeeExtraRaw = pickExtra(/tma.*fee|tma.*charge|assignment.*fee/);
+  const examFeeExtraRaw = pickExtra(/exam.*fee|examination.*fee|board.*exam.*fee|exam.*charge/);
+  const parsedTmaExtra = tmaFeeExtraRaw ? parseFeeNumberNullable(tmaFeeExtraRaw) : null;
+  const parsedExamExtra = examFeeExtraRaw ? parseFeeNumberNullable(examFeeExtraRaw) : null;
+
+  const hasTmaFee = rec?.tmaFee !== undefined || student.tmaFee !== undefined || parsedTmaExtra !== null;
+  const hasExamFee = rec?.examFee !== undefined || student.examFee !== undefined || parsedExamExtra !== null;
+
+  const tmaFee =
+    rec?.tmaFee !== undefined
+      ? clampFeeNumber(rec.tmaFee)
+      : student.tmaFee !== undefined
+        ? clampFeeNumber(student.tmaFee)
+        : parsedTmaExtra !== null
+          ? clampFeeNumber(parsedTmaExtra)
+          : 0;
+
+  const examFee =
+    rec?.examFee !== undefined
+      ? clampFeeNumber(rec.examFee)
+      : student.examFee !== undefined
+        ? clampFeeNumber(student.examFee)
+        : parsedExamExtra !== null
+          ? clampFeeNumber(parsedExamExtra)
+          : 0;
+
+  if (rec) {
+    const tot = clampFeeNumber(rec.totalFee);
+    const paid = clampFeeNumber(rec.paidAmount);
+    const pending = Math.max(0, Number(rec.pendingAmount ?? Math.max(0, tot - paid)));
+    return {
+      totalFee: tot,
+      paidAmount: paid,
+      pendingAmount: pending,
+      tmaFee,
+      examFee,
+      recoveryStatus: rec.recoveryStatus,
+      followUpStatus: rec.followUpStatus,
+      hasFeeData: true,
+      hasTmaFee,
+      hasExamFee,
+    };
+  }
+
+  const pickMainExtra = (rx: RegExp): string => {
+    for (const [k, v] of Object.entries(extras)) {
+      const lower = k.toLowerCase();
+      if (lower.includes('tma') || lower.includes('exam')) continue;
+      if (rx.test(lower)) return v;
+    }
+    return '';
+  };
+
+  const totRaw = pickMainExtra(/total.*fee|course.*fee|package/);
+  const paidRaw = pickMainExtra(/paid|jama|deposit|received/);
+  const pendingRaw = pickMainExtra(/pending|baki|baaki|due|balance/);
+  const statusRaw = pickMainExtra(/fee.*status|payment.*status/);
+
+  if (totRaw || paidRaw || pendingRaw || statusRaw) {
+    const reconciled = reconcileFeeNumbers({
+      totalFeeRaw: totRaw,
+      paidAmountRaw: paidRaw,
+      pendingAmountRaw: pendingRaw,
+      feeStatusRaw: statusRaw,
+    });
+    return {
+      totalFee: reconciled.totalFee,
+      paidAmount: reconciled.paidAmount,
+      pendingAmount: reconciled.pendingAmount,
+      tmaFee,
+      examFee,
+      recoveryStatus: reconciled.recoveryStatus,
+      followUpStatus: reconciled.followUpStatus,
+      hasFeeData: true,
+      hasTmaFee,
+      hasExamFee,
+    };
+  }
+
+  return {
+    totalFee: 0,
+    paidAmount: 0,
+    pendingAmount: 0,
+    tmaFee,
+    examFee,
+    recoveryStatus: 'Pending',
+    followUpStatus: 'Scheduled',
+    hasFeeData: hasTmaFee || hasExamFee,
+    hasTmaFee,
+    hasExamFee,
+  };
+}
+
 /**
  * Allocates integer percentages whose sum is guaranteed to equal 100 (Largest Remainder / Hamilton method).
  */
@@ -300,6 +438,8 @@ export interface InstitutionalAnalytics {
   totalFeeBilled: number;
   totalFeePaid: number;
   totalFeePending: number;
+  totalTmaFee: number;
+  totalExamFee: number;
   collectionRatePct: number;
   avgFeePerStudent: number;
   paidCount: number;
@@ -343,61 +483,24 @@ export function computeInstitutionalAnalytics(
   let totalFeeBilled = 0;
   let totalFeePaid = 0;
   let totalFeePending = 0;
+  let totalTmaFee = 0;
+  let totalExamFee = 0;
   let paidCount = 0;
   let partialCount = 0;
   let pendingCount = 0;
   let overdueCount = 0;
 
   // Compute fee financials across ALL scoped students (joining with fee_recovery or extraColumns if present)
-  const resolvedFeePerStudent = new Map<string, ReconciledFeeResult>();
+  const resolvedFeePerStudent = new Map<string, ResolvedStudentFeeSummary>();
   for (const s of scopedStudents) {
     const rec = feeByStudent.get(s.studentId);
-    let resolved: ReconciledFeeResult;
-    if (rec) {
-      const tot = Math.max(0, Number(rec.totalFee || 0));
-      const paid = Math.max(0, Number(rec.paidAmount || 0));
-      const pending = Math.max(0, Number(rec.pendingAmount ?? Math.max(0, tot - paid)));
-      resolved = {
-        totalFee: tot,
-        paidAmount: paid,
-        pendingAmount: pending,
-        recoveryStatus: rec.recoveryStatus,
-        followUpStatus: rec.followUpStatus,
-        explicitFeeDetected: true,
-      };
-    } else {
-      // Fallback: inspect extraColumns if fee_recovery doc hasn't been created yet
-      const extras = s.extraColumns || {};
-      const findExtra = (rx: RegExp): string => {
-        for (const [k, v] of Object.entries(extras)) {
-          if (rx.test(k.toLowerCase())) return v;
-        }
-        return '';
-      };
-      const hasAnyExtraFee =
-        Boolean(findExtra(/total.*fee|course.*fee|package/)) ||
-        Boolean(findExtra(/paid|jama|deposit|received/)) ||
-        Boolean(findExtra(/pending|baki|baaki|due|balance/));
-      resolved = hasAnyExtraFee
-        ? reconcileFeeNumbers({
-            totalFeeRaw: findExtra(/total.*fee|course.*fee|package/),
-            paidAmountRaw: findExtra(/paid|jama|deposit|received/),
-            pendingAmountRaw: findExtra(/pending|baki|baaki|due|balance/),
-            feeStatusRaw: findExtra(/fee.*status|payment.*status/),
-          })
-        : {
-            totalFee: 0,
-            paidAmount: 0,
-            pendingAmount: 0,
-            recoveryStatus: 'Pending',
-            followUpStatus: 'Scheduled',
-            explicitFeeDetected: false,
-          };
-    }
+    const resolved = resolveStudentFeeSummary(s, rec);
     resolvedFeePerStudent.set(s.studentId, resolved);
     totalFeeBilled += resolved.totalFee;
     totalFeePaid += resolved.paidAmount;
     totalFeePending += resolved.pendingAmount;
+    totalTmaFee += resolved.tmaFee;
+    totalExamFee += resolved.examFee;
 
     if (resolved.recoveryStatus === 'Paid') paidCount++;
     else if (resolved.recoveryStatus === 'Partial') partialCount++;
@@ -570,6 +673,8 @@ export function computeInstitutionalAnalytics(
     totalFeeBilled,
     totalFeePaid,
     totalFeePending,
+    totalTmaFee,
+    totalExamFee,
     collectionRatePct,
     avgFeePerStudent,
     paidCount,

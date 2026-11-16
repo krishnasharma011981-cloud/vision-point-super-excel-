@@ -140,6 +140,22 @@ export const StudentProfileModal: React.FC<StudentProfileModalProps> = ({
                 </div>
               ))}
             </div>
+            {(student.tmaFee !== undefined || student.examFee !== undefined) && (
+              <div className="grid grid-cols-2 gap-3 mt-3">
+                <div className="p-3 rounded-lg bg-amber-50/70 border border-amber-200">
+                  <p className="text-[11px] font-medium text-amber-900">TMA Fee</p>
+                  <p className="text-sm font-mono font-bold text-amber-950 mt-0.5">
+                    ₹{Number(student.tmaFee ?? 0).toLocaleString('en-IN')}
+                  </p>
+                </div>
+                <div className="p-3 rounded-lg bg-indigo-50/70 border border-indigo-200">
+                  <p className="text-[11px] font-medium text-indigo-900">Exam Fee</p>
+                  <p className="text-sm font-mono font-bold text-indigo-950 mt-0.5">
+                    ₹{Number(student.examFee ?? 0).toLocaleString('en-IN')}
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5">

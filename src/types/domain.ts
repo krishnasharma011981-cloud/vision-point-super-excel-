@@ -94,9 +94,23 @@ export interface Student {
   lockedByUid?: string;
   lockedByName?: string;
   superAdminAccessGranted?: boolean;
+  tmaFee?: number;
+  examFee?: number;
   extraColumns?: Record<string, string>;
+  rowColor?: string;
+  cellColors?: Record<string, string>;
   createdBy: string;
   createdAt: unknown;
+  updatedBy: string;
+  updatedAt: unknown;
+}
+
+export interface ExcelSheetConfig {
+  configId: string;
+  headerLabels: Record<string, string>;
+  customColumns: string[];
+  hiddenCoreColumns: string[];
+  deletedExtraColumns: string[];
   updatedBy: string;
   updatedAt: unknown;
 }
@@ -111,6 +125,8 @@ export interface FeeRecoveryRecord {
   totalFee: number;
   paidAmount: number;
   pendingAmount: number;
+  tmaFee?: number;
+  examFee?: number;
   assignedEmployeeUid: string;
   assignedEmployeeName: string;
   followUpNotes: string;

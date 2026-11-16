@@ -1,7 +1,7 @@
 import { Download, IndianRupee, MessageCircle, Phone, Search, X } from 'lucide-react';
 import React, { useMemo, useState } from 'react';
 import { CENTRE_MAP } from '../../constants/centres';
-import { buildTelHref, buildWhatsAppHref, maskMobileNumber } from '../../lib/analyticsMath';
+import { buildTelHref, buildWhatsAppHref, clampFeeNumber, maskMobileNumber } from '../../lib/analyticsMath';
 import { buildContextualSerialMap, exportToCsv } from '../../lib/csvUtils';
 import { verifyOperationLocation } from '../../lib/securityClient';
 import { upsertFeeRecoveryRecord } from '../../services/firestoreService';
@@ -50,6 +50,8 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
   const [followUpStatus, setFollowUpStatus] = useState<FeeFollowUpStatus>('Scheduled');
   const [totalFee, setTotalFee] = useState('12000');
   const [paidAmount, setPaidAmount] = useState('0');
+  const [tmaFee, setTmaFee] = useState('0');
+  const [examFee, setExamFee] = useState('0');
   const [assignedEmployeeUid, setAssignedEmployeeUid] = useState('');
   const [followUpNotes, setFollowUpNotes] = useState('');
   const [lastContactDate, setLastContactDate] = useState('');
@@ -87,6 +89,8 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
           totalFee: rec?.totalFee ?? 12000,
           paidAmount: rec?.paidAmount ?? 0,
           pendingAmount: rec?.pendingAmount ?? 12000,
+          tmaFee: rec?.tmaFee ?? s.tmaFee ?? 0,
+          examFee: rec?.examFee ?? s.examFee ?? 0,
           assignedEmployeeName: rec?.assignedEmployeeName || s.assignedEmployeeName || 'Unassigned',
           lastContactDate: rec?.lastContactDate || '—',
           nextFollowUpDate: rec?.nextFollowUpDate || '—',
@@ -134,6 +138,8 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
     setFollowUpStatus(existing?.followUpStatus || 'Scheduled');
     setTotalFee(String(existing?.totalFee ?? 12000));
     setPaidAmount(String(existing?.paidAmount ?? 0));
+    setTmaFee(String(existing?.tmaFee ?? student.tmaFee ?? 0));
+    setExamFee(String(existing?.examFee ?? student.examFee ?? 0));
     setAssignedEmployeeUid(existing?.assignedEmployeeUid || student.assignedEmployeeUid || currentUser.uid);
     setFollowUpNotes(existing?.followUpNotes || '');
     setLastContactDate(existing?.lastContactDate || new Date().toISOString().slice(0, 10));
@@ -165,6 +171,8 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
       const tot = Math.max(0, Number(totalFee) || 0);
       const paid = Math.max(0, Number(paidAmount) || 0);
       const pending = Math.max(0, tot - paid);
+      const cleanTmaFee = clampFeeNumber(tmaFee);
+      const cleanExamFee = clampFeeNumber(examFee);
       const emp = employees.find((u) => u.uid === assignedEmployeeUid);
 
       await upsertFeeRecoveryRecord(
@@ -178,6 +186,8 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
           totalFee: tot,
           paidAmount: paid,
           pendingAmount: pending,
+          tmaFee: cleanTmaFee,
+          examFee: cleanExamFee,
           assignedEmployeeUid,
           assignedEmployeeName: emp?.fullName || currentUser.fullName,
           followUpNotes: followUpNotes.trim(),
@@ -210,6 +220,8 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
         'Total Fee',
         'Paid',
         'Pending',
+        'TMA Fee',
+        'Exam Fee',
         'Last Contact',
         'Next Follow-Up',
         'Assigned To',
@@ -224,6 +236,8 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
         r.totalFee,
         r.paidAmount,
         r.pendingAmount,
+        r.tmaFee,
+        r.examFee,
         r.lastContactDate,
         r.nextFollowUpDate,
         r.assignedEmployeeName,
@@ -332,6 +346,8 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
                   <th className="py-3 px-4">Recovery Status</th>
                   <th className="py-3 px-4">Follow-Up</th>
                   <th className="py-3 px-4 text-right">Pending (INR)</th>
+                  <th className="py-3 px-4 text-right">TMA Fee</th>
+                  <th className="py-3 px-4 text-right">Exam Fee</th>
                   <th className="py-3 px-4">Next Follow-Up</th>
                   <th className="py-3 px-4">Assigned</th>
                   <th className="py-3 px-4 text-right">Update</th>
@@ -393,6 +409,12 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
                     <td className="py-3 px-4 text-zinc-800">{r.followUpStatus}</td>
                     <td className="py-3 px-4 text-right font-mono font-semibold text-black tabular-nums">
                       ₹{r.pendingAmount.toLocaleString('en-IN')}
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono font-semibold text-amber-800 tabular-nums">
+                      ₹{r.tmaFee.toLocaleString('en-IN')}
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono font-semibold text-indigo-800 tabular-nums">
+                      ₹{r.examFee.toLocaleString('en-IN')}
                     </td>
                     <td className="py-3 px-4 font-mono text-zinc-700">{r.nextFollowUpDate}</td>
                     <td className="py-3 px-4 text-zinc-800">{r.assignedEmployeeName}</td>
@@ -479,6 +501,26 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
                     value={paidAmount}
                     onChange={(e) => setPaidAmount(e.target.value)}
                     className="w-full px-3 py-2 text-sm font-mono bg-white text-black border border-zinc-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-black"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-amber-900 mb-1">TMA Fee (INR)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={tmaFee}
+                    onChange={(e) => setTmaFee(e.target.value)}
+                    className="w-full px-3 py-2 text-sm font-mono bg-white text-black border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-black"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-indigo-900 mb-1">Exam Fee (INR)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={examFee}
+                    onChange={(e) => setExamFee(e.target.value)}
+                    className="w-full px-3 py-2 text-sm font-mono bg-white text-black border border-indigo-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-black"
                   />
                 </div>
                 <div>
