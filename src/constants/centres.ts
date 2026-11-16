@@ -109,12 +109,6 @@ export const DEPARTMENTS: Array<{
     shortLabel: 'Admission',
     description: 'New student registration, NIOS admission purpose, and document verification.',
   },
-  {
-    id: 'hr',
-    label: 'HR Department',
-    shortLabel: 'HR',
-    description: 'Staff attendance, onboarding documents, leave tracking, and centre payroll status.',
-  },
 ];
 
 export const DEPARTMENT_LABELS: Record<string, string> = {
@@ -124,7 +118,6 @@ export const DEPARTMENT_LABELS: Record<string, string> = {
   tma: 'TMA',
   online_classes: 'Online Classes',
   admission: 'Admission',
-  hr: 'HR Department',
 };
 
 export const ROLE_LABELS: Record<string, string> = {
@@ -147,7 +140,6 @@ export const SIDEBAR_ITEMS: Array<{
   { id: 'tma', label: 'TMA', department: 'tma' },
   { id: 'online_classes', label: 'Online Classes', department: 'online_classes' },
   { id: 'admission', label: 'Admission', department: 'admission' },
-  { id: 'hr', label: 'HR Department', department: 'hr' },
   { id: 'employee_management', label: 'Employee Management' },
   { id: 'reports', label: 'Reports' },
   { id: 'settings', label: 'Settings' },

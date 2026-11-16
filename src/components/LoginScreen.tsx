@@ -275,7 +275,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
       locationVerified: true,
     }).catch(() => {});
 
-    speakWelcomeMessage(true);
     onAuthenticated(profile, profile.role === 'super_admin' ? selectedCentreId : profile.centreId);
   };
 
@@ -435,15 +434,15 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
               <div className="mt-2.5 relative max-w-[600px]">
                 <div className="flex items-end gap-2">
                   <h1 className="hero-silver-title font-display text-[2.45rem] sm:text-5xl xl:text-[3.65rem] font-extrabold italic uppercase tracking-tight leading-[0.95] pr-2">
-                    VISION POINT
+                    DATABASE
                   </h1>
                   <HeroGraduationCapSvg className="w-14 h-11 sm:w-20 sm:h-16 -ml-4 -mb-1 shrink-0 pointer-events-none select-none" />
                 </div>
 
-                {/* Glossy Slanted Crimson SUPER EXCEL Banner */}
+                {/* Glossy Slanted Crimson SECURITY Banner */}
                 <div className="mt-1.5 inline-block px-5 sm:px-6 py-1.5 rounded-xl super-excel-ribbon -skew-x-12">
                   <span className="block skew-x-12 font-display text-[2.2rem] sm:text-5xl xl:text-[3.35rem] font-extrabold italic uppercase tracking-tight text-white leading-[0.98] drop-shadow-[0_4px_12px_rgba(0,0,0,0.45)]">
-                    SUPER EXCEL
+                    SECURITY
                   </span>
                 </div>
               </div>
@@ -516,7 +515,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 <div className="px-3.5 py-2.5 rounded-2xl bg-[#14103a]/68 backdrop-blur-xl border border-[#9E4BFF]/70 shadow-[0_0_20px_rgba(158,75,255,0.28),inset_0_1px_0_rgba(255,255,255,0.2)] flex items-center gap-2.5">
                   <Users className="w-6 h-6 text-[#A855F7] shrink-0 drop-shadow-[0_0_8px_rgba(168,85,247,0.75)]" />
                   <div className="leading-tight">
-                    <p className="text-base font-extrabold font-mono text-white tabular-nums">06</p>
+                    <p className="text-base font-extrabold font-mono text-white tabular-nums">05</p>
                     <p className="text-[11px] font-semibold text-slate-200">Depts</p>
                   </div>
                 </div>
@@ -566,7 +565,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                     Sign In
                   </h2>
                   <p className="text-xs text-slate-200/90 mt-1.5 leading-relaxed">
-                    Securely access Vision Point Super Excel with your authorized credentials.
+                    Securely access Database Security with your authorized credentials.
                   </p>
                 </div>
 
@@ -903,7 +902,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
               <div className="px-3.5 py-2.5 rounded-2xl bg-[#14103a]/75 backdrop-blur-xl border border-[#9E4BFF]/70 flex items-center gap-2.5">
                 <Users className="w-5 h-5 text-[#A855F7] shrink-0" />
                 <div>
-                  <p className="text-sm font-extrabold font-mono text-white tabular-nums">06</p>
+                  <p className="text-sm font-extrabold font-mono text-white tabular-nums">05</p>
                   <p className="text-[11px] text-slate-200">Depts</p>
                 </div>
               </div>

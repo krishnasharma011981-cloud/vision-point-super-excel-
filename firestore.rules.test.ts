@@ -1,4 +1,4 @@
-// Security Rules Verification Specification for VISION POINT SUPER EXCEL
+// Security Rules Verification Specification for DATABASE SECURITY
 // Covers the 12 Dirty Dozen adversarial payloads defined in security_spec.md.
 // To run against Firebase Emulator Suite:
 //   npx firebase emulators:exec --only firestore "npx tsx firestore.rules.test.ts"
@@ -87,9 +87,10 @@ export const DIRTY_DOZEN_CASES = [
   },
   {
     id: 11,
-    name: 'Audit Log Tampering (Update/Delete)',
-    collection: 'activity_logs/log-1',
-    operation: 'delete',
+    name: 'Non-Super Admin Audit Log Read/Tampering',
+    collection: 'activity_logs',
+    operation: 'list',
+    auth: { uid: 'head-lookerganj', centreId: 'vp_lookerganj', role: 'centre_head' },
     expected: 'PERMISSION_DENIED',
   },
   {

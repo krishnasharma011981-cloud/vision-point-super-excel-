@@ -33,14 +33,12 @@ import {
   YAxis,
 } from 'recharts';
 import { CANONICAL_CENTRES, CENTRE_MAP, DEPARTMENT_LABELS, ROLE_LABELS } from '../constants/centres';
-import { formatDateTime } from '../lib/csvUtils';
 import type {
   ActivityLog,
   AdmissionRecord,
   Centre,
   CentreId,
   FeeRecoveryRecord,
-  HrRecord,
   NavSection,
   OnlineClassRecord,
   PracticalRecord,
@@ -60,7 +58,6 @@ interface OverviewDashboardProps {
   tmaRecords: TmaRecord[];
   onlineClassRecords: OnlineClassRecord[];
   admissionRecords: AdmissionRecord[];
-  hrRecords: HrRecord[];
   activityLogs: ActivityLog[];
   selectedCentreFilter: CentreId | 'all';
   onNavigate: (section: NavSection) => void;
@@ -88,7 +85,6 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   students,
   feeRecords,
   admissionRecords,
-  hrRecords,
   activityLogs,
   selectedCentreFilter,
   onNavigate,
@@ -118,20 +114,6 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   const scopedFees = useMemo(
     () => (effectiveCentre === 'all' ? feeRecords : feeRecords.filter((f) => f.centreId === effectiveCentre)),
     [feeRecords, effectiveCentre],
-  );
-
-  const scopedHr = useMemo(
-    () => (effectiveCentre === 'all' ? hrRecords : hrRecords.filter((h) => h.centreId === effectiveCentre)),
-    [hrRecords, effectiveCentre],
-  );
-
-  const scopedLogs = useMemo(
-    () =>
-      (effectiveCentre === 'all' ? activityLogs : activityLogs.filter((l) => l.centreId === effectiveCentre)).slice(
-        0,
-        8,
-      ),
-    [activityLogs, effectiveCentre],
   );
 
   const totalEmployees = scopedUsers.filter((u) => u.role === 'employee' && u.status === 'Active').length;
@@ -200,7 +182,6 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
       admissionRecords.filter(
         (a) => (effectiveCentre === 'all' || a.centreId === effectiveCentre) && a.admissionStatus === 'Confirmed',
       ).length || scopedStudents.length;
-    const hrProcessed = scopedHr.filter((h) => h.payrollStatus === 'Processed').length;
 
     return [
       { department: 'Admission', Completed: confirmedAdm, Pending: Math.max(0, total - confirmedAdm) },
@@ -208,9 +189,8 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
       { department: 'TMA', Completed: tmaDone, Pending: pendingTma },
       { department: 'Practical', Completed: pracDone, Pending: pendingPractical },
       { department: 'Online', Completed: regularClasses, Pending: Math.max(0, total - regularClasses) },
-      { department: 'HR', Completed: hrProcessed, Pending: Math.max(0, scopedHr.length - hrProcessed) },
     ];
-  }, [scopedStudents, scopedFees, scopedHr, admissionRecords, effectiveCentre, pendingTma, pendingPractical]);
+  }, [scopedStudents, scopedFees, admissionRecords, effectiveCentre, pendingTma, pendingPractical]);
 
   const latestRegistrations = useMemo(() => scopedStudents.slice(0, 5), [scopedStudents]);
 
@@ -236,7 +216,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                 <span className="text-[#FBBF24]">{deptLabel} Department</span>
               </div>
               <h2 className="text-2xl sm:text-4xl font-extrabold italic tracking-tight text-white mt-2">
-                VISION POINT SUPER EXCEL
+                DATABASE SECURITY
               </h2>
               <p className="text-xs sm:text-sm text-slate-100/90 mt-2">
                 Welcome, <strong className="text-[#FBBF24]">{currentUser.fullName}</strong> ({currentUser.centreName}).
@@ -298,11 +278,9 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                 <Users className="w-5 h-5" />
               </div>
               <div>
-                <p className="text-xs font-semibold text-slate-600">
-                  {currentUser.department === 'hr' ? 'Branch HR Roster' : 'Centre Student Roster'}
-                </p>
+                <p className="text-xs font-semibold text-slate-600">Centre Student Roster</p>
                 <p className="text-2xl font-extrabold text-[#0F172A] font-mono tabular-nums mt-0.5">
-                  {currentUser.department === 'hr' ? scopedUsers.length : scopedStudents.length}
+                  {scopedStudents.length}
                 </p>
               </div>
             </div>
@@ -338,24 +316,6 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
           </div>
         </div>
 
-        <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs">
-          <h3 className="text-sm font-bold text-[#0F172A] mb-3">Your Recent Activity Trail</h3>
-          {scopedLogs.length === 0 ? (
-            <p className="text-xs text-slate-600">No recent activity recorded yet.</p>
-          ) : (
-            <div className="divide-y divide-slate-100">
-              {scopedLogs.map((log) => (
-                <div key={log.id || `${log.action}-${log.targetId}`} className="py-2.5 flex items-center justify-between gap-4 text-xs">
-                  <div>
-                    <span className="font-semibold text-[#0F172A]">{log.action}</span>
-                    <span className="text-slate-600 ml-2">{log.details}</span>
-                  </div>
-                  <span className="font-mono text-slate-500 whitespace-nowrap">{formatDateTime(log.createdAt)}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
       </div>
     );
   }
@@ -381,7 +341,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
             </div>
 
             <h2 className="text-2xl sm:text-4xl font-extrabold italic tracking-tight text-white mt-2 leading-none drop-shadow-md">
-              VISION POINT <span className="text-white">SUPER EXCEL</span>
+              DATABASE <span className="text-white">SECURITY</span>
             </h2>
             <p className="text-xs sm:text-sm text-slate-100/95 mt-2 font-medium">
               {currentUser.role === 'super_admin'
@@ -651,7 +611,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
       </div>
 
       {/* Department-Wise & Secondary Operational Metrics */}
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+      <div className={`grid grid-cols-1 sm:grid-cols-3 ${currentUser.role === 'super_admin' ? 'lg:grid-cols-4' : 'lg:grid-cols-3'} gap-4`}>
         <button
           type="button"
           onClick={() => onNavigate('admission')}
@@ -688,29 +648,19 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
           <p className="text-xl font-extrabold text-[#DC2626] font-mono tabular-nums mt-1.5">{pendingPractical}</p>
         </button>
 
-        <button
-          type="button"
-          onClick={() => onNavigate('hr')}
-          className="text-left bg-white rounded-2xl border border-slate-200 p-4 hover:border-[#0F172A] transition-colors shadow-2xs"
-        >
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold text-slate-600">HR Records</span>
-            <Briefcase className="w-4 h-4 text-[#0F172A]" />
-          </div>
-          <p className="text-xl font-extrabold text-[#0F172A] font-mono tabular-nums mt-1.5">{scopedHr.length}</p>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => onNavigate('activity_logs')}
-          className="col-span-2 lg:col-span-1 text-left bg-white rounded-2xl border border-slate-200 p-4 hover:border-emerald-600 transition-colors shadow-2xs"
-        >
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold text-slate-600">Audit Events</span>
-            <ShieldCheck className="w-4 h-4 text-emerald-700" />
-          </div>
-          <p className="text-xl font-extrabold text-[#0F172A] font-mono tabular-nums mt-1.5">{activityLogs.length}</p>
-        </button>
+        {currentUser.role === 'super_admin' && (
+          <button
+            type="button"
+            onClick={() => onNavigate('activity_logs')}
+            className="text-left bg-white rounded-2xl border border-slate-200 p-4 hover:border-emerald-600 transition-colors shadow-2xs"
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-slate-600">Audit Events</span>
+              <ShieldCheck className="w-4 h-4 text-emerald-700" />
+            </div>
+            <p className="text-xl font-extrabold text-[#0F172A] font-mono tabular-nums mt-1.5">{activityLogs.length}</p>
+          </button>
+        )}
       </div>
 
       {/* Department Performance BarChart & Bottom Live Lists */}
@@ -718,7 +668,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
         <div className="lg:col-span-6 bg-white text-[#0F172A] rounded-2xl border border-slate-200 p-5 shadow-xs">
           <h3 className="text-sm font-bold text-[#0F172A]">Department-Wise Performance</h3>
           <p className="text-xs text-slate-600 mt-0.5 mb-4">
-            Completed vs. pending operations across all 6 departments (including HR)
+            Completed vs. pending operations across all 5 departments
           </p>
           <div className="h-60 w-full">
             <ResponsiveContainer width="100%" height="100%">

@@ -33,7 +33,6 @@ import type {
   EmployeeReport,
   EmployeeReportStatus,
   FeeRecoveryRecord,
-  HrRecord,
   LocationVerification,
   NotificationItem,
   OnlineClassRecord,
@@ -1917,48 +1916,6 @@ export async function reviewEmployeeReport(
     });
   } catch (err) {
     handleFirestoreError(err, OperationType.UPDATE, path);
-  }
-}
-
-export async function upsertHrRecord(
-  record: Omit<HrRecord, 'createdBy' | 'createdAt' | 'updatedBy' | 'updatedAt'>,
-  actor: UserAccount,
-  locationVerified: boolean,
-): Promise<void> {
-  const path = `hr_records/${record.recordId}`;
-  try {
-    const ref = doc(db, 'hr_records', record.recordId);
-    const snap = await getDoc(ref);
-    if (snap.exists()) {
-      await updateDoc(ref, {
-        ...record,
-        updatedBy: actor.uid,
-        updatedAt: serverTimestamp(),
-      });
-    } else {
-      await setDoc(ref, {
-        ...record,
-        createdBy: actor.uid,
-        createdAt: serverTimestamp(),
-        updatedBy: actor.uid,
-        updatedAt: serverTimestamp(),
-      });
-    }
-    await logActivity({
-      actorUid: actor.uid,
-      actorName: actor.fullName,
-      actorEmail: actor.email,
-      actorRole: actor.role,
-      centreId: record.centreId,
-      department: 'hr',
-      action: 'HR_RECORD_UPDATED',
-      targetCollection: 'hr_records',
-      targetId: record.recordId,
-      details: `Updated HR record for ${record.staffName} (${record.recordMonth}): ${record.attendanceStatus} · Payroll ${record.payrollStatus}.`,
-      locationVerified,
-    });
-  } catch (err) {
-    handleFirestoreError(err, OperationType.WRITE, path);
   }
 }
 

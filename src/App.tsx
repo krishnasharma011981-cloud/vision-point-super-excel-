@@ -16,7 +16,6 @@ import { CommunicationView } from './components/CommunicationView';
 import { canUserAccessSection, DashboardShell } from './components/DashboardShell';
 import { AdmissionView } from './components/departments/AdmissionView';
 import { FeeRecoveryView } from './components/departments/FeeRecoveryView';
-import { HrView } from './components/departments/HrView';
 import { OnlineClassesView } from './components/departments/OnlineClassesView';
 import { PracticalView } from './components/departments/PracticalView';
 import { TmaView } from './components/departments/TmaView';
@@ -25,13 +24,14 @@ import { LoginScreen } from './components/LoginScreen';
 import { OverviewDashboard } from './components/OverviewDashboard';
 import { ReportsAnalyticsView } from './components/ReportsAnalyticsView';
 import { SettingsView } from './components/SettingsView';
+import { SirWelcomeOverlay } from './components/SirWelcomeOverlay';
 import { StudentDatabaseView } from './components/StudentDatabaseView';
 import { ToastContainer, type ToastMessage } from './components/Toast';
 import { WalkieOverlayBar } from './components/WalkieOverlayBar';
 import { isBootstrappedOwnerEmail } from './constants/centres';
 import { useWalkieComms } from './hooks/useWalkieComms';
 import { auth, db, handleFirestoreError, OperationType } from './lib/firebase';
-import { speakWelcomeMessage } from './lib/voiceWelcome';
+import { speakWelcomeMessage, stopWelcomeMessage } from './lib/voiceWelcome';
 import {
   claimPendingStaffInvite,
   ensureInitialPlatformSetup,
@@ -47,7 +47,6 @@ import type {
   EditRequest,
   EmployeeReport,
   FeeRecoveryRecord,
-  HrRecord,
   LocationVerification,
   NavSection,
   NotificationItem,
@@ -79,7 +78,13 @@ export default function App() {
   const [selectedCentreFilter, setSelectedCentreFilter] = useState<CentreId | 'all'>('all');
   const [globalSearch, setGlobalSearch] = useState('');
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [showSirWelcome, setShowSirWelcome] = useState(false);
+  const [sirSpeaking, setSirSpeaking] = useState(false);
+  const [sirAudioCompleted, setSirAudioCompleted] = useState(false);
+  const [sirAutoplayBlocked, setSirAutoplayBlocked] = useState(false);
+  const [sirProgress, setSirProgress] = useState(0);
   const manualAuthInFlightRef = useRef(false);
+  const sirAutoCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Live Firestore State
   const [dataLoading, setDataLoading] = useState(true);
@@ -91,7 +96,6 @@ export default function App() {
   const [tmaRecords, setTmaRecords] = useState<TmaRecord[]>([]);
   const [onlineClassRecords, setOnlineClassRecords] = useState<OnlineClassRecord[]>([]);
   const [admissionRecords, setAdmissionRecords] = useState<AdmissionRecord[]>([]);
-  const [hrRecords, setHrRecords] = useState<HrRecord[]>([]);
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [locationVerifications, setLocationVerifications] = useState<LocationVerification[]>([]);
   const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null);
@@ -132,7 +136,50 @@ export default function App() {
     ),
   });
 
+  const triggerSirWelcome = useCallback(() => {
+    if (sirAutoCloseTimerRef.current) {
+      clearTimeout(sirAutoCloseTimerRef.current);
+      sirAutoCloseTimerRef.current = null;
+    }
+    setShowSirWelcome(true);
+    setSirSpeaking(true);
+    setSirAudioCompleted(false);
+    setSirAutoplayBlocked(false);
+    setSirProgress(0);
+
+    speakWelcomeMessage(true, {
+      onProgress: (pct) => setSirProgress(pct),
+      onAutoplayBlocked: () => {
+        setSirSpeaking(false);
+        setSirAutoplayBlocked(true);
+      },
+      onEnded: () => {
+        setSirSpeaking(false);
+        setSirAutoplayBlocked(false);
+        setSirProgress(100);
+        setSirAudioCompleted(true);
+        sirAutoCloseTimerRef.current = setTimeout(() => {
+          setShowSirWelcome(false);
+        }, 900);
+      },
+    });
+  }, []);
+
+  const dismissSirWelcome = useCallback(() => {
+    if (sirAutoCloseTimerRef.current) {
+      clearTimeout(sirAutoCloseTimerRef.current);
+      sirAutoCloseTimerRef.current = null;
+    }
+    stopWelcomeMessage();
+    setSirSpeaking(false);
+    setSirAudioCompleted(false);
+    setSirAutoplayBlocked(false);
+    setSirProgress(0);
+    setShowSirWelcome(false);
+  }, []);
+
   const handleLogout = useCallback(async () => {
+    dismissSirWelcome();
     if (currentUser) {
       await logActivity({
         actorUid: currentUser.uid,
@@ -153,7 +200,7 @@ export default function App() {
     setActiveSection('overview');
     setSelectedCentreFilter('all');
     setGlobalSearch('');
-  }, [currentUser]);
+  }, [currentUser, dismissSirWelcome]);
 
   // Restore active verified session on boot (respects active LoginScreen sign-in flow)
   useEffect(() => {
@@ -280,7 +327,6 @@ export default function App() {
 
     const isSuper = currentUser.role === 'super_admin';
     const isHead = currentUser.role === 'centre_head';
-    const isHrEmployee = currentUser.role === 'employee' && currentUser.department === 'hr';
     const cId = currentUser.centreId;
 
     // 1. Centres
@@ -295,8 +341,8 @@ export default function App() {
       ),
     );
 
-    // 2. Users (Super Admin sees all, Centre Head / HR Employee sees own centre, Other Employee sees self)
-    if (isSuper || isHead || isHrEmployee) {
+    // 2. Users (Super Admin sees all, Centre Head sees own centre, Employee sees self)
+    if (isSuper || isHead) {
       const usersQuery = isSuper
         ? query(collection(db, 'users'))
         : query(collection(db, 'users'), where('centreId', '==', cId));
@@ -355,45 +401,40 @@ export default function App() {
     subscribeDept<TmaRecord>('tma_records', 'tma', setTmaRecords);
     subscribeDept<OnlineClassRecord>('online_class_records', 'online_classes', setOnlineClassRecords);
     subscribeDept<AdmissionRecord>('admission_records', 'admission', setAdmissionRecords);
-    subscribeDept<HrRecord>('hr_records', 'hr', setHrRecords);
 
-    // 5. Activity Logs (Client-side sorted for filtered queries)
-    const logsQuery = isSuper
-      ? query(collection(db, 'activity_logs'), orderBy('createdAt', 'desc'), limit(150))
-      : isHead
-        ? query(collection(db, 'activity_logs'), where('centreId', '==', cId), limit(150))
-        : query(collection(db, 'activity_logs'), where('actorUid', '==', currentUser.uid), limit(80));
-    unsubs.push(
-      onSnapshot(
-        logsQuery,
-        (snap) => {
-          const sorted = snap.docs
-            .map((d) => ({ id: d.id, ...(d.data() as ActivityLog) }))
-            .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
-          setActivityLogs(sorted);
-        },
-        (err) => handleFirestoreError(err, OperationType.LIST, 'activity_logs'),
-      ),
-    );
+    // 5 & 6. Activity Logs & Location Verifications (Super Admin ONLY)
+    if (isSuper) {
+      const logsQuery = query(collection(db, 'activity_logs'), orderBy('createdAt', 'desc'), limit(150));
+      unsubs.push(
+        onSnapshot(
+          logsQuery,
+          (snap) => {
+            const sorted = snap.docs
+              .map((d) => ({ id: d.id, ...(d.data() as ActivityLog) }))
+              .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+            setActivityLogs(sorted);
+          },
+          (err) => handleFirestoreError(err, OperationType.LIST, 'activity_logs'),
+        ),
+      );
 
-    // 6. Location Verifications
-    const geoQuery = isSuper
-      ? query(collection(db, 'location_verifications'), orderBy('createdAt', 'desc'), limit(100))
-      : isHead
-        ? query(collection(db, 'location_verifications'), where('centreId', '==', cId), limit(100))
-        : query(collection(db, 'location_verifications'), where('uid', '==', currentUser.uid), limit(50));
-    unsubs.push(
-      onSnapshot(
-        geoQuery,
-        (snap) => {
-          const sorted = snap.docs
-            .map((d) => ({ id: d.id, ...(d.data() as LocationVerification) }))
-            .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
-          setLocationVerifications(sorted);
-        },
-        (err) => handleFirestoreError(err, OperationType.LIST, 'location_verifications'),
-      ),
-    );
+      const geoQuery = query(collection(db, 'location_verifications'), orderBy('createdAt', 'desc'), limit(100));
+      unsubs.push(
+        onSnapshot(
+          geoQuery,
+          (snap) => {
+            const sorted = snap.docs
+              .map((d) => ({ id: d.id, ...(d.data() as LocationVerification) }))
+              .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+            setLocationVerifications(sorted);
+          },
+          (err) => handleFirestoreError(err, OperationType.LIST, 'location_verifications'),
+        ),
+      );
+    } else {
+      setActivityLogs([]);
+      setLocationVerifications([]);
+    }
 
     // 7. System Settings
     unsubs.push(
@@ -517,7 +558,7 @@ export default function App() {
         <div className="glass-login-card rounded-3xl text-center space-y-5 px-8 py-10 max-w-md w-full">
           <div className="w-11 h-11 border-4 border-[#EF4444] border-t-transparent rounded-full animate-spin mx-auto" />
           <div>
-            <p className="text-sm font-extrabold italic tracking-widest uppercase text-white">VISION POINT SUPER EXCEL</p>
+            <p className="text-sm font-extrabold italic tracking-widest uppercase text-white">DATABASE SECURITY</p>
             <p className="text-xs text-slate-300 mt-1">Initializing Ashish Pandey&apos;s Database Security...</p>
           </div>
           <div className="inline-flex flex-col items-center bg-white text-[#0F172A] px-6 py-3.5 rounded-2xl border border-rose-200/70 shadow-xl">
@@ -548,7 +589,7 @@ export default function App() {
             setCurrentUser(profile);
             setSelectedCentreFilter(profile.role === 'super_admin' ? 'all' : activeCentre);
             setActiveSection(profile.role === 'employee' ? (profile.department as NavSection) : 'overview');
-            speakWelcomeMessage(true);
+            triggerSirWelcome();
           }}
         />
         <ToastContainer toasts={toasts} onDismiss={dismissToast} />
@@ -592,7 +633,6 @@ export default function App() {
             tmaRecords={tmaRecords}
             onlineClassRecords={onlineClassRecords}
             admissionRecords={admissionRecords}
-            hrRecords={hrRecords}
             activityLogs={activityLogs}
             selectedCentreFilter={selectedCentreFilter}
             onNavigate={handleSelectSection}
@@ -634,7 +674,6 @@ export default function App() {
             tmaRecords={tmaRecords}
             onlineClassRecords={onlineClassRecords}
             admissionRecords={admissionRecords}
-            hrRecords={hrRecords}
             activityLogs={activityLogs}
             onNotify={notify}
           />
@@ -718,17 +757,6 @@ export default function App() {
           />
         )}
 
-        {safeSection === 'hr' && (
-          <HrView
-            employees={users}
-            hrRecords={hrRecords}
-            currentUser={currentUser}
-            selectedCentreFilter={selectedCentreFilter}
-            globalSearch={globalSearch}
-            onNotify={notify}
-          />
-        )}
-
         {safeSection === 'employee_management' && (
           <EmployeeManagementView
             currentUser={currentUser}
@@ -749,7 +777,6 @@ export default function App() {
             tmaRecords={tmaRecords}
             onlineClassRecords={onlineClassRecords}
             admissionRecords={admissionRecords}
-            hrRecords={hrRecords}
             employeeReports={employeeReports}
             selectedCentreFilter={selectedCentreFilter}
             onNotify={notify}
@@ -767,7 +794,7 @@ export default function App() {
           />
         )}
 
-        {safeSection === 'activity_logs' && (
+        {safeSection === 'activity_logs' && currentUser.role === 'super_admin' && (
           <ActivityLogsView
             currentUser={currentUser}
             activityLogs={activityLogs}
@@ -776,6 +803,15 @@ export default function App() {
           />
         )}
       </DashboardShell>
+      <SirWelcomeOverlay
+        visible={showSirWelcome}
+        isSpeaking={sirSpeaking}
+        audioCompleted={sirAudioCompleted}
+        autoplayBlocked={sirAutoplayBlocked}
+        progress={sirProgress}
+        onPlayNow={triggerSirWelcome}
+        onDismiss={dismissSirWelcome}
+      />
       <WalkieOverlayBar
         currentUser={currentUser}
         incomingWalkie={walkieComms.incomingWalkie}

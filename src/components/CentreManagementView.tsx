@@ -1,6 +1,5 @@
 import {
   ArrowLeft,
-  Briefcase,
   Building2,
   ClipboardCheck,
   Crosshair,
@@ -22,7 +21,6 @@ import type {
   Centre,
   CentreId,
   FeeRecoveryRecord,
-  HrRecord,
   OnlineClassRecord,
   PracticalRecord,
   Student,
@@ -40,7 +38,6 @@ interface CentreManagementViewProps {
   tmaRecords: TmaRecord[];
   onlineClassRecords: OnlineClassRecord[];
   admissionRecords: AdmissionRecord[];
-  hrRecords: HrRecord[];
   activityLogs: ActivityLog[];
   onNotify: (title: string, description: string, variant: 'success' | 'error' | 'warning' | 'info') => void;
 }
@@ -55,7 +52,6 @@ export const CentreManagementView: React.FC<CentreManagementViewProps> = ({
   tmaRecords,
   onlineClassRecords,
   admissionRecords,
-  hrRecords,
   activityLogs,
   onNotify,
 }) => {
@@ -149,8 +145,10 @@ export const CentreManagementView: React.FC<CentreManagementViewProps> = ({
     const cTma = tmaRecords.filter((t) => t.centreId === activeCentre.id);
     const cOnline = onlineClassRecords.filter((o) => o.centreId === activeCentre.id);
     const cAdmissions = admissionRecords.filter((a) => a.centreId === activeCentre.id);
-    const cHr = hrRecords.filter((h) => h.centreId === activeCentre.id);
-    const cLogs = activityLogs.filter((l) => l.centreId === activeCentre.id).slice(0, 8);
+    const cLogs =
+      currentUser.role === 'super_admin'
+        ? activityLogs.filter((l) => l.centreId === activeCentre.id).slice(0, 8)
+        : [];
 
     const feePaidTotal = cFees.reduce((acc, r) => acc + r.paidAmount, 0);
     const feePendingTotal = cFees.reduce((acc, r) => acc + r.pendingAmount, 0);
@@ -211,8 +209,8 @@ export const CentreManagementView: React.FC<CentreManagementViewProps> = ({
           </div>
         </div>
 
-        {/* 6 Department Statistics Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
+        {/* 5 Department Statistics Cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
           <div className="bg-white rounded-xl border border-zinc-200 p-4">
             <div className="flex items-center justify-between text-xs font-semibold text-zinc-700">
               <span>Fee Recovery</span>
@@ -267,15 +265,6 @@ export const CentreManagementView: React.FC<CentreManagementViewProps> = ({
             <p className="text-lg font-bold text-black font-mono mt-2">{cAdmissions.length || cStudents.length}</p>
             <p className="text-[11px] text-zinc-600 mt-0.5">Active enrollments</p>
           </div>
-
-          <div className="bg-white rounded-xl border border-zinc-200 p-4">
-            <div className="flex items-center justify-between text-xs font-semibold text-zinc-700">
-              <span>HR Dept</span>
-              <Briefcase className="w-4 h-4 text-[#B45309]" />
-            </div>
-            <p className="text-lg font-bold text-black font-mono mt-2">{cHr.length}</p>
-            <p className="text-[11px] text-zinc-600 mt-0.5">Staff compliance logs</p>
-          </div>
         </div>
 
         {/* Centre Students & Recent Activities */}
@@ -317,7 +306,9 @@ export const CentreManagementView: React.FC<CentreManagementViewProps> = ({
           </div>
 
           <div className="bg-white rounded-xl border border-zinc-200 p-5">
-            <h3 className="text-sm font-bold text-black mb-3">Branch Staff &amp; Recent Activity</h3>
+            <h3 className="text-sm font-bold text-black mb-3">
+              {currentUser.role === 'super_admin' ? 'Branch Staff & Recent Activity' : 'Branch Staff'}
+            </h3>
             <div className="space-y-2 mb-5">
               {cEmployees.length === 0 ? (
                 <p className="text-xs text-zinc-700">No employees assigned yet.</p>
@@ -331,22 +322,26 @@ export const CentreManagementView: React.FC<CentreManagementViewProps> = ({
               )}
             </div>
 
-            <h4 className="text-xs font-bold uppercase tracking-wider text-zinc-700 mb-2">Recent Activities</h4>
-            <div className="space-y-2.5">
-              {cLogs.length === 0 ? (
-                <p className="text-xs text-zinc-700">No recent centre logs.</p>
-              ) : (
-                cLogs.map((l) => (
-                  <div key={l.id || `${l.action}-${l.targetId}`} className="text-xs border-b border-zinc-200 pb-2">
-                    <div className="flex justify-between gap-2">
-                      <span className="font-semibold text-black">{l.action}</span>
-                      <span className="font-mono text-[11px] text-zinc-600">{formatDateTime(l.createdAt)}</span>
-                    </div>
-                    <p className="text-[11px] text-zinc-700 mt-0.5">{l.details}</p>
-                  </div>
-                ))
-              )}
-            </div>
+            {currentUser.role === 'super_admin' && (
+              <>
+                <h4 className="text-xs font-bold uppercase tracking-wider text-zinc-700 mb-2">Recent Activities</h4>
+                <div className="space-y-2.5">
+                  {cLogs.length === 0 ? (
+                    <p className="text-xs text-zinc-700">No recent centre logs.</p>
+                  ) : (
+                    cLogs.map((l) => (
+                      <div key={l.id || `${l.action}-${l.targetId}`} className="text-xs border-b border-zinc-200 pb-2">
+                        <div className="flex justify-between gap-2">
+                          <span className="font-semibold text-black">{l.action}</span>
+                          <span className="font-mono text-[11px] text-zinc-600">{formatDateTime(l.createdAt)}</span>
+                        </div>
+                        <p className="text-[11px] text-zinc-700 mt-0.5">{l.details}</p>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </>
+            )}
           </div>
         </div>
 

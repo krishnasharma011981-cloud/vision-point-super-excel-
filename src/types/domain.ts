@@ -5,8 +5,7 @@ export type DepartmentId =
   | 'practical'
   | 'tma'
   | 'online_classes'
-  | 'admission'
-  | 'hr';
+  | 'admission';
 
 export type UserDepartment = 'all' | DepartmentId;
 
@@ -31,10 +30,6 @@ export type PracticalSubmissionStatus = 'Submitted' | 'Not Submitted' | 'Under R
 export type ParticipationLevel = 'High' | 'Moderate' | 'Low' | 'Inactive';
 export type AdmissionStatus = 'Confirmed' | 'Provisional' | 'Pending Verification' | 'Cancelled';
 export type AdmissionFollowUpStatus = 'Completed' | 'Pending Follow-up' | 'Document Due';
-
-export type HrAttendanceStatus = 'Present' | 'Leave' | 'Half Day' | 'Absent';
-export type HrOnboardingStatus = 'Verified' | 'Pending Documents' | 'Completed';
-export type HrPayrollStatus = 'Processed' | 'Pending' | 'On Hold';
 
 export interface Centre {
   id: CentreId;
@@ -205,25 +200,6 @@ export interface AdmissionRecord {
   employeeLocked?: boolean;
   lockedByUid?: string;
   lockedByName?: string;
-  createdBy: string;
-  createdAt: unknown;
-  updatedBy: string;
-  updatedAt: unknown;
-}
-
-export interface HrRecord {
-  recordId: string;
-  staffUid: string;
-  staffName: string;
-  staffEmail: string;
-  staffDepartment: UserDepartment;
-  centreId: CentreId;
-  recordMonth: string;
-  attendanceStatus: HrAttendanceStatus;
-  onboardingStatus: HrOnboardingStatus;
-  payrollStatus: HrPayrollStatus;
-  leaveDaysCount: number;
-  remarks: string;
   createdBy: string;
   createdAt: unknown;
   updatedBy: string;
@@ -401,7 +377,6 @@ export type NavSection =
   | 'tma'
   | 'online_classes'
   | 'admission'
-  | 'hr'
   | 'employee_management'
   | 'reports'
   | 'settings'

@@ -2,7 +2,6 @@ import {
   Activity,
   BarChart3,
   Bell,
-  Briefcase,
   Building2,
   ClipboardCheck,
   Crown,
@@ -55,7 +54,6 @@ const SECTION_ICONS: Record<NavSection, React.FC<{ className?: string }>> = {
   tma: ClipboardCheck,
   online_classes: MonitorPlay,
   admission: UserPlus,
-  hr: Briefcase,
   employee_management: UserCog,
   reports: BarChart3,
   settings: Settings,
@@ -63,6 +61,7 @@ const SECTION_ICONS: Record<NavSection, React.FC<{ className?: string }>> = {
 };
 
 export function canUserAccessSection(user: UserAccount, section: NavSection): boolean {
+  if (section === 'activity_logs') return user.role === 'super_admin';
   if (user.role === 'super_admin') return true;
   if (user.role === 'centre_head') return true;
   if (
@@ -126,9 +125,9 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
             <Flame className="w-5 h-5" />
           </div>
           <div className="min-w-0">
-            <p className="text-sm font-extrabold text-white tracking-tight truncate">VISION POINT</p>
+            <p className="text-sm font-extrabold text-white tracking-tight truncate">DATABASE</p>
             <p className="text-[11px] font-extrabold text-[#FBBF24] tracking-wider uppercase truncate">
-              SUPER EXCEL
+              SECURITY
             </p>
           </div>
         </div>
@@ -405,9 +404,9 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
             className="pointer-events-none absolute -left-8 -bottom-10 w-64 h-16 bg-gradient-to-r from-[#DC2626] via-[#EF4444]/60 to-transparent rounded-full blur-md opacity-25"
           />
           <div className="relative z-10 text-xs text-slate-600">
-            <strong className="text-[#0F172A] font-extrabold">VISION POINT SUPER EXCEL</strong>
+            <strong className="text-[#0F172A] font-extrabold">DATABASE SECURITY</strong>
             <span className="mx-1.5 text-slate-400">—</span>
-            <span>Welcome to Ashish Pandey&apos;s Database Security</span>
+            <span>Ashish Pandey&apos;s Multi-Centre Security Portal</span>
           </div>
           <div className="relative z-10 flex items-center gap-3">
             <span className="text-[11px] font-bold text-[#B91C1C]">Powered by</span>

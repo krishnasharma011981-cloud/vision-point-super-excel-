@@ -20,13 +20,12 @@ export const ActivityLogsView: React.FC<ActivityLogsViewProps> = ({
   const [tab, setTab] = useState<'audit' | 'location'>('audit');
   const [search, setSearch] = useState('');
 
-  const effectiveCentre =
-    currentUser.role === 'super_admin' ? selectedCentreFilter : currentUser.centreId;
+  const effectiveCentre = selectedCentreFilter;
 
   const filteredLogs = useMemo(() => {
+    if (currentUser.role !== 'super_admin') return [];
     return activityLogs
       .filter((l) => (effectiveCentre === 'all' ? true : l.centreId === effectiveCentre))
-      .filter((l) => (currentUser.role === 'employee' ? l.actorUid === currentUser.uid : true))
       .filter((l) => {
         if (!search.trim()) return true;
         const q = search.trim().toLowerCase();
@@ -37,18 +36,30 @@ export const ActivityLogsView: React.FC<ActivityLogsViewProps> = ({
           l.details.toLowerCase().includes(q)
         );
       });
-  }, [activityLogs, effectiveCentre, currentUser, search]);
+  }, [activityLogs, effectiveCentre, currentUser.role, search]);
 
   const filteredGeo = useMemo(() => {
+    if (currentUser.role !== 'super_admin') return [];
     return locationVerifications
       .filter((v) => (effectiveCentre === 'all' ? true : v.centreId === effectiveCentre))
-      .filter((v) => (currentUser.role === 'employee' ? v.uid === currentUser.uid : true))
       .filter((v) => {
         if (!search.trim()) return true;
         const q = search.trim().toLowerCase();
         return v.userEmail.toLowerCase().includes(q) || v.operation.toLowerCase().includes(q);
       });
-  }, [locationVerifications, effectiveCentre, currentUser, search]);
+  }, [locationVerifications, effectiveCentre, currentUser.role, search]);
+
+  if (currentUser.role !== 'super_admin') {
+    return (
+      <div className="bg-white rounded-2xl border border-red-200 p-8 text-center">
+        <ShieldCheck className="w-8 h-8 text-red-700 mx-auto mb-2" />
+        <h2 className="text-base font-bold text-slate-900">Access Restricted</h2>
+        <p className="text-xs text-slate-600 mt-1">
+          Activity Logs and Location Verification records are exclusively accessible to the Super Admin.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-5">

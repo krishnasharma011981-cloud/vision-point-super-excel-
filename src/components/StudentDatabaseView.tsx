@@ -113,7 +113,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
 
   const [selectedCell, setSelectedCell] = useState<{ coord: string; value: string }>({
     coord: 'A1',
-    value: 'S.No — Vision Point Super Excel Master Sheet',
+    value: 'S.No — Database Security Master Sheet',
   });
 
   // Inline Excel quick-add row state
@@ -1411,7 +1411,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                                 <Eye className="w-3 h-3" />
                                 {currentUser.department === 'fee_recovery'
                                   ? 'Fee Dept: Edit in Fee Recovery'
-                                  : 'HR Dept: View Only'}
+                                  : 'Department: View Only'}
                               </span>
                             )
                           ) : (

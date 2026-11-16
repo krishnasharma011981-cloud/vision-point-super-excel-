@@ -306,8 +306,8 @@ export const EmployeeManagementView: React.FC<EmployeeManagementViewProps> = ({
           <h2 className="text-lg font-extrabold text-black">Centre-Wise Staff &amp; Leadership Management</h2>
           <p className="text-xs text-zinc-700 mt-0.5">
             {isSuperAdmin
-              ? 'Select any of the four centres below to add department employees (including HR) or assign a Centre Head specifically to that branch.'
-              : `Add and manage department employees (Fee Recovery, Practical, TMA, Online Classes, Admission, HR) within ${CENTRE_MAP[currentUser.centreId]?.name}.`}
+              ? 'Select any of the four centres below to add department employees or assign a Centre Head specifically to that branch.'
+              : `Add and manage department employees (Fee Recovery, Practical, TMA, Online Classes, Admission) within ${CENTRE_MAP[currentUser.centreId]?.name}.`}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2.5">

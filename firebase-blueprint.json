@@ -34,7 +34,7 @@
         "role": { "type": "string", "enum": ["super_admin", "centre_head", "employee"] },
         "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "centreName": { "type": "string", "maxLength": 120 },
-        "department": { "type": "string", "enum": ["all", "fee_recovery", "practical", "tma", "online_classes", "admission", "hr"] },
+        "department": { "type": "string", "enum": ["all", "fee_recovery", "practical", "tma", "online_classes", "admission"] },
         "status": { "type": "string", "enum": ["Active", "Inactive"] },
         "joiningDate": { "type": "string", "maxLength": 30 },
         "createdBy": { "type": "string", "maxLength": 128 },
@@ -224,7 +224,7 @@
     },
     "ActivityLog": {
       "title": "ActivityLog",
-      "description": "Immutable security and operational audit trail",
+      "description": "Immutable security and operational audit trail readable exclusively by Super Admin",
       "type": "object",
       "properties": {
         "actorUid": { "type": "string", "maxLength": 128 },
@@ -244,7 +244,7 @@
     },
     "LocationVerification": {
       "title": "LocationVerification",
-      "description": "Recorded GPS geofence verification attempt with distance and anti-replay nonce",
+      "description": "Recorded GPS geofence verification attempt readable exclusively by Super Admin",
       "type": "object",
       "properties": {
         "uid": { "type": "string", "maxLength": 128 },
@@ -288,7 +288,7 @@
         "uid": { "type": "string", "maxLength": 128 },
         "employeeName": { "type": "string", "maxLength": 100 },
         "centreId": { "type": "string", "maxLength": 64 },
-        "department": { "type": "string", "enum": ["fee_recovery", "practical", "tma", "online_classes", "admission", "hr"] },
+        "department": { "type": "string", "enum": ["fee_recovery", "practical", "tma", "online_classes", "admission"] },
         "assignedBy": { "type": "string", "maxLength": 128 },
         "status": { "type": "string", "enum": ["Active", "Inactive"] },
         "createdAt": { "type": "string", "format": "date-time" },
@@ -339,7 +339,7 @@
         "role": { "type": "string", "enum": ["centre_head", "employee"] },
         "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "centreName": { "type": "string", "maxLength": 120 },
-        "department": { "type": "string", "enum": ["all", "fee_recovery", "practical", "tma", "online_classes", "admission", "hr"] },
+        "department": { "type": "string", "enum": ["all", "fee_recovery", "practical", "tma", "online_classes", "admission"] },
         "joiningDate": { "type": "string", "maxLength": 30 },
         "status": { "type": "string", "enum": ["Pending", "Claimed"] },
         "claimedUid": { "type": "string", "maxLength": 128 },
@@ -362,7 +362,7 @@
         "role": { "type": "string", "enum": ["super_admin", "centre_head", "employee"] },
         "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "centreName": { "type": "string", "maxLength": 120 },
-        "department": { "type": "string", "enum": ["all", "fee_recovery", "practical", "tma", "online_classes", "admission", "hr"] },
+        "department": { "type": "string", "enum": ["all", "fee_recovery", "practical", "tma", "online_classes", "admission"] },
         "reportDate": { "type": "string", "maxLength": 30 },
         "title": { "type": "string", "minLength": 3, "maxLength": 160 },
         "summary": { "type": "string", "minLength": 5, "maxLength": 2000 },
@@ -377,30 +377,6 @@
       },
       "required": ["reportId", "employeeUid", "employeeName", "employeeEmail", "role", "centreId", "centreName", "department", "reportDate", "title", "summary", "tasksCompleted", "studentsHandled", "pendingIssues", "status", "reviewerName", "reviewerNote", "createdAt", "updatedAt"]
     },
-    "HrRecord": {
-      "title": "HrRecord",
-      "description": "HR department attendance, onboarding, leave, and payroll tracking record per staff member",
-      "type": "object",
-      "properties": {
-        "recordId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
-        "staffUid": { "type": "string", "maxLength": 128 },
-        "staffName": { "type": "string", "minLength": 2, "maxLength": 100 },
-        "staffEmail": { "type": "string", "format": "email", "maxLength": 160 },
-        "staffDepartment": { "type": "string", "enum": ["all", "fee_recovery", "practical", "tma", "online_classes", "admission", "hr"] },
-        "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
-        "recordMonth": { "type": "string", "maxLength": 20 },
-        "attendanceStatus": { "type": "string", "enum": ["Present", "Leave", "Half Day", "Absent"] },
-        "onboardingStatus": { "type": "string", "enum": ["Verified", "Pending Documents", "Completed"] },
-        "payrollStatus": { "type": "string", "enum": ["Processed", "Pending", "On Hold"] },
-        "leaveDaysCount": { "type": "number" },
-        "remarks": { "type": "string", "maxLength": 1000 },
-        "createdBy": { "type": "string", "maxLength": 128 },
-        "createdAt": { "type": "string", "format": "date-time" },
-        "updatedBy": { "type": "string", "maxLength": 128 },
-        "updatedAt": { "type": "string", "format": "date-time" }
-      },
-      "required": ["recordId", "staffUid", "staffName", "staffEmail", "staffDepartment", "centreId", "recordMonth", "attendanceStatus", "onboardingStatus", "payrollStatus", "leaveDaysCount", "remarks", "createdBy", "createdAt", "updatedBy", "updatedAt"]
-    },
     "EditRequest": {
       "title": "EditRequest",
       "description": "Employee request to Centre Head for 1-time correction permission on a locked department record",
@@ -411,7 +387,7 @@
         "studentName": { "type": "string", "maxLength": 120 },
         "serialNumber": { "type": "number" },
         "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
-        "department": { "type": "string", "enum": ["fee_recovery", "practical", "tma", "online_classes", "admission", "hr"] },
+        "department": { "type": "string", "enum": ["fee_recovery", "practical", "tma", "online_classes", "admission"] },
         "requesterUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "requesterName": { "type": "string", "maxLength": 100 },
         "requesterEmail": { "type": "string", "maxLength": 160 },
@@ -436,7 +412,7 @@
         "staffEmail": { "type": "string", "format": "email", "maxLength": 160 },
         "staffRole": { "type": "string", "enum": ["centre_head", "employee"] },
         "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
-        "department": { "type": "string", "enum": ["all", "fee_recovery", "practical", "tma", "online_classes", "admission", "hr"] },
+        "department": { "type": "string", "enum": ["all", "fee_recovery", "practical", "tma", "online_classes", "admission"] },
         "senderUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "senderName": { "type": "string", "minLength": 1, "maxLength": 100 },
         "senderRole": { "type": "string", "enum": ["super_admin", "centre_head", "employee"] },
@@ -492,11 +468,11 @@
     },
     "/activity_logs/{logId}": {
       "schema": { "$ref": "#/entities/ActivityLog" },
-      "description": "Immutable operational and security audit logs"
+      "description": "Immutable operational and security audit logs (Super Admin read-only)"
     },
     "/location_verifications/{verificationId}": {
       "schema": { "$ref": "#/entities/LocationVerification" },
-      "description": "GPS geofence verification attempts and outcomes"
+      "description": "GPS geofence verification attempts and outcomes (Super Admin read-only)"
     },
     "/system_settings/{settingId}": {
       "schema": { "$ref": "#/entities/SystemSettings" },
@@ -513,10 +489,6 @@
     "/employee_reports/{reportId}": {
       "schema": { "$ref": "#/entities/EmployeeReport" },
       "description": "Employee daily work reports submitted per centre and department"
-    },
-    "/hr_records/{recordId}": {
-      "schema": { "$ref": "#/entities/HrRecord" },
-      "description": "HR department attendance, onboarding, and payroll tracking records scoped per centre"
     },
     "/edit_requests/{requestId}": {
       "schema": { "$ref": "#/entities/EditRequest" },

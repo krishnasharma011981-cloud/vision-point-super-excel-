@@ -55,7 +55,7 @@ const BOOTSTRAP_PASSWORD_SHA256 = process.env.SUPER_ADMIN_BOOTSTRAP_PASSWORD
 
 const HMAC_SECRET =
   process.env.SECURITY_HMAC_SECRET ||
-  crypto.createHash('sha256').update(`${PROJECT_ID}:${DATABASE_ID}:vision-point-super-excel`).digest('hex');
+  crypto.createHash('sha256').update(`${PROJECT_ID}:${DATABASE_ID}:database-security`).digest('hex');
 
 const JWKS = createRemoteJWKSet(
   new URL('https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com'),
@@ -228,7 +228,7 @@ async function startServer() {
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/api/health', (_req, res) => {
-    res.json({ status: 'ok', service: 'vision-point-super-excel', projectId: PROJECT_ID });
+    res.json({ status: 'ok', service: 'database-security', projectId: PROJECT_ID });
   });
 
   // Server-side bootstrap check for initial Super Admin login
@@ -1018,10 +1018,12 @@ async function startServer() {
 
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
+    const hmrDisabled = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: process.env.DISABLE_HMR === 'true' ? false : { server: httpServer },
+        hmr: !hmrDisabled,
+        ws: hmrDisabled ? false : { server: httpServer },
       },
       appType: 'spa',
     });
@@ -1034,8 +1036,13 @@ async function startServer() {
     });
   }
 
+  httpServer.on('error', (err) => {
+    console.error('HTTP server failed to bind:', err);
+    process.exit(1);
+  });
+
   httpServer.listen(PORT, '0.0.0.0', () => {
-    console.log(`VISION POINT SUPER EXCEL server listening on http://0.0.0.0:${PORT}`);
+    console.log(`DATABASE SECURITY server listening on http://0.0.0.0:${PORT}`);
   });
 }
 

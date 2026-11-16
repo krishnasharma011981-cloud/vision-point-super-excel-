@@ -103,7 +103,7 @@ service cloud.firestore {
       && data.role in ['super_admin', 'centre_head', 'employee']
       && isValidId(data.centreId)
       && isValidStr(data.centreName, 2, 120)
-      && data.department in ['all', 'fee_recovery', 'practical', 'tma', 'online_classes', 'admission', 'hr']
+      && data.department in ['all', 'fee_recovery', 'practical', 'tma', 'online_classes', 'admission']
       && data.status in ['Active', 'Inactive']
       && isValidStr(data.joiningDate, 4, 30)
       && isValidStr(data.createdBy, 1, 128)
@@ -328,7 +328,7 @@ service cloud.firestore {
       && isValidId(data.uid)
       && isValidStr(data.employeeName, 2, 100)
       && isValidId(data.centreId)
-      && data.department in ['fee_recovery', 'practical', 'tma', 'online_classes', 'admission', 'hr']
+      && data.department in ['fee_recovery', 'practical', 'tma', 'online_classes', 'admission']
       && isValidStr(data.assignedBy, 1, 128)
       && data.status in ['Active', 'Inactive']
       && data.createdAt is timestamp
@@ -445,7 +445,7 @@ service cloud.firestore {
       && data.role in ['centre_head', 'employee']
       && isValidId(data.centreId)
       && isValidStr(data.centreName, 2, 120)
-      && data.department in ['all', 'fee_recovery', 'practical', 'tma', 'online_classes', 'admission', 'hr']
+      && data.department in ['all', 'fee_recovery', 'practical', 'tma', 'online_classes', 'admission']
       && isValidStr(data.joiningDate, 4, 30)
       && data.status in ['Pending', 'Claimed']
       && isValidStr(data.claimedUid, 0, 128)
@@ -472,7 +472,7 @@ service cloud.firestore {
       && data.role in ['super_admin', 'centre_head', 'employee']
       && isValidId(data.centreId)
       && isValidStr(data.centreName, 2, 120)
-      && data.department in ['all', 'fee_recovery', 'practical', 'tma', 'online_classes', 'admission', 'hr']
+      && data.department in ['all', 'fee_recovery', 'practical', 'tma', 'online_classes', 'admission']
       && isValidStr(data.reportDate, 4, 30)
       && isValidStr(data.title, 3, 160)
       && isValidStr(data.summary, 5, 2000)
@@ -483,34 +483,6 @@ service cloud.firestore {
       && isValidStr(data.reviewerName, 0, 100)
       && isValidStr(data.reviewerNote, 0, 1000)
       && data.createdAt is timestamp
-      && data.updatedAt is timestamp;
-    }
-
-    function isValidHrRecord(data) {
-      return data.keys().hasAll([
-        'recordId', 'staffUid', 'staffName', 'staffEmail', 'staffDepartment', 'centreId',
-        'recordMonth', 'attendanceStatus', 'onboardingStatus', 'payrollStatus',
-        'leaveDaysCount', 'remarks', 'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
-      ]) && data.keys().hasOnly([
-        'recordId', 'staffUid', 'staffName', 'staffEmail', 'staffDepartment', 'centreId',
-        'recordMonth', 'attendanceStatus', 'onboardingStatus', 'payrollStatus',
-        'leaveDaysCount', 'remarks', 'createdBy', 'createdAt', 'updatedBy', 'updatedAt'
-      ])
-      && isValidId(data.recordId)
-      && isValidId(data.staffUid)
-      && isValidStr(data.staffName, 2, 100)
-      && isValidStr(data.staffEmail, 5, 160)
-      && data.staffDepartment in ['all', 'fee_recovery', 'practical', 'tma', 'online_classes', 'admission', 'hr']
-      && isValidId(data.centreId)
-      && isValidStr(data.recordMonth, 4, 20)
-      && data.attendanceStatus in ['Present', 'Leave', 'Half Day', 'Absent']
-      && data.onboardingStatus in ['Verified', 'Pending Documents', 'Completed']
-      && data.payrollStatus in ['Processed', 'Pending', 'On Hold']
-      && data.leaveDaysCount is number && data.leaveDaysCount >= 0 && data.leaveDaysCount <= 31
-      && isValidStr(data.remarks, 0, 1000)
-      && isValidStr(data.createdBy, 1, 128)
-      && data.createdAt is timestamp
-      && isValidStr(data.updatedBy, 1, 128)
       && data.updatedAt is timestamp;
     }
 
@@ -529,7 +501,7 @@ service cloud.firestore {
       && isValidStr(data.studentName, 2, 120)
       && data.serialNumber is number && data.serialNumber >= 1
       && isValidId(data.centreId)
-      && data.department in ['fee_recovery', 'practical', 'tma', 'online_classes', 'admission', 'hr']
+      && data.department in ['fee_recovery', 'practical', 'tma', 'online_classes', 'admission']
       && isValidId(data.requesterUid)
       && isValidStr(data.requesterName, 1, 100)
       && isValidStr(data.requesterEmail, 3, 160)
@@ -558,7 +530,7 @@ service cloud.firestore {
       && isValidStr(data.staffEmail, 3, 160)
       && data.staffRole in ['centre_head', 'employee']
       && data.centreId in ['vp_lookerganj', 'vp_civillines', 'xis_varanasi', 'xis_jaunpur']
-      && data.department in ['all', 'fee_recovery', 'practical', 'tma', 'online_classes', 'admission', 'hr']
+      && data.department in ['all', 'fee_recovery', 'practical', 'tma', 'online_classes', 'admission']
       && isValidId(data.senderUid)
       && isValidStr(data.senderName, 1, 100)
       && data.senderRole in ['super_admin', 'centre_head', 'employee']
@@ -608,8 +580,8 @@ service cloud.firestore {
     }
 
     match /users/{uid} {
-      allow get: if isValidId(uid) && isSignedIn() && (request.auth.uid == uid || isSuperAdmin() || (isActiveUser() && (userDoc().role == 'centre_head' || userDoc().department == 'hr') && resource.data.centreId == userDoc().centreId));
-      allow list: if isSuperAdmin() || (isActiveUser() && (userDoc().role == 'centre_head' || userDoc().department == 'hr') && resource.data.centreId == userDoc().centreId);
+      allow get: if isValidId(uid) && isSignedIn() && (request.auth.uid == uid || isSuperAdmin() || (isActiveUser() && userDoc().role == 'centre_head' && resource.data.centreId == userDoc().centreId));
+      allow list: if isSuperAdmin() || (isActiveUser() && userDoc().role == 'centre_head' && resource.data.centreId == userDoc().centreId);
       allow create: if isValidId(uid) && isVerifiedUser() && isValidUser(incoming()) && incoming().uid == uid && incoming().createdAt == request.time && incoming().updatedAt == request.time && (
         isSuperAdmin() ||
         isValidInviteClaim(uid) ||
@@ -749,15 +721,15 @@ service cloud.firestore {
     }
 
     match /activity_logs/{logId} {
-      allow get: if isValidId(logId) && (isSuperAdmin() || isCentreHeadOf(resource.data.centreId) || (isActiveUser() && resource.data.actorUid == request.auth.uid));
-      allow list: if isSuperAdmin() || (isActiveUser() && ((userDoc().role == 'centre_head' && resource.data.centreId == userDoc().centreId) || resource.data.actorUid == request.auth.uid));
+      allow get: if isValidId(logId) && isSuperAdmin();
+      allow list: if isSuperAdmin();
       allow create: if isValidId(logId) && isVerifiedUser() && isValidActivityLog(incoming()) && incoming().actorUid == request.auth.uid && incoming().createdAt == request.time;
       allow update, delete: if false;
     }
 
     match /location_verifications/{verificationId} {
-      allow get: if isValidId(verificationId) && (isSuperAdmin() || isCentreHeadOf(resource.data.centreId) || (isActiveUser() && resource.data.uid == request.auth.uid));
-      allow list: if isSuperAdmin() || (isActiveUser() && ((userDoc().role == 'centre_head' && resource.data.centreId == userDoc().centreId) || resource.data.uid == request.auth.uid));
+      allow get: if isValidId(verificationId) && isSuperAdmin();
+      allow list: if isSuperAdmin();
       allow create: if isValidId(verificationId) && isVerifiedUser() && isValidLocationVerification(incoming()) && incoming().uid == request.auth.uid && incoming().createdAt == request.time;
       allow update, delete: if false;
     }
@@ -826,26 +798,6 @@ service cloud.firestore {
         (existing().employeeUid == request.auth.uid && existing().status == 'Submitted' && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'summary', 'tasksCompleted', 'studentsHandled', 'pendingIssues', 'updatedAt']))
       );
       allow delete: if isValidId(reportId) && isSuperAdmin();
-    }
-
-    match /hr_records/{recordId} {
-      allow get: if isValidId(recordId) && (
-        isSuperAdmin() ||
-        isCentreHeadOf(resource.data.centreId) ||
-        isEmployeeOf(resource.data.centreId, 'hr')
-      );
-      allow list: if isSuperAdmin() || (
-        isActiveUser() && resource.data.centreId == userDoc().centreId && (userDoc().role == 'centre_head' || userDoc().department == 'hr')
-      );
-      allow create: if isValidId(recordId) && isActiveUser() && isValidHrRecord(incoming()) && incoming().recordId == recordId && incoming().createdAt == request.time && incoming().updatedAt == request.time && (
-        isSuperAdmin() ||
-        ((isCentreHeadOf(incoming().centreId) || isEmployeeOf(incoming().centreId, 'hr')) && incoming().createdBy == request.auth.uid)
-      );
-      allow update: if isValidId(recordId) && isActiveUser() && isValidHrRecord(incoming()) && incoming().recordId == existing().recordId && incoming().createdAt == existing().createdAt && incoming().createdBy == existing().createdBy && incoming().updatedAt == request.time && (
-        isSuperAdmin() ||
-        (incoming().centreId == existing().centreId && (isCentreHeadOf(existing().centreId) || isEmployeeOf(existing().centreId, 'hr')))
-      );
-      allow delete: if isValidId(recordId) && isSuperAdmin();
     }
 
     match /edit_requests/{requestId} {
