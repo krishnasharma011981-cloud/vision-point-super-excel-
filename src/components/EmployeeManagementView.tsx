@@ -124,8 +124,19 @@ export const EmployeeManagementView: React.FC<EmployeeManagementViewProps> = ({
 
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!fullName.trim() || !email.trim() || password.length < 6) {
+    const cleanEmail = email.trim().toLowerCase();
+    if (!fullName.trim() || !cleanEmail || password.length < 6) {
       onNotify('Validation Error', 'Name, valid email, and password (min 6 chars) are required.', 'error');
+      return;
+    }
+
+    const existingStaff = users.find((u) => u.email.trim().toLowerCase() === cleanEmail);
+    if (existingStaff) {
+      onNotify(
+        'Staff Already Exists',
+        `${existingStaff.fullName} (${existingStaff.email}) is already registered in Active Staff. Click "Edit" on their row below to update Role, Centre, or Status.`,
+        'warning',
+      );
       return;
     }
 
@@ -136,7 +147,7 @@ export const EmployeeManagementView: React.FC<EmployeeManagementViewProps> = ({
     setBusy(true);
     try {
       const provisioned = await provisionAuthUserOnServer({
-        email: email.trim(),
+        email: cleanEmail,
         password,
         fullName: fullName.trim(),
         role: finalRole,
@@ -148,7 +159,7 @@ export const EmployeeManagementView: React.FC<EmployeeManagementViewProps> = ({
         await createStaffInvite(
           {
             fullName: fullName.trim(),
-            email: email.trim(),
+            email: cleanEmail,
             mobileNumber: mobileNumber.trim(),
             role: finalRole,
             centreId: finalCentre,
@@ -159,10 +170,14 @@ export const EmployeeManagementView: React.FC<EmployeeManagementViewProps> = ({
         );
 
         onNotify(
-          `${ROLE_LABELS[finalRole]} Authorized`,
-          `${fullName.trim()} (${email.trim()}) assigned to ${CENTRE_MAP[finalCentre].name}${
-            finalRole === 'employee' ? ` (${DEPARTMENT_LABELS[finalDept]})` : ''
-          }. Ask them to select "${CENTRE_MAP[finalCentre].name}" and click Sign in with Google.`,
+          provisioned.reason === 'email_exists'
+            ? `${ROLE_LABELS[finalRole]} Pre-Authorized`
+            : `${ROLE_LABELS[finalRole]} Authorized`,
+          provisioned.reason === 'email_exists'
+            ? `${cleanEmail} already exists in Firebase Auth. Saved as Pre-Authorized Invite for ${CENTRE_MAP[finalCentre].name} — ask ${fullName.trim()} to select "${CENTRE_MAP[finalCentre].name}" and log in with their Email & Password to activate.`
+            : `${fullName.trim()} (${cleanEmail}) assigned to ${CENTRE_MAP[finalCentre].name}${
+                finalRole === 'employee' ? ` (${DEPARTMENT_LABELS[finalDept]})` : ''
+              }. Ask them to select "${CENTRE_MAP[finalCentre].name}" and log in with their Email & Password.`,
           'success',
         );
       } else {
@@ -399,7 +414,7 @@ export const EmployeeManagementView: React.FC<EmployeeManagementViewProps> = ({
                 </strong>
               ) : pendingHeadInSelectedCentre ? (
                 <strong className="text-amber-300">
-                  {pendingHeadInSelectedCentre.fullName} ({pendingHeadInSelectedCentre.email}) — Pending First Google Login
+                  {pendingHeadInSelectedCentre.fullName} ({pendingHeadInSelectedCentre.email}) — Pending First Login
                 </strong>
               ) : (
                 <span className="text-sky-200/70">Not assigned yet</span>
@@ -463,13 +478,13 @@ export const EmployeeManagementView: React.FC<EmployeeManagementViewProps> = ({
         </select>
       </div>
 
-      {/* Pending Google Sign-In Invites */}
+      {/* Pending Activation Invites */}
       {pendingInvites.length > 0 && (
         <div className="bg-white rounded-xl border border-amber-400 overflow-hidden shadow-xs">
           <div className="px-5 py-3 bg-amber-50 border-b border-amber-200 flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs font-bold text-black">
               <Clock className="w-4 h-4 text-[#B45309]" />
-              Pre-Authorized Staff Invites (Select assigned centre &amp; click Sign in with Google to activate)
+              Pre-Authorized Staff Invites (Select assigned centre &amp; log in with Email &amp; Password to activate)
             </div>
             <span className="text-xs font-mono font-bold text-black">{pendingInvites.length} pending</span>
           </div>
@@ -499,7 +514,7 @@ export const EmployeeManagementView: React.FC<EmployeeManagementViewProps> = ({
                     <td className="py-3 px-4 text-zinc-800">{DEPARTMENT_LABELS[inv.department]}</td>
                     <td className="py-3 px-4">
                       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-100 text-black font-semibold text-[11px]">
-                        <CheckCircle2 className="w-3 h-3 text-[#B45309]" /> Ready for Google Sign-In
+                        <CheckCircle2 className="w-3 h-3 text-[#B45309]" /> Pending Activation
                       </span>
                     </td>
                     <td className="py-3 px-4 text-right">
@@ -621,7 +636,7 @@ export const EmployeeManagementView: React.FC<EmployeeManagementViewProps> = ({
                 </h3>
                 <p className="text-xs text-zinc-700 mt-0.5">
                   {role === 'centre_head'
-                    ? 'Select which branch this Centre Head will manage and provide their Google / work email.'
+                    ? 'Select which branch this Centre Head will manage and provide their login email address.'
                     : 'Choose the assigned centre and single department for this employee.'}
                 </p>
               </div>
@@ -731,7 +746,7 @@ export const EmployeeManagementView: React.FC<EmployeeManagementViewProps> = ({
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-black mb-1">Google / Work Email Address</label>
+                <label className="block text-xs font-semibold text-black mb-1">Email Address</label>
                 <input
                   type="email"
                   required

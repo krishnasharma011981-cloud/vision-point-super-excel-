@@ -3318,7 +3318,7 @@ export async function createStaffInvite(
       action: 'STAFF_INVITE_CREATED',
       targetCollection: 'staff_invites',
       targetId: inviteId,
-      details: `Pre-authorized ${params.role} (${params.fullName.trim()} · ${cleanEmail}) for ${centreName} via Google Sign-In.`,
+      details: `Pre-authorized ${params.role} (${params.fullName.trim()} · ${cleanEmail}) for ${centreName} (pending activation).`,
       locationVerified: true,
     });
     return inviteDoc as unknown as StaffInvite;
@@ -3470,7 +3470,7 @@ export function claimPendingStaffInvite(authUser: {
         action: 'STAFF_INVITE_CLAIMED',
         targetCollection: 'users',
         targetId: authUser.uid,
-        details: `${fullName} activated ${invite.role} account at ${centreInfo.name} via Google Sign-In.`,
+        details: `${fullName} activated ${invite.role} account at ${centreInfo.name} on login.`,
         locationVerified: true,
       }).catch(() => {});
       return userProfile as unknown as UserAccount;

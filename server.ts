@@ -638,6 +638,14 @@ async function startServer() {
         });
         return;
       }
+      if (msg === 'EMAIL_EXISTS') {
+        res.status(409).json({
+          emailExists: true,
+          code: 'EMAIL_EXISTS',
+          error: 'This email already has a Firebase Authentication account.',
+        });
+        return;
+      }
       res.status(400).json({ error: msg });
       return;
     }

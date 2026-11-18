@@ -1,7 +1,6 @@
 import {
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
-  signInWithPopup,
   signOut,
 } from 'firebase/auth';
 import {
@@ -9,7 +8,6 @@ import {
   Building2,
   Check,
   ChevronDown,
-  ExternalLink,
   Eye,
   EyeOff,
   Flame,
@@ -20,16 +18,14 @@ import {
   Mail,
   MapPin,
   Monitor,
-  RefreshCw,
   ShieldCheck,
   Users,
   X,
 } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import React, { useEffect, useRef, useState } from 'react';
-import firebaseConfig from '../../firebase-applet-config.json';
 import { CANONICAL_CENTRES, CENTRE_MAP, isBootstrappedOwnerEmail } from '../constants/centres';
-import { auth, googleProvider } from '../lib/firebase';
+import { auth } from '../lib/firebase';
 import { verifySuperAdminOwnerOnServer } from '../lib/securityClient';
 import { speakWelcomeMessage } from '../lib/voiceWelcome';
 import {
@@ -171,53 +167,12 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(externalError || null);
-  const [providerDisabledHelp, setProviderDisabledHelp] = useState(false);
-  const [emailPasswordEnabled, setEmailPasswordEnabled] = useState<boolean | null>(null);
-  const [showEmailFormWhenDisabled, setShowEmailFormWhenDisabled] = useState(false);
-  const [checkingProviders, setCheckingProviders] = useState(false);
-  const [popupBlockedHelp, setPopupBlockedHelp] = useState(false);
 
   const [showResetModal, setShowResetModal] = useState(false);
   const [resetEmail, setResetEmail] = useState('');
   const [resetSending, setResetSending] = useState(false);
 
   const dropdownRef = useRef<HTMLDivElement>(null);
-
-  const checkProviderStatus = async (manual = false) => {
-    if (manual) setCheckingProviders(true);
-    try {
-      const res = await fetch('/api/auth/provider-status');
-      const data = (await res.json().catch(() => ({}))) as { emailPasswordEnabled?: boolean };
-      if (typeof data.emailPasswordEnabled === 'boolean') {
-        setEmailPasswordEnabled(data.emailPasswordEnabled);
-        if (data.emailPasswordEnabled) {
-          setProviderDisabledHelp(false);
-          setShowEmailFormWhenDisabled(true);
-          if (manual) {
-            onNotify(
-              'Email/Password Enabled',
-              'Email/Password Sign-In is now active in Firebase! You can log in directly.',
-              'success',
-            );
-          }
-        } else if (manual) {
-          onNotify(
-            'Still Disabled in Firebase',
-            'Enable Email/Password in Firebase Console -> Authentication -> Sign-in method, or click Sign in with Google above.',
-            'warning',
-          );
-        }
-      }
-    } catch {
-      // ignore probe failure
-    } finally {
-      if (manual) setCheckingProviders(false);
-    }
-  };
-
-  useEffect(() => {
-    void checkProviderStatus(false);
-  }, []);
 
   useEffect(() => {
     if (externalError) {
@@ -322,7 +277,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   const handleEmailLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
-    setProviderDisabledHelp(false);
 
     if (!email.trim() || !password) {
       setErrorMsg('Please enter both Email Address and Password.');
@@ -336,15 +290,18 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: email.trim(), password }),
-      });
-      const prepData = (await prepRes.json().catch(() => ({}))) as {
-        ready?: boolean;
-        providerDisabled?: boolean;
-      };
-      if (prepData.providerDisabled) {
-        setEmailPasswordEnabled(false);
-        setProviderDisabledHelp(true);
-        return;
+      }).catch(() => null);
+      if (prepRes && (prepRes.headers.get('content-type') || '').toLowerCase().includes('application/json')) {
+        const prepData = (await prepRes.json().catch(() => ({}))) as {
+          ready?: boolean;
+          providerDisabled?: boolean;
+        };
+        if (prepData.providerDisabled) {
+          setErrorMsg(
+            'Email/Password sign-in is disabled in Firebase Console. Enable it under Authentication -> Sign-in method.',
+          );
+          return;
+        }
       }
 
       const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
@@ -352,49 +309,17 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code || '';
       if (code === 'auth/operation-not-allowed') {
-        setEmailPasswordEnabled(false);
-        setProviderDisabledHelp(true);
+        setErrorMsg(
+          'Email/Password sign-in is disabled in Firebase Console. Enable it under Authentication -> Sign-in method.',
+        );
       } else if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
-        setErrorMsg('Invalid email address or password.');
+        setErrorMsg(
+          "Invalid email address or password. (If your account has no password set yet, click 'Forgot password?' below to create one.)",
+        );
       } else if (code === 'auth/too-many-requests') {
         setErrorMsg('Too many failed attempts. Please wait a few minutes or reset your password.');
       } else {
         setErrorMsg(err instanceof Error ? err.message : 'Authentication failed.');
-      }
-    } finally {
-      onAuthFlowChange?.(false);
-      setLoading(false);
-    }
-  };
-
-  const handleGoogleLogin = async () => {
-    setErrorMsg(null);
-    setProviderDisabledHelp(false);
-    setPopupBlockedHelp(false);
-    setLoading(true);
-    onAuthFlowChange?.(true);
-    try {
-      const cred = await signInWithPopup(auth, googleProvider);
-      await validateCentreAndComplete(cred.user.uid, cred.user.email || '', cred.user.emailVerified);
-    } catch (err: unknown) {
-      const code = (err as { code?: string })?.code || '';
-      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
-        return;
-      }
-      if (code === 'auth/popup-blocked') {
-        setPopupBlockedHelp(true);
-        setErrorMsg(
-          'Google Sign-In popup was blocked by your browser inside this embedded frame. Click "Open App in New Tab" below or allow popups and try again.',
-        );
-      } else if (code === 'auth/unauthorized-domain') {
-        const host = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
-        setErrorMsg(
-          `Google Sign-In domain (${host}) is not authorized in Firebase Console -> Authentication -> Settings -> Authorized domains.`,
-        );
-      } else if (code === 'auth/operation-not-allowed') {
-        setErrorMsg('Google Sign-In provider is not enabled in Firebase Console -> Authentication -> Sign-in method.');
-      } else {
-        setErrorMsg(err instanceof Error ? err.message : 'Google authentication failed.');
       }
     } finally {
       onAuthFlowChange?.(false);
@@ -658,39 +583,21 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
 
               {/* Account Access Warning Banner */}
               {errorMsg && (
-                <div className="mb-3.5 px-3.5 py-2.5 rounded-2xl bg-[#9A001B]/45 backdrop-blur-md border border-[#FF1739]/85 shadow-[0_0_20px_rgba(255,23,57,0.28)] space-y-2 text-xs text-white leading-snug">
-                  <div className="flex items-start gap-2.5">
-                    <AlertTriangle className="w-4 h-4 text-white shrink-0 mt-0.5" />
-                    <span className="flex-1">{errorMsg}</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setErrorMsg(null);
-                        setPopupBlockedHelp(false);
-                      }}
-                      className="text-white/70 hover:text-white p-0.5 shrink-0"
-                      aria-label="Dismiss alert"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                  {popupBlockedHelp && typeof window !== 'undefined' && (
-                    <div className="pt-1">
-                      <a
-                        href={window.location.href}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white text-[#071329] font-bold hover:bg-slate-100"
-                      >
-                        Open App in New Tab
-                        <ExternalLink className="w-3.5 h-3.5" />
-                      </a>
-                    </div>
-                  )}
+                <div className="mb-3.5 px-3.5 py-2.5 rounded-2xl bg-[#9A001B]/45 backdrop-blur-md border border-[#FF1739]/85 shadow-[0_0_20px_rgba(255,23,57,0.28)] flex items-start gap-2.5 text-xs text-white leading-snug">
+                  <AlertTriangle className="w-4 h-4 text-white shrink-0 mt-0.5" />
+                  <span className="flex-1">{errorMsg}</span>
+                  <button
+                    type="button"
+                    onClick={() => setErrorMsg(null)}
+                    className="text-white/70 hover:text-white p-0.5 shrink-0"
+                    aria-label="Dismiss alert"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
                 </div>
               )}
 
-              {/* Custom Animated Dark-Glass Select Centre Dropdown (Shared by Google & Email login) */}
+              {/* Custom Animated Dark-Glass Select Centre Dropdown */}
               <div ref={dropdownRef} className="relative mb-3">
                 <label
                   htmlFor="centre-dropdown-trigger"
@@ -759,235 +666,89 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 </AnimatePresence>
               </div>
 
-              {/* When Email/Password is disabled in Firebase Console, promote 1-Click Google Sign-In directly */}
-              {emailPasswordEnabled === false && (
-                <div className="space-y-3 mb-3">
-                  <button
-                    type="button"
-                    onClick={handleGoogleLogin}
-                    disabled={loading}
-                    className="group relative overflow-hidden w-full py-3 px-5 btn-crimson-gloss text-white text-sm font-extrabold rounded-full transition-all duration-200 hover:-translate-y-0.5 disabled:opacity-50 inline-flex items-center justify-center gap-2.5 tracking-wide"
-                  >
-                    <svg className="w-4 h-4 shrink-0 bg-white rounded-full p-0.5" viewBox="0 0 24 24" aria-hidden="true">
-                      <path
-                        fill="#4285F4"
-                        d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z"
-                      />
-                      <path
-                        fill="#34A853"
-                        d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24Z"
-                      />
-                      <path
-                        fill="#FBBC05"
-                        d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14Z"
-                      />
-                      <path
-                        fill="#EA4335"
-                        d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z"
-                      />
-                    </svg>
-                    <span>{loading ? 'Signing in with Google...' : 'Sign in with Google (Instant Login)'}</span>
-                  </button>
-
-                  <div className="p-3.5 rounded-2xl bg-[#0b1630]/80 border border-[#FFC83D]/55 text-xs text-slate-100 space-y-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="font-bold text-[#FFC83D]">Email/Password Login Is Off in Firebase</p>
-                      <button
-                        type="button"
-                        onClick={() => void checkProviderStatus(true)}
-                        disabled={checkingProviders}
-                        className="inline-flex items-center gap-1 text-[11px] font-bold text-sky-300 hover:text-white disabled:opacity-50"
-                      >
-                        <RefreshCw className={`w-3 h-3 ${checkingProviders ? 'animate-spin' : ''}`} />
-                        {checkingProviders ? 'Checking...' : 'Re-check'}
-                      </button>
-                    </div>
-                    <p className="text-[11px] leading-relaxed text-slate-200">
-                      Use <strong>Sign in with Google</strong> above for immediate login. If you also want Email &amp; Password login:
-                      open <strong>Firebase Console → Authentication → Sign-in method → Email/Password → Enable → Save</strong>.
-                    </p>
-                    <div className="flex flex-wrap gap-2 pt-0.5">
-                      <a
-                        href={`https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/providers`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-amber-300/45 bg-amber-900/50 text-white hover:bg-amber-800/60 font-semibold text-[11px]"
-                      >
-                        Open Firebase Console
-                        <ExternalLink className="w-3 h-3" />
-                      </a>
-                      <button
-                        type="button"
-                        onClick={() => setShowEmailFormWhenDisabled((v) => !v)}
-                        className="px-2.5 py-1.5 rounded-lg border border-white/20 bg-white/10 text-slate-200 hover:bg-white/20 font-semibold text-[11px]"
-                      >
-                        {showEmailFormWhenDisabled ? 'Hide Email Form' : 'Use Email/Password Anyway'}
-                      </button>
-                    </div>
+              <form onSubmit={handleEmailLogin} className="space-y-3">
+                {/* Email Address Field */}
+                <div>
+                  <label htmlFor="login-email" className="flex items-center gap-1.5 text-xs font-bold text-white mb-1">
+                    <Mail className="w-3.5 h-3.5 text-slate-300" />
+                    Email Address
+                  </label>
+                  <div className="relative">
+                    <Mail className="w-4 h-4 text-slate-300 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      id="login-email"
+                      type="email"
+                      autoComplete="email"
+                      required
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="name@visionpoint.edu"
+                      className="w-full pl-10 pr-4 py-2.5 text-sm rounded-xl bg-[#0b1630]/65 backdrop-blur-md border border-white/25 text-white placeholder:text-slate-300/75 shadow-inner focus:outline-none focus:ring-2 focus:ring-[#41A9FF]/60 focus:border-[#FF1739]/80 transition-all"
+                    />
                   </div>
                 </div>
-              )}
 
-              {providerDisabledHelp && emailPasswordEnabled !== false && (
-                <div className="mb-3.5 p-3.5 rounded-2xl bg-amber-950/70 border border-[#FFC83D]/70 text-xs text-amber-50 space-y-2">
-                  <p className="font-bold text-[#FFC83D]">Email/Password Sign-In Is Disabled in Firebase Console</p>
-                  <p className="leading-relaxed text-amber-100/90">
-                    Google Sign-In is ready immediately, or enable Email/Password in Firebase Console:
-                  </p>
-                  <div className="flex flex-wrap gap-2">
+                {/* Password Field */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label htmlFor="login-password" className="flex items-center gap-1.5 text-xs font-bold text-white">
+                      <Lock className="w-3.5 h-3.5 text-slate-300" />
+                      Password
+                    </label>
                     <button
                       type="button"
-                      onClick={handleGoogleLogin}
-                      disabled={loading}
-                      className="px-3 py-1.5 rounded-lg bg-white text-[#071329] font-bold hover:bg-slate-100"
+                      onClick={() => {
+                        setResetEmail(email);
+                        setShowResetModal(true);
+                      }}
+                      className="text-xs font-bold text-[#FFC83D] hover:text-amber-200 hover:underline transition-colors"
                     >
-                      Sign in with Google Now
+                      Forgot password?
                     </button>
-                    <a
-                      href={`https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/providers`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-amber-300/40 bg-amber-900/50 text-white hover:bg-amber-800/60 font-semibold"
+                  </div>
+                  <div className="relative">
+                    <Lock className="w-4 h-4 text-slate-300 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      id="login-password"
+                      type={showPassword ? 'text' : 'password'}
+                      autoComplete="current-password"
+                      required
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="Enter your password"
+                      className="w-full pl-10 pr-11 py-2.5 text-sm rounded-xl bg-[#0b1630]/65 backdrop-blur-md border border-white/25 text-white placeholder:text-slate-300/75 shadow-inner focus:outline-none focus:ring-2 focus:ring-[#41A9FF]/60 focus:border-[#FF1739]/80 transition-all"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((prev) => !prev)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 hover:text-white p-1"
+                      aria-label={showPassword ? 'Hide password' : 'Show password'}
                     >
-                      Firebase Console
-                      <ExternalLink className="w-3.5 h-3.5" />
-                    </a>
+                      {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
                   </div>
                 </div>
-              )}
 
-              {(emailPasswordEnabled !== false || showEmailFormWhenDisabled) && (
-                <form onSubmit={handleEmailLogin} className="space-y-3">
-                  {/* Email Address Field */}
-                  <div>
-                    <label htmlFor="login-email" className="flex items-center gap-1.5 text-xs font-bold text-white mb-1">
-                      <Mail className="w-3.5 h-3.5 text-slate-300" />
-                      Email Address
-                    </label>
-                    <div className="relative">
-                      <Mail className="w-4 h-4 text-slate-300 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                      <input
-                        id="login-email"
-                        type="email"
-                        autoComplete="email"
-                        required
-                        value={email}
-                        onChange={(e) => setEmail(e.target.value)}
-                        placeholder="name@visionpoint.edu"
-                        className="w-full pl-10 pr-4 py-2.5 text-sm rounded-xl bg-[#0b1630]/65 backdrop-blur-md border border-white/25 text-white placeholder:text-slate-300/75 shadow-inner focus:outline-none focus:ring-2 focus:ring-[#41A9FF]/60 focus:border-[#FF1739]/80 transition-all"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Password Field */}
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label htmlFor="login-password" className="flex items-center gap-1.5 text-xs font-bold text-white">
-                        <Lock className="w-3.5 h-3.5 text-slate-300" />
-                        Password
-                      </label>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setResetEmail(email);
-                          setShowResetModal(true);
-                        }}
-                        className="text-xs font-bold text-[#FFC83D] hover:text-amber-200 hover:underline transition-colors"
-                      >
-                        Forgot password?
-                      </button>
-                    </div>
-                    <div className="relative">
-                      <Lock className="w-4 h-4 text-slate-300 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                      <input
-                        id="login-password"
-                        type={showPassword ? 'text' : 'password'}
-                        autoComplete="current-password"
-                        required
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                        placeholder="Enter your password"
-                        className="w-full pl-10 pr-11 py-2.5 text-sm rounded-xl bg-[#0b1630]/65 backdrop-blur-md border border-white/25 text-white placeholder:text-slate-300/75 shadow-inner focus:outline-none focus:ring-2 focus:ring-[#41A9FF]/60 focus:border-[#FF1739]/80 transition-all"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowPassword((prev) => !prev)}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 hover:text-white p-1"
-                        aria-label={showPassword ? 'Hide password' : 'Show password'}
-                      >
-                        {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Primary Glowing Crimson Pill CTA */}
-                  <button
-                    type="submit"
-                    disabled={loading}
-                    className="group relative overflow-hidden w-full py-3 px-5 mt-1 btn-crimson-gloss text-white text-sm font-extrabold rounded-full transition-all duration-200 hover:-translate-y-0.5 disabled:opacity-50 inline-flex items-center justify-center gap-2 tracking-wide"
-                  >
-                    <span
-                      aria-hidden="true"
-                      className="pointer-events-none absolute inset-0 -translate-x-full group-hover:translate-x-full transition-transform duration-700 bg-gradient-to-r from-transparent via-white/25 to-transparent"
-                    />
-                    <LogIn className="w-4 h-4 relative z-10" />
-                    <span className="relative z-10">
-                      {loading ? 'Authenticating Session...' : 'Login to Portal'}
-                    </span>
-                  </button>
-                </form>
-              )}
-
-              {emailPasswordEnabled !== false && (
-                <>
-                  {/* OR Divider */}
-                  <div className="my-3.5 flex items-center gap-3">
-                    <div className="h-px flex-1 bg-white/30" />
-                    <span className="text-[11px] text-white font-bold tracking-widest">OR</span>
-                    <div className="h-px flex-1 bg-white/30" />
-                  </div>
-
-                  {/* Rounded-Pill Google Sign-In Button */}
-                  <button
-                    type="button"
-                    onClick={handleGoogleLogin}
-                    disabled={loading}
-                    className="w-full py-2.5 px-5 bg-gradient-to-b from-white to-slate-100 hover:to-white text-[#071329] text-sm font-bold rounded-full border border-white transition-all duration-200 hover:-translate-y-0.5 flex items-center justify-center gap-2.5 disabled:opacity-50 shadow-[0_8px_24px_rgba(0,0,0,0.35)]"
-                  >
-                    <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
-                      <path
-                        fill="#4285F4"
-                        d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z"
-                      />
-                      <path
-                        fill="#34A853"
-                        d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24Z"
-                      />
-                      <path
-                        fill="#FBBC05"
-                        d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14Z"
-                      />
-                      <path
-                        fill="#EA4335"
-                        d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z"
-                      />
-                    </svg>
-                    <span>Sign in with Google</span>
-                  </button>
-                </>
-              )}
+                {/* Primary Glowing Crimson Pill CTA */}
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="group relative overflow-hidden w-full py-3 px-5 mt-1 btn-crimson-gloss text-white text-sm font-extrabold rounded-full transition-all duration-200 hover:-translate-y-0.5 disabled:opacity-50 inline-flex items-center justify-center gap-2 tracking-wide"
+                >
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute inset-0 -translate-x-full group-hover:translate-x-full transition-transform duration-700 bg-gradient-to-r from-transparent via-white/25 to-transparent"
+                  />
+                  <LogIn className="w-4 h-4 relative z-10" />
+                  <span className="relative z-10">
+                    {loading ? 'Authenticating Session...' : 'Login to Portal'}
+                  </span>
+                </button>
+              </form>
 
               <p className="mt-3 text-[11px] text-center text-slate-200/95 leading-relaxed">
                 For Super Admin, Centre Heads, and Staff members: select your assigned branch above and log in directly with{' '}
-                {emailPasswordEnabled === false ? (
-                  <strong className="text-[#FFC83D]">Sign in with Google</strong>
-                ) : (
-                  <>
-                    <strong className="text-white">Email &amp; Password</strong> or{' '}
-                    <strong className="text-[#FFC83D]">Sign in with Google</strong>
-                  </>
-                )}
-                .
+                <strong className="text-white">Email &amp; Password</strong>.
               </p>
             </div>
           </motion.section>
