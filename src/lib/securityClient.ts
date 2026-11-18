@@ -11,16 +11,16 @@ export interface LocationVerificationResult {
   error?: string;
 }
 
-function getCurrentPositionAsync(): Promise<GeolocationPosition> {
+function getCurrentPositionAsync(timeoutMs = 12000): Promise<GeolocationPosition> {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) {
       reject(new Error('Browser geolocation is not supported on this device.'));
       return;
     }
     navigator.geolocation.getCurrentPosition(resolve, reject, {
-      enableHighAccuracy: true,
-      timeout: 12000,
-      maximumAge: 0,
+      enableHighAccuracy: timeoutMs >= 5000,
+      timeout: timeoutMs,
+      maximumAge: timeoutMs < 5000 ? 60000 : 0,
     });
   });
 }
@@ -55,14 +55,14 @@ export async function verifyOperationLocation(
 
   const { challengeToken } = (await challengeRes.json()) as { challengeToken: string };
 
-  // Step 2: Capture GPS coordinates (Super Admin still logs location if available, but is exempt from denial)
+  // Step 2: Capture GPS coordinates (Super Admin still logs quick cached location if available, without stalling)
   let latitude = 0;
   let longitude = 0;
   let accuracy = 0;
   let clientTimestamp = Date.now();
 
   try {
-    const pos = await getCurrentPositionAsync();
+    const pos = await getCurrentPositionAsync(userProfile.role === 'super_admin' ? 1200 : 12000);
     latitude = pos.coords.latitude;
     longitude = pos.coords.longitude;
     accuracy = pos.coords.accuracy;

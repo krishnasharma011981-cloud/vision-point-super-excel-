@@ -177,20 +177,46 @@ export function reconcileFeeNumbers(params: {
   feeStatusRaw?: unknown;
   defaultTotalFee?: number;
 }): ReconciledFeeResult {
-  const defaultTotal = Math.max(0, Math.round(params.defaultTotalFee ?? 12000));
-  const rawTotal = parseFeeNumberNullable(params.totalFeeRaw);
-  const rawPaid = parseFeeNumberNullable(params.paidAmountRaw);
-  const rawPending = parseFeeNumberNullable(params.pendingAmountRaw);
+  const defaultTotal = Math.max(0, Math.round(params.defaultTotalFee ?? 0));
+  const pendingStr = String(params.pendingAmountRaw ?? '').trim().toLowerCase();
+  const paidStr = String(params.paidAmountRaw ?? '').trim().toLowerCase();
+
+  const pendingTextIndicatesZero = /^(nil|nill|zero|no\s*due|no\s*dues|clear|cleared|settled|full\s*paid|paid)$/i.test(
+    pendingStr,
+  );
+  const pendingTextIndicatesUnpaid = /^(unpaid|not\s*paid|due|pending)$/i.test(pendingStr);
+  const paidTextIndicatesZero = /^(nil|nill|zero|unpaid|not\s*paid|none)$/i.test(paidStr);
+  const paidTextIndicatesFull = /^(paid|full\s*paid|fully\s*paid|clear|cleared|done|yes|complete|completed|settled)$/i.test(
+    paidStr,
+  );
+
+  let rawTotal = parseFeeNumberNullable(params.totalFeeRaw);
+  let rawPaid = parseFeeNumberNullable(params.paidAmountRaw);
+  let rawPending = parseFeeNumberNullable(params.pendingAmountRaw);
+  if (rawPending === null && pendingTextIndicatesZero) rawPending = 0;
+  if (rawPaid === null && paidTextIndicatesZero) rawPaid = 0;
+  if (rawPaid === null && paidTextIndicatesFull && rawTotal !== null) rawPaid = rawTotal;
+  if (rawPending === null && pendingTextIndicatesUnpaid && rawTotal !== null) rawPending = rawTotal;
+
   const statusText = String(params.feeStatusRaw ?? '').trim().toLowerCase();
 
   const statusIndicatesPaid =
-    /\b(full\s*paid|fully\s*paid|paid|clear|cleared|completed|settled|no\s*due|nil)\b/.test(statusText) &&
-    !/\b(unpaid|not\s*paid|partial|pending|due|overdue)\b/.test(statusText);
+    paidTextIndicatesFull ||
+    (pendingTextIndicatesZero && rawTotal === null && rawPaid === null) ||
+    (/\b(full\s*paid|fully\s*paid|paid|clear|cleared|completed|settled|no\s*due|nil)\b/.test(statusText) &&
+      !/\b(unpaid|not\s*paid|partial|pending|due|overdue)\b/.test(statusText));
   const statusIndicatesOverdue = /\b(overdue|defaulter|late)\b/.test(statusText);
   const statusIndicatesUnpaid = /\b(unpaid|not\s*paid)\b/.test(statusText);
 
   const explicitFeeDetected =
-    rawTotal !== null || rawPaid !== null || rawPending !== null || statusText.length > 0;
+    rawTotal !== null ||
+    rawPaid !== null ||
+    rawPending !== null ||
+    statusText.length > 0 ||
+    paidTextIndicatesFull ||
+    pendingTextIndicatesZero ||
+    pendingTextIndicatesUnpaid ||
+    paidTextIndicatesZero;
 
   let totalFee = defaultTotal;
   let paidAmount = 0;
@@ -234,7 +260,7 @@ export function reconcileFeeNumbers(params: {
     }
   } else if (rawPaid !== null) {
     paidAmount = rawPaid;
-    if (statusIndicatesPaid) {
+    if (statusIndicatesPaid || defaultTotal <= paidAmount) {
       totalFee = paidAmount;
       pendingAmount = 0;
     } else {
@@ -285,43 +311,220 @@ export function reconcileFeeNumbers(params: {
   };
 }
 
+export interface ExtractedExtraFeeSignals {
+  totalFeeRaw: string;
+  paidAmountRaw: string;
+  pendingAmountRaw: string;
+  feeStatusRaw: string;
+  tmaFee: number | null;
+  examFee: number | null;
+  hasMainFeeSignals: boolean;
+}
+
+const NON_FEE_EXTRA_KEY_RE =
+  /(s\.?\s*no|sr\.?\s*no|serial|roll|enrol|registration\s*no|reg\s*no|student\s*id|mobile|phone|contact|whatsapp|date|doj|dob|year|session|batch|aadhar|aadhaar|age|pincode|pin\s*code|mark|score|percent|percentage|attend|subject|stream|code|remark|note|comment|address|father|mother|guardian|purpose|goal|plan)/i;
+
+function isFeeZeroOrStatusToken(val: string): boolean {
+  return /^(nil|zero|no\s*due|no\s*dues|clear|cleared|settled|full\s*paid|paid|unpaid|not\s*paid|partial|pending|overdue|none)$/i.test(
+    val.trim(),
+  );
+}
+
+export function extractFeeSignalsFromExtraColumns(
+  extraColumns?: Record<string, string>,
+): ExtractedExtraFeeSignals {
+  const extras = extraColumns || {};
+  let tmaFee: number | null = null;
+  let examFee: number | null = null;
+  let totalFeeRaw = '';
+  let explicitPaidRaw = '';
+  let installmentPaidSum = 0;
+  let installmentPaidCount = 0;
+  let pendingAmountRaw = '';
+  let feeStatusRaw = '';
+
+  for (const [rawKey, rawVal] of Object.entries(extras)) {
+    const val = String(rawVal ?? '').trim();
+    if (!val) continue;
+    const keyLower = rawKey.trim().toLowerCase();
+    const keyNorm = keyLower.replace(/[^a-z0-9]/g, '');
+    if (!keyNorm) continue;
+
+    // 1. TMA Fee & Exam Fee
+    if (/tma.*(fee|charge|amount|rs)|assignment.*fee/.test(keyLower)) {
+      const n = parseFeeNumberNullable(val);
+      if (n !== null && tmaFee === null) tmaFee = clampFeeNumber(n);
+      continue;
+    }
+    if (/(exam|examination|board).*(fee|charge|amount|rs)/.test(keyLower)) {
+      const n = parseFeeNumberNullable(val);
+      if (n !== null && examFee === null) examFee = clampFeeNumber(n);
+      continue;
+    }
+
+    if (NON_FEE_EXTRA_KEY_RE.test(keyLower)) continue;
+
+    // 2. Fee / Payment status
+    if (/fee.*status|payment.*status|recovery.*status/.test(keyLower)) {
+      if (!feeStatusRaw) feeStatusRaw = val;
+      continue;
+    }
+
+    const parsedNum = parseFeeNumberNullable(val);
+    const hasNumericOrZeroFeeVal = parsedNum !== null || isFeeZeroOrStatusToken(val);
+    if (!hasNumericOrZeroFeeVal) continue;
+
+    // 3. Pending / Baki / Due / Balance / Left Fees (Unpaid)
+    if (
+      /(pending|baki|baaki|bakaya|baqaya|due|balance|remaining|unpaid|left|shesh)/.test(keyLower) ||
+      /^(bal|rest)$/.test(keyNorm)
+    ) {
+      if (!pendingAmountRaw) pendingAmountRaw = val;
+      continue;
+    }
+
+    // 4. Paid / Jama / Received / Installments
+    if (/(paid|jama|deposit|received|recd|collected|submitted)/.test(keyLower)) {
+      if (!explicitPaidRaw) explicitPaidRaw = val;
+      continue;
+    }
+    if (/(inst|installment|instalment|kist|part\s*[12345]|pay\s*[12345]|dep\s*[12345]|1st|2nd|3rd|4th|cash|online|upi)/.test(keyLower)) {
+      if (parsedNum !== null) {
+        installmentPaidSum += parsedNum;
+        installmentPaidCount += 1;
+      }
+      continue;
+    }
+
+    // 5. Total / Course / Package / Settled / Decided / Singular Fee
+    if (
+      /(total.*fee|total.*amt|total.*amount|course.*fee|package|decided|settled|agreed|fixed.*fee|actual.*fee|final.*fee|tuition.*fee|payable|net.*fee|annual.*fee|nios.*fee|student.*fee|coaching.*fee|admission.*fee|reg.*fee)/.test(
+        keyLower,
+      ) ||
+      /^(total|fee|fees|feers|feesrs|feeamount|feesamount|totalrs|totalamt)$/.test(keyNorm)
+    ) {
+      if (!totalFeeRaw) totalFeeRaw = val;
+    }
+  }
+
+  const paidAmountRaw =
+    explicitPaidRaw || (installmentPaidCount > 0 ? String(installmentPaidSum) : '');
+
+  const hasMainFeeSignals = Boolean(
+    totalFeeRaw || paidAmountRaw || pendingAmountRaw || feeStatusRaw,
+  );
+
+  return {
+    totalFeeRaw,
+    paidAmountRaw,
+    pendingAmountRaw,
+    feeStatusRaw,
+    tmaFee,
+    examFee,
+    hasMainFeeSignals,
+  };
+}
+
+export function isUntouchedAutoImportDefaultFee(rec?: FeeRecoveryRecord | null): boolean {
+  if (!rec) return false;
+  if (rec.totalFee !== 12000 || rec.paidAmount !== 0 || rec.pendingAmount !== 12000) {
+    return false;
+  }
+  if (rec.recoveryStatus !== 'Pending') return false;
+  const note = String(rec.followUpNotes ?? '').trim();
+  return (
+    note.length === 0 ||
+    /^(Imported via Excel Bulk Import|Created from updated Excel sheet|Initial fee schedule created on admission|Fees synced from updated Excel sheet|Synced with updated Excel sheet \(no fee due\)|Initialized fee record from student sheet|Fees synced from student Excel columns|Synced from student Excel columns|Fees updated from uploaded Excel)\.?$/i.test(
+      note,
+    )
+  );
+}
+
+export function isFeeFullyPaid(rec: {
+  totalFee: number;
+  paidAmount: number;
+  pendingAmount: number;
+  recoveryStatus: RecoveryStatus;
+}): boolean {
+  if (rec.pendingAmount > 0) return false;
+  if (rec.totalFee > 0 && rec.pendingAmount === 0 && rec.paidAmount >= rec.totalFee) return true;
+  if (rec.recoveryStatus === 'Paid') return true;
+  return false;
+}
+
+export function isAutoClearedZeroFee(rec?: FeeRecoveryRecord | null): boolean {
+  if (!rec) return false;
+  if (rec.totalFee !== 0 || rec.paidAmount !== 0 || rec.pendingAmount !== 0) {
+    return false;
+  }
+  if (rec.recoveryStatus !== 'Pending') return false;
+  const note = String(rec.followUpNotes ?? '').trim();
+  if (/reset to ₹?0/i.test(note)) return false;
+  return (
+    note.length === 0 ||
+    /^(Cleared untouched default ₹?12,?000 placeholder to ₹?0|Synced with updated Excel sheet \(no fee due\)|Initialized fee record from student sheet|Created from updated Excel sheet|Imported via Excel Bulk Import|Initial fee schedule created on admission)\.?$/i.test(
+      note,
+    )
+  );
+}
+
 export function resolveStudentFeeSummary(
   student: Pick<Student, 'tmaFee' | 'examFee' | 'extraColumns'>,
   rec?: FeeRecoveryRecord,
 ): ResolvedStudentFeeSummary {
-  const extras = student.extraColumns || {};
-  const pickExtra = (rx: RegExp): string => {
-    for (const [k, v] of Object.entries(extras)) {
-      if (rx.test(k.toLowerCase())) return v;
-    }
-    return '';
-  };
+  const extraSignals = extractFeeSignalsFromExtraColumns(student.extraColumns);
 
-  const tmaFeeExtraRaw = pickExtra(/tma.*fee|tma.*charge|assignment.*fee/);
-  const examFeeExtraRaw = pickExtra(/exam.*fee|examination.*fee|board.*exam.*fee|exam.*charge/);
-  const parsedTmaExtra = tmaFeeExtraRaw ? parseFeeNumberNullable(tmaFeeExtraRaw) : null;
-  const parsedExamExtra = examFeeExtraRaw ? parseFeeNumberNullable(examFeeExtraRaw) : null;
-
-  const hasTmaFee = rec?.tmaFee !== undefined || student.tmaFee !== undefined || parsedTmaExtra !== null;
-  const hasExamFee = rec?.examFee !== undefined || student.examFee !== undefined || parsedExamExtra !== null;
+  const hasTmaFee = rec?.tmaFee !== undefined || student.tmaFee !== undefined || extraSignals.tmaFee !== null;
+  const hasExamFee = rec?.examFee !== undefined || student.examFee !== undefined || extraSignals.examFee !== null;
 
   const tmaFee =
-    rec?.tmaFee !== undefined
+    rec?.tmaFee !== undefined && (rec.tmaFee > 0 || (student.tmaFee ?? 0) === 0)
       ? clampFeeNumber(rec.tmaFee)
-      : student.tmaFee !== undefined
+      : student.tmaFee !== undefined && (student.tmaFee > 0 || extraSignals.tmaFee === null)
         ? clampFeeNumber(student.tmaFee)
-        : parsedTmaExtra !== null
-          ? clampFeeNumber(parsedTmaExtra)
+        : extraSignals.tmaFee !== null
+          ? clampFeeNumber(extraSignals.tmaFee)
           : 0;
 
   const examFee =
-    rec?.examFee !== undefined
+    rec?.examFee !== undefined && (rec.examFee > 0 || (student.examFee ?? 0) === 0)
       ? clampFeeNumber(rec.examFee)
-      : student.examFee !== undefined
+      : student.examFee !== undefined && (student.examFee > 0 || extraSignals.examFee === null)
         ? clampFeeNumber(student.examFee)
-        : parsedExamExtra !== null
-          ? clampFeeNumber(parsedExamExtra)
+        : extraSignals.examFee !== null
+          ? clampFeeNumber(extraSignals.examFee)
           : 0;
+
+  // Prefer Excel extraColumns if fee_recovery is missing OR stuck at an untouched 12000 or auto-cleared zero placeholder
+  if (
+    extraSignals.hasMainFeeSignals &&
+    (!rec || isUntouchedAutoImportDefaultFee(rec) || isAutoClearedZeroFee(rec))
+  ) {
+    const reconciled = reconcileFeeNumbers({
+      totalFeeRaw: extraSignals.totalFeeRaw,
+      paidAmountRaw: extraSignals.paidAmountRaw,
+      pendingAmountRaw: extraSignals.pendingAmountRaw,
+      feeStatusRaw: extraSignals.feeStatusRaw,
+      defaultTotalFee: 0,
+    });
+    return {
+      totalFee: reconciled.totalFee,
+      paidAmount: reconciled.paidAmount,
+      pendingAmount: reconciled.pendingAmount,
+      tmaFee,
+      examFee,
+      recoveryStatus: reconciled.recoveryStatus,
+      followUpStatus: reconciled.followUpStatus,
+      hasFeeData:
+        reconciled.totalFee > 0 ||
+        reconciled.paidAmount > 0 ||
+        reconciled.pendingAmount > 0 ||
+        hasTmaFee ||
+        hasExamFee,
+      hasTmaFee,
+      hasExamFee,
+    };
+  }
 
   if (rec) {
     const tot = clampFeeNumber(rec.totalFee);
@@ -335,42 +538,7 @@ export function resolveStudentFeeSummary(
       examFee,
       recoveryStatus: rec.recoveryStatus,
       followUpStatus: rec.followUpStatus,
-      hasFeeData: true,
-      hasTmaFee,
-      hasExamFee,
-    };
-  }
-
-  const pickMainExtra = (rx: RegExp): string => {
-    for (const [k, v] of Object.entries(extras)) {
-      const lower = k.toLowerCase();
-      if (lower.includes('tma') || lower.includes('exam')) continue;
-      if (rx.test(lower)) return v;
-    }
-    return '';
-  };
-
-  const totRaw = pickMainExtra(/total.*fee|course.*fee|package/);
-  const paidRaw = pickMainExtra(/paid|jama|deposit|received/);
-  const pendingRaw = pickMainExtra(/pending|baki|baaki|due|balance/);
-  const statusRaw = pickMainExtra(/fee.*status|payment.*status/);
-
-  if (totRaw || paidRaw || pendingRaw || statusRaw) {
-    const reconciled = reconcileFeeNumbers({
-      totalFeeRaw: totRaw,
-      paidAmountRaw: paidRaw,
-      pendingAmountRaw: pendingRaw,
-      feeStatusRaw: statusRaw,
-    });
-    return {
-      totalFee: reconciled.totalFee,
-      paidAmount: reconciled.paidAmount,
-      pendingAmount: reconciled.pendingAmount,
-      tmaFee,
-      examFee,
-      recoveryStatus: reconciled.recoveryStatus,
-      followUpStatus: reconciled.followUpStatus,
-      hasFeeData: true,
+      hasFeeData: tot > 0 || paid > 0 || pending > 0 || hasTmaFee || hasExamFee,
       hasTmaFee,
       hasExamFee,
     };
@@ -388,6 +556,151 @@ export function resolveStudentFeeSummary(
     hasTmaFee,
     hasExamFee,
   };
+}
+
+export interface FeeSyncPlanItem {
+  student: Student;
+  existingRecord?: FeeRecoveryRecord;
+  operation: 'create' | 'update';
+  totalFee: number;
+  paidAmount: number;
+  pendingAmount: number;
+  tmaFee: number;
+  examFee: number;
+  recoveryStatus: RecoveryStatus;
+  followUpStatus: FeeFollowUpStatus;
+  reason: 'excel_columns' | 'missing_record' | 'reset_12k_default' | 'tma_exam_sync';
+}
+
+export function computeFeeSyncPlanFromStudents(
+  students: readonly Student[],
+  feeRecords: readonly FeeRecoveryRecord[],
+  options?: { resetUntouched12000Defaults?: boolean },
+): {
+  items: FeeSyncPlanItem[];
+  excelSyncCount: number;
+  missingRecordCount: number;
+  untouched12kCount: number;
+} {
+  const feeMap = new Map<string, FeeRecoveryRecord>();
+  for (const r of feeRecords) feeMap.set(r.studentId, r);
+
+  const items: FeeSyncPlanItem[] = [];
+  let excelSyncCount = 0;
+  let missingRecordCount = 0;
+  let untouched12kCount = 0;
+  const shouldReset12k = Boolean(options?.resetUntouched12000Defaults);
+
+  for (const s of students) {
+    const rec = feeMap.get(s.studentId);
+    const extraSignals = extractFeeSignalsFromExtraColumns(s.extraColumns);
+    const untouched12k = isUntouchedAutoImportDefaultFee(rec);
+    const autoZeroFee = isAutoClearedZeroFee(rec);
+    if (untouched12k && !extraSignals.hasMainFeeSignals) {
+      untouched12kCount += 1;
+    }
+
+    const resolvedTma =
+      extraSignals.tmaFee !== null
+        ? extraSignals.tmaFee
+        : s.tmaFee !== undefined
+          ? clampFeeNumber(s.tmaFee)
+          : rec?.tmaFee !== undefined
+            ? clampFeeNumber(rec.tmaFee)
+            : 0;
+    const resolvedExam =
+      extraSignals.examFee !== null
+        ? extraSignals.examFee
+        : s.examFee !== undefined
+          ? clampFeeNumber(s.examFee)
+          : rec?.examFee !== undefined
+            ? clampFeeNumber(rec.examFee)
+            : 0;
+
+    if (extraSignals.hasMainFeeSignals && (!rec || untouched12k || autoZeroFee)) {
+      const reconciled = reconcileFeeNumbers({
+        totalFeeRaw: extraSignals.totalFeeRaw,
+        paidAmountRaw: extraSignals.paidAmountRaw,
+        pendingAmountRaw: extraSignals.pendingAmountRaw,
+        feeStatusRaw: extraSignals.feeStatusRaw,
+        defaultTotalFee: 0,
+      });
+      excelSyncCount += 1;
+      items.push({
+        student: s,
+        existingRecord: rec,
+        operation: rec ? 'update' : 'create',
+        totalFee: reconciled.totalFee,
+        paidAmount: reconciled.paidAmount,
+        pendingAmount: reconciled.pendingAmount,
+        tmaFee: resolvedTma,
+        examFee: resolvedExam,
+        recoveryStatus: reconciled.recoveryStatus,
+        followUpStatus: reconciled.followUpStatus,
+        reason: 'excel_columns',
+      });
+      continue;
+    }
+
+    if (!rec) {
+      missingRecordCount += 1;
+      items.push({
+        student: s,
+        existingRecord: undefined,
+        operation: 'create',
+        totalFee: 0,
+        paidAmount: 0,
+        pendingAmount: 0,
+        tmaFee: resolvedTma,
+        examFee: resolvedExam,
+        recoveryStatus: 'Pending',
+        followUpStatus: 'Scheduled',
+        reason: 'missing_record',
+      });
+      continue;
+    }
+
+    if (shouldReset12k && untouched12k && !extraSignals.hasMainFeeSignals) {
+      items.push({
+        student: s,
+        existingRecord: rec,
+        operation: 'update',
+        totalFee: 0,
+        paidAmount: 0,
+        pendingAmount: 0,
+        tmaFee: resolvedTma,
+        examFee: resolvedExam,
+        recoveryStatus: 'Pending',
+        followUpStatus: 'Scheduled',
+        reason: 'reset_12k_default',
+      });
+      continue;
+    }
+
+    const recTma = clampFeeNumber(rec.tmaFee ?? 0);
+    const recExam = clampFeeNumber(rec.examFee ?? 0);
+    if (
+      (resolvedTma > 0 && recTma !== resolvedTma) ||
+      (resolvedExam > 0 && recExam !== resolvedExam)
+    ) {
+      excelSyncCount += 1;
+      items.push({
+        student: s,
+        existingRecord: rec,
+        operation: 'update',
+        totalFee: clampFeeNumber(rec.totalFee),
+        paidAmount: clampFeeNumber(rec.paidAmount),
+        pendingAmount: clampFeeNumber(rec.pendingAmount),
+        tmaFee: resolvedTma,
+        examFee: resolvedExam,
+        recoveryStatus: rec.recoveryStatus,
+        followUpStatus: rec.followUpStatus,
+        reason: 'tma_exam_sync',
+      });
+    }
+  }
+
+  return { items, excelSyncCount, missingRecordCount, untouched12kCount };
 }
 
 /**

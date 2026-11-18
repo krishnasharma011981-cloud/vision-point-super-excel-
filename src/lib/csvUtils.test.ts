@@ -2,28 +2,38 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import test from 'node:test';
 import * as XLSX from 'xlsx';
+import { isFeeFullyPaid } from './analyticsMath';
 import {
   alignHeaderToCommonSchema,
   buildContextualSerialMap,
   cleanMobileNumber,
   computeAddExtraColumnDefaultUpdates,
+  computeAutoExcelColumnWidth,
   computeDeleteExtraColumnStudentUpdates,
+  computeDeleteMultipleExtraColumnsStudentUpdates,
   computeInsertRowSerialPlan,
   computeRenameExtraColumnStudentUpdates,
   computeShuffledStudentOrderUpdates,
   computeStudentReorderUpdates,
+  countStudentSubjects,
   extractBlankAndSparseSheetHeadings,
   extractCellFillHex,
   extractCommonBranchExtraHeaders,
   extractJaunpurHeadingAndBlankColumns,
   fuzzyDetectColumnMapping,
   getReadableTextColor,
+  getStudentExtraColumnValue,
   isExcelSummaryRow,
+  isKeepEmptyManualColumnHeading,
+  isMockSubjectValue,
   mergeExtraColumnsWithConfig,
+  mergeImportedExtraColumns,
   normalizeImportedStudentRow,
+  normalizeStudentMatchName,
   parseCsvText,
   parseSpreadsheetFile,
   sanitizeImportedStudentId,
+  sanitizeRealSubject,
 } from './csvUtils';
 
 const requireCjs = createRequire(import.meta.url);
@@ -745,3 +755,559 @@ test('extractBlankAndSparseSheetHeadings captures 100%-blank uploaded headings a
   const blankHeadings = extractBlankAndSparseSheetHeadings(headers, mapping, rawRows, 'vp_lookerganj');
   assert.deepEqual(blankHeadings, ['Verification Blank Col', 'Parent Sign']);
 });
+
+test('fuzzyDetectColumnMapping retains Pending/Baki column with Nil/Clear values and sums installment columns accurately', () => {
+  const rows = [
+    {
+      'Student Name': 'Ayush Shukla',
+      'Mobile No': '8412345678',
+      'Fee (Rs.)': '14000',
+      '1st Installment': '6000',
+      '2nd Installment': '4000',
+      'Pending (Baki)': '4000',
+      'TMA Fees (Rs)': '500',
+      'Exam Fees (Rs)': '1500',
+    },
+    {
+      'Student Name': 'Pooja',
+      'Mobile No': '9012345678',
+      'Fee (Rs.)': '15000',
+      '1st Installment': '15000',
+      '2nd Installment': '',
+      'Pending (Baki)': 'Nil',
+      'TMA Fees (Rs)': '500',
+      'Exam Fees (Rs)': '1500',
+    },
+    {
+      'Student Name': 'Suraj Gupta',
+      'Mobile No': '9912345678',
+      'Fee (Rs.)': '12000',
+      '1st Installment': '12000',
+      '2nd Installment': '0',
+      'Pending (Baki)': 'Clear',
+      'TMA Fees (Rs)': '0',
+      'Exam Fees (Rs)': '1200',
+    },
+    {
+      'Student Name': 'Anjali',
+      'Mobile No': '9212345678',
+      'Fee (Rs.)': '',
+      '1st Installment': '',
+      '2nd Installment': '',
+      'Pending (Baki)': '',
+      'TMA Fees (Rs)': '',
+      'Exam Fees (Rs)': '',
+    },
+  ];
+
+  const mapping = fuzzyDetectColumnMapping(Object.keys(rows[0]), rows);
+  assert.equal(mapping.totalFee, 'Fee (Rs.)');
+  assert.equal(mapping.paidAmount, '1st Installment');
+  assert.equal(mapping.pendingAmount, 'Pending (Baki)');
+  assert.equal(mapping.tmaFee, 'TMA Fees (Rs)');
+  assert.equal(mapping.examFee, 'Exam Fees (Rs)');
+
+  const ayush = normalizeImportedStudentRow(rows[0], 1, 'vp_lookerganj', false, mapping);
+  assert.equal(ayush.totalFee, 14000);
+  assert.equal(ayush.paidAmount, 10000);
+  assert.equal(ayush.pendingAmount, 4000);
+  assert.equal(ayush.tmaFee, 500);
+  assert.equal(ayush.examFee, 1500);
+  assert.equal(ayush.recoveryStatus, 'Partial');
+
+  const pooja = normalizeImportedStudentRow(rows[1], 2, 'vp_lookerganj', false, mapping);
+  assert.equal(pooja.totalFee, 15000);
+  assert.equal(pooja.paidAmount, 15000);
+  assert.equal(pooja.pendingAmount, 0);
+  assert.equal(pooja.recoveryStatus, 'Paid');
+
+  // Row with blank fees must default to 0, NEVER fabricated 12000 pending
+  const anjali = normalizeImportedStudentRow(rows[3], 4, 'vp_lookerganj', false, mapping);
+  assert.equal(anjali.totalFee, 0);
+  assert.equal(anjali.paidAmount, 0);
+  assert.equal(anjali.pendingAmount, 0);
+  assert.equal(anjali.explicitFeeDetected, false);
+});
+
+test('parseSpreadsheetFile merges 2-row parent headers (Fee Details -> Total / Paid / Baki)', async () => {
+  const cjsXlsx = requireCjs('xlsx') as typeof XLSX;
+  const aoa: Array<Array<string | number>> = [
+    ['S.No', 'Student Name', 'Mobile No', 'Fee Details', 'Fee Details', 'Fee Details'],
+    ['', '', '', 'Total', 'Paid', 'Baki'],
+    [1, 'Karan Singh', '9812345670', 14000, 9000, 5000],
+    [2, 'Meera Verma', '9812345671', 12000, 12000, 'Nil'],
+  ];
+  const wb = cjsXlsx.utils.book_new();
+  const ws = cjsXlsx.utils.aoa_to_sheet(aoa);
+  ws['!merges'] = [{ s: { r: 0, c: 3 }, e: { r: 0, c: 5 } }];
+  cjsXlsx.utils.book_append_sheet(wb, ws, 'Fees');
+  const buf = cjsXlsx.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  const mockFile = {
+    name: 'merged_fee_headers.xlsx',
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+  } as unknown as File;
+
+  const parsed = await parseSpreadsheetFile(mockFile);
+  const rows = parsed.sheets.Fees;
+  const headers = parsed.headersBySheet.Fees;
+  assert.equal(rows.length, 2);
+
+  const mapping = fuzzyDetectColumnMapping(headers, rows);
+  assert.ok(mapping.totalFee?.includes('Total'));
+  assert.ok(mapping.paidAmount?.includes('Paid'));
+  assert.ok(mapping.pendingAmount?.includes('Baki'));
+
+  const karan = normalizeImportedStudentRow(rows[0], 1, 'vp_lookerganj', false, mapping);
+  assert.equal(karan.totalFee, 14000);
+  assert.equal(karan.paidAmount, 9000);
+  assert.equal(karan.pendingAmount, 5000);
+
+  const meera = normalizeImportedStudentRow(rows[1], 2, 'vp_lookerganj', false, mapping);
+  assert.equal(meera.totalFee, 12000);
+  assert.equal(meera.paidAmount, 12000);
+  assert.equal(meera.pendingAmount, 0);
+});
+
+test('fuzzyDetectColumnMapping recognizes Hindi/English coaching fee synonyms even with Free/Concession text cells', () => {
+  const rows = [
+    { Name: 'Ravi', Phone: '9876543210', 'Fees Decided': '15000', 'Paid Amt': '10000', Shesh: '5000' },
+    { Name: 'Sita', Phone: '9876543211', 'Fees Decided': '12000', 'Paid Amt': '6000', Shesh: '6000' },
+    { Name: 'Mohan', Phone: '9876543212', 'Fees Decided': '14000', 'Paid Amt': '14000', Shesh: 'Free' },
+    { Name: 'Geeta', Phone: '9876543213', 'Fees Decided': '10000', 'Paid Amt': '8000', Shesh: 'Concession' },
+  ];
+  const mapping = fuzzyDetectColumnMapping(Object.keys(rows[0]), rows);
+  assert.equal(mapping.totalFee, 'Fees Decided');
+  assert.equal(mapping.paidAmount, 'Paid Amt');
+  assert.equal(mapping.pendingAmount, 'Shesh');
+});
+
+test('fuzzyDetectColumnMapping fills missing 3rd unnamed fee column mathematically from Total == Paid + Pending', () => {
+  const rows = [
+    { Name: 'A1', Mobile: '9876500001', 'Total Fee': '15000', Paid: '10000', Column_5: '5000' },
+    { Name: 'A2', Mobile: '9876500002', 'Total Fee': '12000', Paid: '8000', Column_5: '4000' },
+    { Name: 'A3', Mobile: '9876500003', 'Total Fee': '14000', Paid: '14000', Column_5: '0' },
+    { Name: 'A4', Mobile: '9876500004', 'Total Fee': '18000', Paid: '6000', Column_5: '12000' },
+  ];
+  const mapping = fuzzyDetectColumnMapping(Object.keys(rows[0]), rows);
+  assert.equal(mapping.totalFee, 'Total Fee');
+  assert.equal(mapping.paidAmount, 'Paid');
+  assert.equal(mapping.pendingAmount, 'Column_5');
+});
+
+test('normalizeStudentMatchName strips honorifics, punctuation, and extra spaces cleanly', () => {
+  assert.equal(normalizeStudentMatchName('Km. Riya   Gupta'), 'riya gupta');
+  assert.equal(normalizeStudentMatchName('Mr.  AARAV-SHARMA '), 'aarav sharma');
+  assert.equal(normalizeStudentMatchName('Shri  Mohd. Faraz  Ansari'), 'mohd faraz ansari');
+});
+
+test('fuzzyDetectColumnMapping and normalizeImportedStudentRow sum 1st Kist, 2nd Kist, and 3rd Kist into paidAmount', () => {
+  const rows = [
+    {
+      'Student Name': 'Rohan Tiwari',
+      'Mobile No': '9811122233',
+      'Decided Fee': '16000',
+      '1st Kist': '5000',
+      '2nd Kist': '4000',
+      '3rd Kist': '2000',
+    },
+    {
+      'Student Name': 'Kajal Nishad',
+      'Mobile No': '9811122244',
+      'Decided Fee': '14000',
+      '1st Kist': '14000',
+      '2nd Kist': '',
+      '3rd Kist': '',
+    },
+  ];
+
+  const mapping = fuzzyDetectColumnMapping(Object.keys(rows[0]), rows);
+  assert.equal(mapping.totalFee, 'Decided Fee');
+  assert.equal(mapping.paidAmount, '1st Kist');
+
+  const rohan = normalizeImportedStudentRow(rows[0], 1, 'vp_lookerganj', false, mapping);
+  assert.equal(rohan.totalFee, 16000);
+  assert.equal(rohan.paidAmount, 11000);
+  assert.equal(rohan.pendingAmount, 5000);
+  assert.equal(rohan.recoveryStatus, 'Partial');
+
+  const kajal = normalizeImportedStudentRow(rows[1], 2, 'vp_lookerganj', false, mapping);
+  assert.equal(kajal.totalFee, 14000);
+  assert.equal(kajal.paidAmount, 14000);
+  assert.equal(kajal.pendingAmount, 0);
+  assert.equal(kajal.recoveryStatus, 'Paid');
+});
+
+test('fuzzyDetectColumnMapping and normalizeImportedStudentRow treat Left Fees / Fees Left as unpaid pendingAmount', () => {
+  // Case A: Total + Paid + Left Fees
+  const fullSheet = [
+    { 'Student Name': 'Aman Verma', 'Mobile No': '9876543210', 'Total Fees': '15000', 'Paid Fees': '10000', 'Left Fees': '5000' },
+    { 'Student Name': 'Neha Gupta', 'Mobile No': '9876543211', 'Total Fees': '15000', 'Paid Fees': '15000', 'Left Fees': '0' },
+  ];
+  const m1 = fuzzyDetectColumnMapping(Object.keys(fullSheet[0]), fullSheet);
+  assert.equal(m1.totalFee, 'Total Fees');
+  assert.equal(m1.paidAmount, 'Paid Fees');
+  assert.equal(m1.pendingAmount, 'Left Fees');
+
+  const aman = normalizeImportedStudentRow(fullSheet[0], 1, 'vp_lookerganj', false, m1);
+  assert.equal(aman.pendingAmount, 5000);
+  assert.equal(aman.recoveryStatus, 'Partial');
+  assert.equal(isFeeFullyPaid(aman), false);
+
+  const neha = normalizeImportedStudentRow(fullSheet[1], 2, 'vp_lookerganj', false, m1);
+  assert.equal(neha.pendingAmount, 0);
+  assert.equal(neha.recoveryStatus, 'Paid');
+  assert.equal(isFeeFullyPaid(neha), true);
+
+  // Case B: Paid + Left Fees (no Total column — Left Fees must NEVER map to totalFee!)
+  const paidAndLeftSheet = [
+    { 'Student Name': 'Rohit Tiwari', 'Mobile No': '9811122233', 'Paid': '7000', 'Left Fees': '5000' },
+    { 'Student Name': 'Pooja Singh', 'Mobile No': '9811122244', 'Paid': '12000', 'Left Fees': 'Nil' },
+  ];
+  const m2 = fuzzyDetectColumnMapping(Object.keys(paidAndLeftSheet[0]), paidAndLeftSheet);
+  assert.equal(m2.totalFee, undefined);
+  assert.equal(m2.paidAmount, 'Paid');
+  assert.equal(m2.pendingAmount, 'Left Fees');
+
+  const rohit = normalizeImportedStudentRow(paidAndLeftSheet[0], 1, 'vp_lookerganj', false, m2);
+  assert.equal(rohit.totalFee, 12000);
+  assert.equal(rohit.paidAmount, 7000);
+  assert.equal(rohit.pendingAmount, 5000);
+  assert.equal(isFeeFullyPaid(rohit), false);
+
+  const pooja = normalizeImportedStudentRow(paidAndLeftSheet[1], 2, 'vp_lookerganj', false, m2);
+  assert.equal(pooja.totalFee, 12000);
+  assert.equal(pooja.paidAmount, 12000);
+  assert.equal(pooja.pendingAmount, 0);
+  assert.equal(isFeeFullyPaid(pooja), true);
+
+  // Case C: ONLY Left Fees (or "Fees Left (Rs)") column
+  const leftOnlySheet = [
+    { 'Student Name': 'Vikas Yadav', 'Mobile No': '9822233344', 'Fees Left (Rs)': '4500' },
+    { 'Student Name': 'Suman Devi', 'Mobile No': '9822233355', 'Fees Left (Rs)': 'Clear' },
+  ];
+  const m3 = fuzzyDetectColumnMapping(Object.keys(leftOnlySheet[0]), leftOnlySheet);
+  assert.equal(m3.totalFee, undefined);
+  assert.equal(m3.paidAmount, undefined);
+  assert.equal(m3.pendingAmount, 'Fees Left (Rs)');
+
+  const vikas = normalizeImportedStudentRow(leftOnlySheet[0], 1, 'vp_lookerganj', false, m3);
+  assert.equal(vikas.pendingAmount, 4500);
+  assert.equal(vikas.recoveryStatus, 'Pending');
+  assert.equal(isFeeFullyPaid(vikas), false);
+
+  const suman = normalizeImportedStudentRow(leftOnlySheet[1], 2, 'vp_lookerganj', false, m3);
+  assert.equal(suman.pendingAmount, 0);
+  assert.equal(suman.recoveryStatus, 'Paid');
+  assert.equal(isFeeFullyPaid(suman), true);
+});
+
+test('re-upload auto-fills empty sheet columns & subjects while keeping the 4 manual qualitative columns empty', () => {
+  const sheetCommonHeadings = [
+    'EMAIL ID',
+    'FATHERS NAME',
+    'NIOS LOGIN ID & PASSWORD',
+    'CALLING NO',
+    'LEFT',
+    'TOTAL',
+    'TOC SUBJECTS',
+    'WHY TOOK ADMISSION IN NIOS',
+    'SOURCE OF INQUIRY',
+    'CURRENT EDUCATION PREPARATION',
+    'FUTURE PLAN FOR STUDY',
+    'CORRECTION',
+  ];
+
+  const row = {
+    'Student Name': 'Ankit Tiwari',
+    'Mobile No': '9876543210',
+    Subjects: 'Hindi, English, Physics, Chemistry, Maths',
+    Email: 'ankit@example.com',
+    'Father Name': 'Rajesh Tiwari',
+    'NIOS Login ID': 'NIOS2026 / pass123',
+    'Calling Number': '9123456789',
+    'Total Fees': '15000',
+    'Paid Fees': '10000',
+    'Left Fees': '5000',
+    'TOC Subject': 'Hindi (201)',
+    'Why took admission in NIOS': 'Should stay empty',
+    'Source of Inquiry': 'Referral',
+    'Current Education Preparation': '12th',
+    'Future Plan for Study': 'B.Tech',
+    Corrections: 'DOB update',
+  };
+
+  const mapping = fuzzyDetectColumnMapping(Object.keys(row), [row]);
+  assert.equal(mapping.subject, 'Subjects');
+
+  const normalized = normalizeImportedStudentRow(
+    row,
+    1,
+    'vp_lookerganj',
+    false,
+    mapping,
+    true,
+    0,
+    undefined,
+    sheetCommonHeadings,
+  );
+
+  assert.equal(normalized.explicitSubjectDetected, true);
+  assert.equal(normalized.subject, 'Hindi, English, Physics, Chemistry, Maths');
+  assert.equal(normalized.extraColumns['EMAIL ID'], 'ankit@example.com');
+  assert.equal(normalized.extraColumns['FATHERS NAME'], 'Rajesh Tiwari');
+  assert.equal(normalized.extraColumns['NIOS LOGIN ID & PASSWORD'], 'NIOS2026 / pass123');
+  assert.equal(normalized.extraColumns['CALLING NO'], '9123456789');
+  assert.equal(normalized.extraColumns['LEFT'], '5000');
+  assert.equal(normalized.extraColumns['TOTAL'], '15000');
+  assert.equal(normalized.extraColumns['TOC SUBJECTS'], 'Hindi (201)');
+  assert.equal(normalized.extraColumns['CORRECTION'], 'DOB update');
+
+  // The 4 qualitative manual boxes must stay strictly empty on Excel import
+  assert.equal(normalized.whyNios, '');
+  assert.equal(normalized.currentEducationStatus, '');
+  assert.equal(normalized.futurePlanning, '');
+  assert.equal(normalized.extraColumns['WHY TOOK ADMISSION IN NIOS'], undefined);
+  assert.equal(normalized.extraColumns['SOURCE OF INQUIRY'], undefined);
+  assert.equal(normalized.extraColumns['CURRENT EDUCATION PREPARATION'], undefined);
+  assert.equal(normalized.extraColumns['FUTURE PLAN FOR STUDY'], undefined);
+  assert.equal(isKeepEmptyManualColumnHeading('WHY TOOK ADMISSION IN NIOS'), true);
+  assert.equal(isKeepEmptyManualColumnHeading('SOURCE OF INQUIRY'), true);
+  assert.equal(isKeepEmptyManualColumnHeading('CURRENT EDUCATION PREPARATION'), true);
+  assert.equal(isKeepEmptyManualColumnHeading('FUTURE PLAN FOR STUDY'), true);
+  assert.equal(isKeepEmptyManualColumnHeading('CORRECTION'), false);
+});
+
+test('fuzzyDetectColumnMapping never mistakes TOC SUBJECT for main subject and combines numbered Sub 1..5 columns', () => {
+  const tocOnlyRow = {
+    'Student Name': 'Priya Singh',
+    'Mobile No': '9811223344',
+    'TOC Subject': 'English (302)',
+  };
+  const m1 = fuzzyDetectColumnMapping(Object.keys(tocOnlyRow), [tocOnlyRow]);
+  assert.equal(m1.subject, undefined);
+
+  const multiSubRow = {
+    'Student Name': 'Rohan Verma',
+    'Mobile No': '9811223355',
+    'Sub 1': 'Hindi',
+    'Sub 2': 'English',
+    'Sub 3': 'Mathematics',
+    'Sub 4': 'Science',
+    'Sub 5': 'Social Science',
+    'TOC Subject': 'Hindi',
+  };
+  const m2 = fuzzyDetectColumnMapping(Object.keys(multiSubRow), [multiSubRow]);
+  const n2 = normalizeImportedStudentRow(multiSubRow, 1, 'vp_lookerganj', false, m2);
+  assert.equal(n2.explicitSubjectDetected, true);
+  assert.equal(n2.subject, 'Hindi, English, Mathematics, Science, Social Science');
+});
+
+test('mergeImportedExtraColumns, getStudentExtraColumnValue, and computeAutoExcelColumnWidth handle variations and full headings', () => {
+  const merged = mergeImportedExtraColumns(
+    { 'EMAIL ID': 'new@mail.com', 'FATHERS NAME': 'Suresh' },
+    { 'Father Name': 'Old Name', Medium: 'Hindi', 'WHY TOOK ADMISSION IN NIOS': 'Old Text' },
+  );
+  assert.equal(merged['EMAIL ID'], 'new@mail.com');
+  assert.equal(merged['FATHERS NAME'], 'Suresh');
+  assert.equal(merged['Father Name'], undefined);
+  assert.equal(merged.Medium, 'Hindi');
+  assert.equal(merged['WHY TOOK ADMISSION IN NIOS'], undefined);
+
+  assert.equal(getStudentExtraColumnValue({ "Father's Name": 'Mahesh' }, 'FATHERS NAME'), 'Mahesh');
+  assert.ok(computeAutoExcelColumnWidth('CORRECTION', 'extra:CORRECTION', true) >= 104);
+  assert.ok(
+    computeAutoExcelColumnWidth('CURRENT EDUCATION PREPARATION', 'extra:CURRENT EDUCATION PREPARATION', true) >= 135,
+  );
+});
+
+test('isExcelSummaryRow preserves student rows with Enrollment ID or multi-phone even with blank/short names', () => {
+  assert.equal(
+    isExcelSummaryRow({
+      'S.No': '',
+      'Enrolment No': 'A1126307633',
+      'Student Name': '',
+      'Fees Jama': '5000',
+    }),
+    false,
+  );
+  assert.equal(
+    isExcelSummaryRow({
+      'S.No': '',
+      'Student Name': 'K',
+      'Mobile No': '9876543210 / 9123456789',
+      'Total Fee': '12000',
+    }),
+    false,
+  );
+  assert.equal(
+    isExcelSummaryRow({
+      'S.No': '446.',
+      'Student Name': 'K',
+      'Total Fee': '12000',
+    }),
+    false,
+  );
+  assert.equal(
+    isExcelSummaryRow({
+      'S.No': '446.',
+      'Student Name': 'Total Singh',
+      'Total Fee': '12000',
+    }),
+    false,
+  );
+  assert.equal(
+    isExcelSummaryRow({
+      'S.No': '',
+      'Student Name': 'Grand Total',
+      'Total Fee': '450000',
+    }),
+    true,
+  );
+});
+
+test('cleanMobileNumber extracts valid 10-digit Indian mobile from space-separated multi-phone cells', () => {
+  assert.equal(cleanMobileNumber('9876543210 9123456789'), '9876543210');
+  assert.equal(cleanMobileNumber('+91 9654321098 (Father) 8800112233'), '9654321098');
+});
+
+test('parseSpreadsheetFile preserves Student #1 with Pending TMA/Practical and retains all 446 Civil Lines rows with shared parent phones', async () => {
+  const cjsXlsx = requireCjs('xlsx') as typeof XLSX;
+  const aoa: Array<Array<string | number>> = [
+    ['S.No', 'Enrolment No', 'Student Name', 'Mobile No', 'Subjects', 'Total Fee', 'Paid Fee', 'Left Fee', 'TMA', 'Practical', 'Remark'],
+  ];
+  for (let i = 1; i <= 446; i++) {
+    // Include siblings sharing parent mobile every 50 rows, row 1 with Pending TMA/Practical, space-separated dual phones
+    const sharedPhone = i % 50 === 0 ? '9811223344 9811223355' : `98${String(10000000 + i)}`;
+    const enrolment = i <= 15 ? 'Pending' : `A112630${String(7000 + i)}`;
+    aoa.push([
+      i,
+      enrolment,
+      i % 50 === 0 ? `Sibling ${Math.floor(i / 50)}` : `Civil Line Student ${i}`,
+      sharedPhone,
+      'Hindi, English, Maths, Science, Social Science',
+      15000,
+      i % 2 === 0 ? 10000 : 15000,
+      i % 2 === 0 ? 5000 : 0,
+      i === 1 ? 'Pending' : 'Submitted',
+      i === 1 ? 'Pending' : 'Completed',
+      i === 9 ? 'fees low' : `batch-${(i % 4) + 1}`,
+    ]);
+  }
+  aoa.push(['', '', 'Grand Total', '', '', 446 * 15000, 0, 0, '', '', '']);
+
+  const wb = cjsXlsx.utils.book_new();
+  const ws = cjsXlsx.utils.aoa_to_sheet(aoa);
+  cjsXlsx.utils.book_append_sheet(wb, ws, 'CivilLines446');
+  const buf = cjsXlsx.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  const mockFile = {
+    name: 'civil_lines_full_446.xlsx',
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+  } as unknown as File;
+
+  const parsed = await parseSpreadsheetFile(mockFile);
+  const rows = parsed.sheets.CivilLines446;
+  assert.equal(rows.length, 446);
+  assert.equal(rows[0]['Student Name'], 'Civil Line Student 1');
+  assert.equal(rows[0].TMA, 'Pending');
+  assert.equal(rows[445]['Student Name'], 'Civil Line Student 446');
+  assert.equal(parsed.summaryRowsFilteredBySheet?.CivilLines446, 1);
+
+  const normalizedSibling = normalizeImportedStudentRow(
+    rows[49],
+    50,
+    'vp_civillines',
+    false,
+    fuzzyDetectColumnMapping(parsed.headersBySheet.CivilLines446, rows),
+  );
+  assert.equal(normalizedSibling.mobileNumber, '9811223344');
+  assert.equal(normalizedSibling.pendingAmount, 5000);
+});
+
+test('mergeExtraColumnsWithConfig permanently suppresses deletedExtraColumns even if still listed in customColumns or differing in case', () => {
+  const merged = mergeExtraColumnsWithConfig(
+    ['Calling No', 'Father Name', 'WHY TOOK ADMISSION IN NIOS'],
+    {
+      customColumns: ['CALLING NO', 'Mentor', 'Batch-Timing'],
+      deletedExtraColumns: ['calling no', 'why took admission in nios', 'batch timing'],
+    },
+  );
+  assert.deepEqual(merged, ['Mentor', 'Father Name']);
+});
+
+test('computeDeleteMultipleExtraColumnsStudentUpdates removes multiple extra columns across case & canonical variants', () => {
+  const rows: Array<{
+    studentId: string;
+    extraColumns?: Record<string, string>;
+    cellColors?: Record<string, string>;
+  }> = [
+    {
+      studentId: 'S1',
+      extraColumns: { 'Calling No': '9876543210', 'Batch-Timing': 'Morning', Medium: 'Hindi' },
+      cellColors: { 'extra:Calling No': '#FEF08A', 'extra:Batch-Timing': '#FEE2E2', studentName: '#DCFCE7' },
+    },
+    {
+      studentId: 'S2',
+      extraColumns: { Medium: 'English' },
+    },
+  ];
+  const updates = computeDeleteMultipleExtraColumnsStudentUpdates(rows, ['CALLING NO', 'Batch Timing']);
+  assert.equal(updates.length, 1);
+  assert.deepEqual(updates[0], {
+    studentId: 'S1',
+    extraColumns: { Medium: 'Hindi' },
+    cellColors: { studentName: '#DCFCE7' },
+  });
+});
+
+test('normalizeImportedStudentRow keeps subject blank with no mock defaults when Excel lacks subject columns', () => {
+  const row = {
+    'Student Name': 'Aman Kumar',
+    'Mobile No': '9876543210',
+    'Total Fee': '10000',
+    'Paid Fee': '5000',
+  };
+  const mapping = fuzzyDetectColumnMapping(Object.keys(row), [row]);
+  const normalized = normalizeImportedStudentRow(row, 1, 'vp_lookerganj', false, mapping);
+
+  assert.equal(normalized.subject, '');
+  assert.equal(normalized.explicitSubjectDetected, false);
+  assert.equal(normalized.explicitTmaDetected, false);
+  assert.equal(normalized.explicitPracticalDetected, false);
+  assert.equal(countStudentSubjects(normalized.subject), 0);
+});
+
+test('isMockSubjectValue, sanitizeRealSubject, and countStudentSubjects handle legacy mock strings and real subjects cleanly', () => {
+  assert.equal(isMockSubjectValue('Hindi, English, Mathematics, Science, Social Science'), true);
+  assert.equal(isMockSubjectValue('General NIOS Stream'), true);
+  assert.equal(isMockSubjectValue(''), false);
+  assert.equal(isMockSubjectValue('Hindi, English, Physics, Chemistry, Maths'), false);
+
+  assert.equal(sanitizeRealSubject('General NIOS Stream'), '');
+  assert.equal(
+    sanitizeRealSubject('Hindi, English, Mathematics, Science, Social Science', { stripLegacyDefaultList: true }),
+    '',
+  );
+  assert.equal(sanitizeRealSubject('Physics, Chemistry, Biology'), 'Physics, Chemistry, Biology');
+  assert.equal(countStudentSubjects('Physics, Chemistry, Biology'), 3);
+  assert.equal(countStudentSubjects(''), 0);
+
+  const acadRow = {
+    'Student Name': 'Neha Sharma',
+    'Mobile No': '9876500001',
+    Subjects: 'English, Physics, Chemistry, Maths',
+    TMA: 'Submitted',
+    Practical: 'Completed',
+  };
+  const acadMap = fuzzyDetectColumnMapping(Object.keys(acadRow), [acadRow]);
+  const acadNorm = normalizeImportedStudentRow(acadRow, 2, 'vp_civillines', false, acadMap);
+  assert.equal(acadNorm.explicitSubjectDetected, true);
+  assert.equal(acadNorm.explicitTmaDetected, true);
+  assert.equal(acadNorm.explicitPracticalDetected, true);
+  assert.equal(acadNorm.subject, 'English, Physics, Chemistry, Maths');
+  assert.equal(acadNorm.tmaStatus, 'Submitted');
+  assert.equal(acadNorm.practicalStatus, 'Completed');
+  assert.equal(countStudentSubjects(acadNorm.subject), 4);
+});
+

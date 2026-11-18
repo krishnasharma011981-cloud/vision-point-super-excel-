@@ -1,19 +1,26 @@
-import { Download, FlaskConical, MessageCircle, Phone, Search, X } from 'lucide-react';
+import { Download, FileSpreadsheet, FlaskConical, MessageCircle, Phone, Search, Trash2, X } from 'lucide-react';
 import React, { useMemo, useState } from 'react';
 import { CENTRE_MAP } from '../../constants/centres';
 import { buildTelHref, buildWhatsAppHref, maskMobileNumber } from '../../lib/analyticsMath';
-import { buildContextualSerialMap, exportToCsv } from '../../lib/csvUtils';
+import {
+  buildContextualSerialMap,
+  exportToCsv,
+  isMockSubjectValue,
+  sanitizeRealSubject,
+} from '../../lib/csvUtils';
 import { verifyOperationLocation } from '../../lib/securityClient';
-import { upsertPracticalRecord } from '../../services/firestoreService';
+import { clearMockSubjectsFromStudents, upsertPracticalRecord } from '../../services/firestoreService';
 import type {
   CentreId,
   EditRequest,
+  ExcelSheetConfig,
   PracticalRecord,
   PracticalStatus,
   PracticalSubmissionStatus,
   Student,
   UserAccount,
 } from '../../types/domain';
+import { BulkImportModal } from '../BulkImportModal';
 import {
   AskEditPermissionModal,
   DepartmentPendingRequestsPanel,
@@ -25,6 +32,7 @@ interface PracticalViewProps {
   practicalRecords: PracticalRecord[];
   employees: UserAccount[];
   editRequests?: EditRequest[];
+  sheetConfigs?: ExcelSheetConfig[];
   currentUser: UserAccount;
   selectedCentreFilter: CentreId | 'all';
   globalSearch: string;
@@ -36,6 +44,7 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
   practicalRecords,
   employees,
   editRequests = [],
+  sheetConfigs = [],
   currentUser,
   selectedCentreFilter,
   globalSearch,
@@ -45,6 +54,8 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
   const [statusFilter, setStatusFilter] = useState('all');
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
   const [permissionStudent, setPermissionStudent] = useState<Student | null>(null);
+  const [showBulkImport, setShowBulkImport] = useState(false);
+  const [clearingMocks, setClearingMocks] = useState(false);
 
   const [practicalStatus, setPracticalStatus] = useState<PracticalStatus>('Pending');
   const [submissionStatus, setSubmissionStatus] = useState<PracticalSubmissionStatus>('Not Submitted');
@@ -62,6 +73,23 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
   const effectiveCentre =
     currentUser.role === 'super_admin' ? selectedCentreFilter : currentUser.centreId;
   const combinedSearch = (search || globalSearch).trim().toLowerCase();
+  const canBatchSync = currentUser.role === 'super_admin' || currentUser.role === 'centre_head';
+  const cleanupDone = sheetConfigs.some((c) => c.configId === 'subject_mock_cleanup_v1');
+
+  const getDisplaySubject = (subject?: string): string => {
+    if (!cleanupDone && isMockSubjectValue(subject)) return '';
+    return sanitizeRealSubject(subject, { stripLegacyDefaultList: false });
+  };
+
+  const scopedStudents = useMemo(
+    () => students.filter((s) => (effectiveCentre === 'all' ? true : s.centreId === effectiveCentre)),
+    [students, effectiveCentre],
+  );
+
+  const mockSubjectStudentsCount = useMemo(
+    () => scopedStudents.filter((s) => isMockSubjectValue(s.subject)).length,
+    [scopedStudents],
+  );
 
   const displaySerialMap = useMemo(
     () => buildContextualSerialMap(students, effectiveCentre),
@@ -69,15 +97,16 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
   );
 
   const rows = useMemo(() => {
-    return students
-      .filter((s) => (effectiveCentre === 'all' ? true : s.centreId === effectiveCentre))
+    return scopedStudents
       .map((s) => {
         const rec = recMap.get(s.studentId);
         const lockedForEmployee =
           currentUser.role === 'employee' && (Boolean(s.practicalLocked) || Boolean(rec?.employeeLocked));
+        const displaySubject = getDisplaySubject(s.subject);
         return {
           student: s,
           displaySerial: displaySerialMap.get(s.studentId) ?? s.serialNumber,
+          displaySubject,
           practicalStatus: rec?.practicalStatus || s.practicalStatus,
           submissionStatus: rec?.submissionStatus || 'Not Submitted',
           completionPercentage: rec?.completionPercentage ?? (s.practicalStatus === 'Completed' ? 100 : 0),
@@ -92,11 +121,12 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
         return (
           r.student.studentName.toLowerCase().includes(combinedSearch) ||
           r.student.studentId.toLowerCase().includes(combinedSearch) ||
-          r.student.mobileNumber.toLowerCase().includes(combinedSearch)
+          r.student.mobileNumber.toLowerCase().includes(combinedSearch) ||
+          r.displaySubject.toLowerCase().includes(combinedSearch)
         );
       })
       .sort((a, b) => a.displaySerial - b.displaySerial);
-  }, [students, recMap, effectiveCentre, statusFilter, combinedSearch, displaySerialMap, currentUser.role]);
+  }, [scopedStudents, recMap, statusFilter, combinedSearch, displaySerialMap, currentUser.role, cleanupDone]);
 
   const completedCount = rows.filter((r) => r.practicalStatus === 'Completed').length;
   const pendingCount = rows.filter((r) => r.practicalStatus !== 'Completed').length;
@@ -165,13 +195,40 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
     }
   };
 
+  const handleClearMockSubjects = async () => {
+    if (!canBatchSync || mockSubjectStudentsCount === 0) return;
+    setClearingMocks(true);
+    try {
+      const targetCentre = effectiveCentre === 'all' ? currentUser.centreId : effectiveCentre;
+      const loc = await verifyOperationLocation(currentUser, 'CLEAR_MOCK_SUBJECTS_PRACTICAL', targetCentre);
+      if (!loc.allowed) {
+        onNotify('Access Denied', loc.error || 'Physical presence required at assigned centre.', 'error');
+        setClearingMocks(false);
+        return;
+      }
+      const res = await clearMockSubjectsFromStudents(scopedStudents, currentUser, {
+        locationVerified: true,
+      });
+      onNotify(
+        'Mock Subjects Cleared',
+        `Removed hardcoded mock subjects from ${res.clearedCount} student record(s). Upload Excel to populate real subjects.`,
+        'success',
+      );
+    } catch (err) {
+      onNotify('Clear Failed', err instanceof Error ? err.message : 'Unable to clear mock subjects.', 'error');
+    } finally {
+      setClearingMocks(false);
+    }
+  };
+
   const handleExport = () => {
     exportToCsv(
       `practical-report-${effectiveCentre}.csv`,
-      ['Student ID', 'Student Name', 'Mobile', 'Centre', 'Practical Status', 'Submission Status', 'Completion %', 'Assigned', 'Remarks'],
+      ['Student ID', 'Student Name', 'Subjects', 'Mobile', 'Centre', 'Practical Status', 'Submission Status', 'Completion %', 'Assigned', 'Remarks'],
       rows.map((r) => [
         r.student.studentId,
         r.student.studentName,
+        r.displaySubject || '—',
         maskMobileNumber(r.student.mobileNumber),
         CENTRE_MAP[r.student.centreId].name,
         r.practicalStatus,
@@ -209,7 +266,7 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search student ID, name, or mobile..."
+              placeholder="Search student ID, name, mobile, or subject..."
               className="w-full pl-9 pr-3.5 py-2 text-sm bg-white text-black placeholder:text-zinc-500 border border-zinc-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-black"
             />
           </div>
@@ -224,14 +281,37 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
             <option value="Not Completed">Not Completed</option>
           </select>
         </div>
-        <button
-          type="button"
-          onClick={handleExport}
-          className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-black bg-white border border-zinc-300 rounded-lg hover:bg-zinc-100 whitespace-nowrap"
-        >
-          <Download className="w-3.5 h-3.5" />
-          Export Practical Report
-        </button>
+        <div className="flex flex-wrap items-center gap-2.5">
+          {canBatchSync && mockSubjectStudentsCount > 0 && (
+            <button
+              type="button"
+              disabled={clearingMocks}
+              onClick={handleClearMockSubjects}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-amber-950 bg-amber-50 border border-amber-300 rounded-lg hover:bg-amber-100 whitespace-nowrap disabled:opacity-50"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              {clearingMocks ? 'Clearing...' : `Clear Mock Subjects (${mockSubjectStudentsCount})`}
+            </button>
+          )}
+          {canBatchSync && (
+            <button
+              type="button"
+              onClick={() => setShowBulkImport(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white btn-crimson-gloss rounded-lg whitespace-nowrap"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5" />
+              Update Practical &amp; Subjects from Excel
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={handleExport}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-black bg-white border border-zinc-300 rounded-lg hover:bg-zinc-100 whitespace-nowrap"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Export Practical Report
+          </button>
+        </div>
       </div>
 
       <DepartmentPendingRequestsPanel
@@ -311,7 +391,9 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
                         ) : null}
                       </div>
                     </td>
-                    <td className="py-3 px-4 text-zinc-700 max-w-[200px] truncate">{r.student.subject}</td>
+                    <td className="py-3 px-4 text-slate-800 font-medium max-w-[240px] whitespace-normal leading-snug">
+                      {r.displaySubject || '—'}
+                    </td>
                     <td className="py-3 px-4">
                       <span
                         className={`font-semibold ${
@@ -360,6 +442,10 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
                 <h3 className="text-base font-bold text-slate-900">Update Practical Record</h3>
                 <p className="text-xs text-slate-600 font-mono mt-0.5">
                   {editingStudent.studentName} · S.No #{String(displaySerialMap.get(editingStudent.studentId) ?? (editingStudent.serialNumber || 1)).padStart(4, '0')} · {CENTRE_MAP[editingStudent.centreId]?.code}
+                </p>
+                <p className="text-xs text-slate-800 mt-1">
+                  <span className="font-semibold text-slate-600">Subjects:</span>{' '}
+                  {getDisplaySubject(editingStudent.subject) || '—'}
                 </p>
                 <div className="mt-1.5 inline-flex items-center gap-2 text-xs font-mono text-slate-700">
                   <span>{maskMobileNumber(editingStudent.mobileNumber)}</span>
@@ -497,6 +583,25 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
         onClose={() => setPermissionStudent(null)}
         onNotify={onNotify}
       />
+
+      {showBulkImport && (
+        <BulkImportModal
+          open={showBulkImport}
+          currentUser={currentUser}
+          defaultCentreId={effectiveCentre === 'all' ? currentUser.centreId : effectiveCentre}
+          isCentreLocked={effectiveCentre !== 'all'}
+          existingStudents={students}
+          sheetConfigs={sheetConfigs}
+          mode="academic_sync"
+          defaultAcademicType="practical"
+          onClose={() => setShowBulkImport(false)}
+          onSuccess={(msg) => {
+            setShowBulkImport(false);
+            onNotify('Excel Practical & Subjects Synced', msg, 'success');
+          }}
+          onError={(title, desc) => onNotify(title, desc, 'error')}
+        />
+      )}
     </div>
   );
 };

@@ -643,7 +643,7 @@ function detectHeaderRowStatus(grid: unknown[][]): { hasHeader: boolean; headerR
     const hasRealStudentSignal = preCells.some(
       (c) => isLikelyIndianMobileValue(c) || isLikelyEnrollmentOrStudentId(c),
     );
-    if (hasRealStudentSignal && bestEval.exactHeaderHits < 3) {
+    if (hasRealStudentSignal && bestEval.exactHeaderHits < 4) {
       return { hasHeader: false, headerRowIdx: -1 };
     }
   }
@@ -894,10 +894,14 @@ export function isExcelSummaryRow(rawRow: Record<string, string>): boolean {
   if (values.length === 0) return true;
 
   const hasPhone = values.some((v) => {
+    if (isLikelyIndianMobileValue(v)) return true;
     const digits = v.replace(/\D/g, '');
     return digits.length >= 9 && digits.length <= 13 && !/[\p{L}]{3,}/u.test(v);
   });
   if (hasPhone) return false;
+
+  const hasEnrollmentId = values.some((v) => isLikelyEnrollmentOrStudentId(v));
+  if (hasEnrollmentId) return false;
 
   // Match Unicode letters or letter+dot initials like "R. K." while excluding currency prefixes "Rs"/"INR"
   const nonNumericTexts = values.filter(
@@ -911,10 +915,12 @@ export function isExcelSummaryRow(rawRow: Record<string, string>): boolean {
     return true;
   }
 
-  // If the first column (or an S.No column) has an integer serial number 1..10000 and another cell has text,
+  // If either of the first two non-empty cells is an integer serial number 1..10000 and another cell has text,
   // treat it as a real student row rather than a footer total.
-  const firstVal = entries[0]?.[1] || '';
-  const hasSerialNo = /^\d{1,5}$/.test(firstVal) && Number(firstVal) >= 1 && Number(firstVal) <= 10000;
+  const hasSerialNo = entries.slice(0, 2).some(([, rawCell]) => {
+    const cleanCell = rawCell.replace(/[.)]+$/, '').trim();
+    return /^\d{1,5}$/.test(cleanCell) && Number(cleanCell) >= 1 && Number(cleanCell) <= 10000;
+  });
   if (hasSerialNo && anyLetterTexts.length >= 1) {
     const joined = nonNumericTexts.join(' ').trim();
     if (!/^(total|grand\s*total|sub\s*total|subtotal|overall\s*total|net\s*total|total\s*fees?|total\s*amount|sum)(\s*[:\-].*)?$/i.test(joined)) {
@@ -999,20 +1005,64 @@ function worksheetToRowObjects(
   }
 
   const headerIdx = findBestHeaderRowIndex(grid);
-  const dataStartIdx = headerIdx >= 0 ? headerIdx + 1 : 0;
+  let dataStartIdx = headerIdx >= 0 ? headerIdx + 1 : 0;
   let maxCols = headerIdx >= 0 ? (grid[headerIdx] || []).length : 0;
   for (let r = dataStartIdx; r < grid.length; r++) {
     const len = (grid[r] || []).length;
     if (len > maxCols) maxCols = len;
   }
 
-  const rawHeaders: string[] = [];
-  for (let c = 0; c < maxCols; c++) {
-    const cellText =
-      headerIdx >= 0
-        ? formatCellValue((grid[headerIdx] || [])[c]).replace(/^\uFEFF/, '')
-        : '';
-    rawHeaders.push(cellText || `Column_${c + 1}`);
+  let rawHeaders: string[] = [];
+  if (headerIdx >= 0) {
+    const row0 = grid[headerIdx] || [];
+    const nextRow = headerIdx + 1 < grid.length ? grid[headerIdx + 1] || [] : [];
+    const nextEval = nextRow.length > 0 ? classifyHeaderCandidateRow(nextRow) : null;
+
+    // Detect duplicate merged parent headings (e.g. "Fee Details | Fee Details | Fee Details") over sub-headers ("Total | Paid | Pending")
+    const r0Counts = new Map<string, number>();
+    for (let c = 0; c < maxCols; c++) {
+      const t0 = formatCellValue(row0[c]).replace(/^\uFEFF/, '').trim().toLowerCase();
+      if (t0) r0Counts.set(t0, (r0Counts.get(t0) || 0) + 1);
+    }
+    const hasDuplicateGroupHeader = Array.from(r0Counts.values()).some((cnt) => cnt >= 2);
+    const nextRowShortLabels = nextRow
+      .map(formatCellValue)
+      .filter((v) => v.length > 0 && v.length <= 30 && !/^\d[\d,.]*$/.test(v));
+    const nextRowHasStudentStatusValues = nextRow
+      .map(formatCellValue)
+      .some((v) =>
+        /^(not\s*provided|not\s*submitted|not\s*completed|not\s*attending|not\s*received|fees?\s*low)$/i.test(v),
+      );
+
+    const isSubHeaderRow =
+      Boolean(nextEval) &&
+      nextEval!.dataSignals === 0 &&
+      !nextRowHasStudentStatusValues &&
+      nextRowShortLabels.length >= 2 &&
+      ((hasDuplicateGroupHeader && nextEval!.exactHeaderHits >= 1) ||
+        (nextEval!.exactHeaderHits >= 2 &&
+          nextRow.map(formatCellValue).filter(Boolean).length <= Math.max(3, Math.floor(maxCols * 0.65))));
+
+    if (isSubHeaderRow) {
+      for (let c = 0; c < maxCols; c++) {
+        const t0 = formatCellValue(row0[c]).replace(/^\uFEFF/, '').trim();
+        const t1 = formatCellValue(nextRow[c]).replace(/^\uFEFF/, '').trim();
+        if (t0 && t1 && t0.toLowerCase() !== t1.toLowerCase()) {
+          const isRepeatedParent = (r0Counts.get(t0.toLowerCase()) || 0) >= 2;
+          rawHeaders.push(isRepeatedParent ? `${t0} - ${t1}` : t1);
+        } else {
+          rawHeaders.push(t0 || t1 || `Column_${c + 1}`);
+        }
+      }
+      dataStartIdx = headerIdx + 2;
+    } else {
+      for (let c = 0; c < maxCols; c++) {
+        const cellText = formatCellValue(row0[c]).replace(/^\uFEFF/, '');
+        rawHeaders.push(cellText || `Column_${c + 1}`);
+      }
+    }
+  } else {
+    rawHeaders = Array.from({ length: maxCols }, (_, c) => `Column_${c + 1}`);
   }
   const uniqueHeaders = makeUniqueHeaders(rawHeaders);
 
@@ -1029,8 +1079,12 @@ function worksheetToRowObjects(
       const cellAddr = XLSX.utils.encode_cell({ r, c: idx });
       const cellObj = ws[cellAddr];
       let formatted = formatCellValue(row[idx]);
-      if (!formatted && cellObj && typeof cellObj.w === 'string') {
-        formatted = cellObj.w.trim();
+      if (!formatted && cellObj) {
+        if (typeof cellObj.w === 'string' && cellObj.w.trim()) {
+          formatted = cellObj.w.trim();
+        } else if (cellObj.v !== undefined && cellObj.v !== null) {
+          formatted = formatCellValue(cellObj.v);
+        }
       }
       obj[h] = formatted;
       if (formatted.length > 0) nonEmptyCells++;
@@ -1424,7 +1478,28 @@ const EXACT_ALIAS_LISTS: Record<keyof ExcelColumnMapping, string[]> = {
     'telephone',
   ],
   centre: ['centre', 'centrename', 'centreid', 'branch', 'branchname', 'center', 'centername', 'location'],
-  subject: ['subject', 'subjects', 'niossubjects', 'course', 'stream', 'mainsubjects', 'class', 'medium'],
+  subject: [
+    'subject',
+    'subjects',
+    'niossubject',
+    'niossubjects',
+    'appearingsubject',
+    'appearingsubjects',
+    'optedsubject',
+    'optedsubjects',
+    'mainsubject',
+    'mainsubjects',
+    'subjectname',
+    'subjectnames',
+    'subjectcode',
+    'subjectcodes',
+    'sub',
+    'subs',
+    'course',
+    'stream',
+    'class',
+    'medium',
+  ],
   tmaStatus: ['tmastatus', 'tma', 'tmasubmission'],
   practicalStatus: ['practicalstatus', 'practical', 'practicals'],
   classAttendanceStatus: [
@@ -1454,12 +1529,39 @@ const EXACT_ALIAS_LISTS: Record<keyof ExcelColumnMapping, string[]> = {
   totalFee: [
     'totalfee',
     'totalfees',
+    'totalfeesrs',
+    'totalfeers',
+    'totalamt',
     'totalamount',
     'fee',
     'fees',
+    'feers',
+    'feesrs',
+    'feeamount',
+    'feesamount',
+    'feesdetail',
+    'feedetails',
     'coursefee',
+    'coursefees',
+    'courseamt',
     'packagefee',
+    'totalpackage',
+    'package',
     'actualfee',
+    'actualamt',
+    'decidedfee',
+    'feesdecided',
+    'decided',
+    'settledfee',
+    'settled',
+    'agreed',
+    'fixedfee',
+    'finalfee',
+    'annualfee',
+    'fullfee',
+    'studentfee',
+    'niosfee',
+    'coachingfee',
     'payablefee',
     'netfee',
     'payableamount',
@@ -1467,45 +1569,73 @@ const EXACT_ALIAS_LISTS: Record<keyof ExcelColumnMapping, string[]> = {
     'totalcoursefee',
     'programfee',
     'admissionfee',
+    'kulfee',
+    'kulfees',
     'totalrs',
   ],
   paidAmount: [
     'paidamount',
+    'paidamt',
     'feepaid',
     'feespaid',
     'paid',
     'paidfee',
     'paidfees',
+    'paidtilldate',
     'jama',
     'feejama',
     'feesjama',
+    'jamafee',
     'jamarashi',
     'jamaamount',
+    'amountjama',
     'receivedfee',
     'feereceived',
     'receivedamount',
     'amountreceived',
+    'receivedrs',
     'feesubmitted',
     'submittedfee',
     'submittedfees',
+    'feesubmit',
     'amtpaid',
     'amtreceived',
     'feerecd',
     'feesrecd',
     'recd',
     'collectedfee',
+    'feecollected',
+    'feescollected',
     'paidrs',
     'deposit',
     'deposited',
+    'feesdeposited',
+    'depositedfee',
+    'depositamt',
+    'depositedamount',
+    'amountdeposited',
     'amountpaid',
     'collected',
     'collection',
+    '1stinstallment',
+    'firstinstallment',
+    'installment1',
+    'inst1',
+    '1stinst',
+    '1stkist',
+    'kist1',
+    'kist',
+    '1stpay',
+    'pay1',
+    'installment',
+    'instalment',
   ],
   pendingAmount: [
     'pendingamount',
     'pendingfee',
     'pendingfees',
     'pendingamt',
+    'pendingrs',
     'pending',
     'due',
     'dues',
@@ -1514,43 +1644,97 @@ const EXACT_ALIAS_LISTS: Record<keyof ExcelColumnMapping, string[]> = {
     'dueamount',
     'dueamt',
     'duers',
+    'duerashi',
     'balance',
     'balancefee',
     'balancefees',
     'balanceamount',
+    'balanceamt',
+    'balancetopay',
+    'balancers',
     'bal',
+    'balfee',
+    'balfees',
     'balamt',
+    'baldue',
     'balancetobepaid',
+    'pendingbalance',
     'baki',
     'baaki',
     'bakirashi',
     'bakiamount',
+    'bakaya',
+    'baqaya',
+    'bakayafee',
+    'baqayafee',
+    'shesh',
+    'sheshfee',
+    'sheshrashi',
+    'rest',
+    'restfee',
+    'restamount',
     'remaining',
     'remainingfee',
+    'remainingfees',
+    'remainingamount',
+    'remainingbalance',
+    'leftfee',
+    'leftfees',
+    'leftfeesrs',
+    'leftfeers',
+    'feesleft',
+    'feeleft',
+    'leftamount',
+    'leftamt',
+    'leftrs',
+    'leftbalance',
+    'leftbal',
+    'balanceleft',
+    'amountleft',
+    'amtleft',
+    'left',
     'unpaidamount',
+    'unpaidamt',
+    'unpaidrs',
     'unpaidfee',
+    'unpaidfees',
+    'topay',
+    'payablebalance',
   ],
   tmaFee: [
     'tmafee',
     'tmafees',
+    'tmafeesrs',
+    'tmafeespaid',
+    'tmafeepaid',
+    'tmafeespending',
     'tmaamount',
     'tmacharge',
     'tmacharges',
     'tmafeers',
+    'tmars',
     'assignmentfee',
     'assignmentfees',
   ],
   examFee: [
     'examfee',
     'examfees',
+    'examfeesrs',
+    'examfeespaid',
+    'examfeepaid',
     'examinationfee',
     'examinationfees',
+    'examinationfeesrs',
     'examamount',
     'examcharge',
     'examcharges',
+    'boardfee',
+    'boardfees',
     'boardexamfee',
     'examinationsfee',
     'examfeers',
+    'examrs',
+    'examformfee',
   ],
   feeStatus: ['feestatus', 'feesstatus', 'paymentstatus', 'recoverystatus', 'paidstatus'],
 };
@@ -1560,30 +1744,126 @@ const FUZZY_CONTAINS: Array<{ field: keyof ExcelColumnMapping; keywords: string[
   { field: 'mobileNumber', keywords: ['mobile', 'phone', 'contact', 'whatsapp', 'mob'] },
   { field: 'studentId', keywords: ['enrol', 'rollno', 'regno', 'studentid', 'admno'] },
   { field: 'centre', keywords: ['centre', 'center', 'branch'] },
-  { field: 'tmaFee', keywords: ['tmafee', 'tmacharge', 'assignmentfee'] },
-  { field: 'examFee', keywords: ['examfee', 'examinationfee', 'examcharge'] },
+  { field: 'tmaFee', keywords: ['tmafee', 'tmafees', 'tmacharge', 'tmaamount', 'tmars', 'assignmentfee'] },
+  { field: 'examFee', keywords: ['examfee', 'examfees', 'examinationfee', 'examinationfees', 'examcharge', 'examamount', 'examrs', 'boardfee'] },
   { field: 'tmaStatus', keywords: ['tma'], exclude: ['fee', 'fees', 'amount', 'charge', 'charges', 'rs', 'paid', 'pending', 'due'] },
   { field: 'practicalStatus', keywords: ['practical'], exclude: ['fee', 'fees', 'amount', 'charge'] },
   { field: 'classAttendanceStatus', keywords: ['attend', 'liveclass', 'onlineclass'] },
-  { field: 'subject', keywords: ['subject', 'stream', 'course'] },
+  {
+    field: 'subject',
+    keywords: ['subject', 'stream', 'course'],
+    exclude: ['fee', 'fees', 'charge', 'amount', 'toc', 'why', 'plan', 'source'],
+  },
   { field: 'tcStatus', keywords: ['transfercert', 'tcstatus'] },
   { field: 'bookStatus', keywords: ['book'] },
   { field: 'examinationStatus', keywords: ['exam'], exclude: ['fee', 'fees', 'amount', 'charge', 'charges', 'rs', 'paid', 'pending', 'due'] },
   { field: 'admissionDate', keywords: ['admdate', 'admissiondate', 'joiningdate'] },
   { field: 'feeStatus', keywords: ['feestatus', 'paymentstatus', 'recoverystatus'] },
-  { field: 'pendingAmount', keywords: ['pending', 'due', 'balance', 'baki', 'baaki', 'remaining', 'unpaid'], exclude: ['tma', 'exam'] },
-  { field: 'paidAmount', keywords: ['paid', 'jama', 'deposit', 'received', 'collected', 'submitted', 'recd'], exclude: ['tma', 'exam', 'tma_status'] },
-  { field: 'totalFee', keywords: ['totalfee', 'coursefee', 'packagefee', 'totalamount', 'netfee', 'fees'], exclude: ['tma', 'exam'] },
+  {
+    field: 'pendingAmount',
+    keywords: [
+      'pending',
+      'due',
+      'balance',
+      'baki',
+      'baaki',
+      'bakaya',
+      'baqaya',
+      'remaining',
+      'unpaid',
+      'leftfee',
+      'feeleft',
+      'leftamt',
+      'amountleft',
+      'amtleft',
+      'leftrs',
+      'leftbal',
+      'balanceleft',
+      'left',
+      'shesh',
+      'balfee',
+      'balamt',
+      'baldue',
+    ],
+    exclude: ['tma', 'exam', 'date', 'reason', 'remark', 'note', 'dropout'],
+  },
+  {
+    field: 'paidAmount',
+    keywords: ['paid', 'jama', 'deposit', 'received', 'collected', 'submitted', 'recd', 'installment', 'instalment', 'kist'],
+    exclude: ['tma', 'exam', 'status', 'unpaid', 'left'],
+  },
+  {
+    field: 'totalFee',
+    keywords: [
+      'totalfee',
+      'totalamt',
+      'coursefee',
+      'packagefee',
+      'package',
+      'decided',
+      'settled',
+      'actualfee',
+      'fixedfee',
+      'finalfee',
+      'tuitionfee',
+      'totalamount',
+      'netfee',
+      'payablefee',
+      'admissionfee',
+      'feers',
+      'feesrs',
+      'feeamount',
+      'feesamount',
+      'fees',
+      'fee',
+    ],
+    exclude: [
+      'tma',
+      'exam',
+      'practical',
+      'status',
+      'remark',
+      'note',
+      'receipt',
+      'mode',
+      'type',
+      'date',
+      'paid',
+      'jama',
+      'pending',
+      'due',
+      'baki',
+      'balance',
+      'left',
+      'unpaid',
+      'concession',
+      'discount',
+      'refund',
+      'installment',
+    ],
+  },
   { field: 'additionalRemarks', keywords: ['remark', 'note', 'comment'] },
 ];
 
+const ZERO_OR_FEE_STATUS_CELL_RE =
+  /^(nil|nill|zero|no\s*due|no\s*dues|clear|cleared|settled|full\s*paid|paid|unpaid|not\s*paid|partial|pending|overdue|free|exempt|concession|discount|waived|scholarship|done|na|n\/a|none)$/i;
+
 function isMostlyNonNumericRemarkValues(samples: string[]): boolean {
   if (samples.length === 0) return false;
-  const nonNumericText = samples.filter((v) => {
-    const num = parseFeeNumberNullable(v);
-    return num === null && /[\p{L}]{2,}/u.test(v);
-  }).length;
-  return nonNumericText >= Math.ceil(samples.length * 0.65);
+  let numericCount = 0;
+  let remarkTextCount = 0;
+  for (const v of samples) {
+    const trimmed = v.trim();
+    if (!trimmed) continue;
+    const num = parseFeeNumberNullable(trimmed);
+    if (num !== null) {
+      numericCount += 1;
+    } else if (!ZERO_OR_FEE_STATUS_CELL_RE.test(trimmed) && /[\p{L}]{2,}/u.test(trimmed)) {
+      remarkTextCount += 1;
+    }
+  }
+  if (numericCount >= 3 || (numericCount >= 2 && numericCount >= remarkTextCount)) return false;
+  return remarkTextCount >= Math.ceil(samples.length * 0.55);
 }
 
 const FEE_MAPPING_FIELDS = new Set<keyof ExcelColumnMapping>([
@@ -1601,7 +1881,7 @@ export function fuzzyDetectColumnMapping(
   const mapping: ExcelColumnMapping = {};
   const tokenToHeader = headers.map((h) => ({ header: h, token: normalizeHeaderToken(h) }));
   const usedHeaders = new Set<string>();
-  const sampleSlice = sampleRows.slice(0, 30);
+  const sampleSlice = sampleRows.slice(0, 120);
 
   const colSamples = new Map<string, string[]>();
   for (const h of headers) {
@@ -1807,14 +2087,32 @@ export function fuzzyDetectColumnMapping(
       }
     }
 
-    // 3g. Subjects / Course
+    // 3g. Subjects / Course (excludes TOC / Why / Plan / Email / Father / Remarks columns)
     if (!mapping.subject) {
       const subjCol = headers.find((h) => {
         if (usedHeaders.has(h) || snoHeaders.has(h)) return false;
+        const tok = normalizeHeaderToken(h);
+        if (
+          tok.includes('toc') ||
+          tok.includes('why') ||
+          tok.includes('plan') ||
+          tok.includes('source') ||
+          tok.includes('email') ||
+          tok.includes('father') ||
+          tok.includes('mother') ||
+          tok.includes('login') ||
+          tok.includes('remark') ||
+          tok.includes('note') ||
+          tok.includes('fee')
+        ) {
+          return false;
+        }
         const samples = colSamples.get(h) || [];
         if (samples.length === 0) return false;
         const hits = samples.filter((v) =>
-          /\b(hindi|english|mathematics|maths|science|social\s*science|physics|chemistry|biology|commerce|accountancy|economics|10th|12th|secondary|sr\.?\s*sec|nios)\b/i.test(v),
+          /\b(hindi|english|mathematics|maths|science|social\s*science|physics|chemistry|biology|commerce|accountancy|business\s*studies|economics|history|geography|political\s*science|sociology|psychology|home\s*science|data\s*entry|painting|computer|urdu|sanskrit|physical\s*education|10th|12th|secondary|sr\.?\s*sec|nios)\b/i.test(
+            v,
+          ),
         ).length;
         return hits >= Math.ceil(samples.length * 0.45);
       });
@@ -1872,24 +2170,21 @@ export function fuzzyDetectColumnMapping(
       }
     }
 
-    // 3j. Mathematical fee detection for unmapped/headerless numeric columns
-    //     1) 3-col triple: Total = Paid + Pending
-    //     2) 2-col pair: Total >= Paid (with realistic fee amounts >= 500)
-    //     3) 1-col fallback: Single course fee column (>= 1000)
-    if (!mapping.totalFee && !mapping.paidAmount && !mapping.pendingAmount) {
-      const numericCols = headers.filter((h) => {
-        if (usedHeaders.has(h) || snoHeaders.has(h)) return false;
-        const samples = colSamples.get(h) || [];
-        if (samples.length < 3) return false;
-        if (samples.some((v) => isLikelyIndianMobileValue(v) || isLikelyEnrollmentOrStudentId(v))) {
-          return false;
-        }
-        const nums = samples
-          .map(parseFeeNumberNullable)
-          .filter((n): n is number => n !== null && n >= 0 && n <= 200000);
-        return nums.length >= Math.ceil(samples.length * 0.65);
-      });
+    // 3j. Mathematical fee detection for unmapped/headerless/partially-mapped numeric columns
+    const numericCols = headers.filter((h) => {
+      if (usedHeaders.has(h) || snoHeaders.has(h)) return false;
+      const samples = colSamples.get(h) || [];
+      if (samples.length < 2) return false;
+      if (samples.some((v) => isLikelyIndianMobileValue(v) || isLikelyEnrollmentOrStudentId(v))) {
+        return false;
+      }
+      const nums = samples
+        .map((v) => (ZERO_OR_FEE_STATUS_CELL_RE.test(v.trim()) ? 0 : parseFeeNumberNullable(v)))
+        .filter((n): n is number => n !== null && n >= 0 && n <= 200000);
+      return nums.length >= Math.max(2, Math.ceil(samples.length * 0.5));
+    });
 
+    if (!mapping.totalFee && !mapping.paidAmount && !mapping.pendingAmount) {
       let detectedTriple: [string, string, string] | null = null;
       for (let i = 0; i < numericCols.length && !detectedTriple; i++) {
         for (let j = 0; j < numericCols.length && !detectedTriple; j++) {
@@ -1957,7 +2252,13 @@ export function fuzzyDetectColumnMapping(
 
         if (detectedPair) {
           mapping.totalFee = detectedPair[0];
-          mapping.paidAmount = detectedPair[1];
+          const secondSamples = colSamples.get(detectedPair[1]) || [];
+          const looksPending = secondSamples.some((v) => /^(nil|nill|clear|cleared|no\s*due|due|pending)$/i.test(v));
+          if (looksPending) {
+            mapping.pendingAmount = detectedPair[1];
+          } else {
+            mapping.paidAmount = detectedPair[1];
+          }
           usedHeaders.add(detectedPair[0]);
           usedHeaders.add(detectedPair[1]);
         } else if (feeCols.length === 1) {
@@ -1965,10 +2266,80 @@ export function fuzzyDetectColumnMapping(
           usedHeaders.add(feeCols[0]);
         }
       }
+    } else if (numericCols.length > 0) {
+      // Partial header match fallback: fill missing Total / Paid / Pending via Total == Paid + Pending
+      if (mapping.totalFee && mapping.paidAmount && !mapping.pendingAmount) {
+        const matchPend = numericCols.find((col) => {
+          let valid = 0;
+          let eq = 0;
+          for (const r of sampleSlice) {
+            const t = parseFeeNumberNullable(r[mapping.totalFee!]);
+            const p = parseFeeNumberNullable(r[mapping.paidAmount!]);
+            const c = ZERO_OR_FEE_STATUS_CELL_RE.test((r[col] || '').trim()) ? 0 : parseFeeNumberNullable(r[col]);
+            if (t !== null && p !== null && c !== null && t > 0) {
+              valid++;
+              if (Math.abs(t - (p + c)) <= 2) eq++;
+            }
+          }
+          return valid >= 3 && eq >= Math.ceil(valid * 0.7);
+        });
+        if (matchPend) {
+          mapping.pendingAmount = matchPend;
+          usedHeaders.add(matchPend);
+        }
+      } else if (mapping.totalFee && !mapping.paidAmount && mapping.pendingAmount) {
+        const matchPaid = numericCols.find((col) => {
+          let valid = 0;
+          let eq = 0;
+          for (const r of sampleSlice) {
+            const t = parseFeeNumberNullable(r[mapping.totalFee!]);
+            const b = parseFeeNumberNullable(r[mapping.pendingAmount!]);
+            const c = parseFeeNumberNullable(r[col]);
+            if (t !== null && b !== null && c !== null && t > 0) {
+              valid++;
+              if (Math.abs(t - (c + b)) <= 2) eq++;
+            }
+          }
+          return valid >= 3 && eq >= Math.ceil(valid * 0.7);
+        });
+        if (matchPaid) {
+          mapping.paidAmount = matchPaid;
+          usedHeaders.add(matchPaid);
+        }
+      } else if (!mapping.totalFee && mapping.paidAmount && mapping.pendingAmount) {
+        const matchTot = numericCols.find((col) => {
+          let valid = 0;
+          let eq = 0;
+          for (const r of sampleSlice) {
+            const p = parseFeeNumberNullable(r[mapping.paidAmount!]);
+            const b = parseFeeNumberNullable(r[mapping.pendingAmount!]);
+            const c = parseFeeNumberNullable(r[col]);
+            if (p !== null && b !== null && c !== null && c > 0) {
+              valid++;
+              if (Math.abs(c - (p + b)) <= 2) eq++;
+            }
+          }
+          return valid >= 3 && eq >= Math.ceil(valid * 0.7);
+        });
+        if (matchTot) {
+          mapping.totalFee = matchTot;
+          usedHeaders.add(matchTot);
+        }
+      }
     }
   }
 
   return mapping;
+}
+
+export function normalizeStudentMatchName(name: string): string {
+  return String(name ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/^(mr|mrs|ms|miss|km|kumari|shri|smt|dr)\.?\s+/i, '')
+    .replace(/[^a-z0-9\u0900-\u097f]+/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 export function cleanMobileNumber(raw: string): string {
@@ -2000,6 +2371,11 @@ export function cleanMobileNumber(raw: string): string {
   }
   if (digits.length >= 7 && digits.length <= 15) {
     return digits;
+  }
+  if (digits.length > 15) {
+    const indianMatch = noDecimal.match(/(?:\+?91[\s-]?)?([6-9]\d{9})\b/);
+    if (indianMatch?.[1]) return indianMatch[1];
+    return digits.slice(0, 10);
   }
   return noDecimal.replace(/\s+/g, ' ').slice(0, 20);
 }
@@ -2155,10 +2531,72 @@ export interface NormalizedImportStudent {
   explicitFeeDetected: boolean;
   explicitTmaFeeDetected: boolean;
   explicitExamFeeDetected: boolean;
+  explicitSubjectDetected: boolean;
+  explicitTmaDetected?: boolean;
+  explicitPracticalDetected?: boolean;
   extraColumns: Record<string, string>;
   rowColor: string;
   cellColors: Record<string, string>;
   validationError: string | null;
+}
+
+export const MOCK_SUBJECT_PLACEHOLDERS = [
+  'hindi, english, mathematics, science, social science',
+  'general nios stream',
+  'n/a',
+  'na',
+  'none',
+  'nil',
+  'not provided',
+  '-',
+  '—',
+] as const;
+
+export function isMockSubjectValue(subject?: string): boolean {
+  const normalized = String(subject ?? '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+  if (!normalized) return false;
+  return (MOCK_SUBJECT_PLACEHOLDERS as readonly string[]).includes(normalized);
+}
+
+export function sanitizeRealSubject(
+  subject?: string,
+  options?: { stripLegacyDefaultList?: boolean },
+): string {
+  const trimmed = String(subject ?? '').trim();
+  if (!trimmed) return '';
+  const norm = trimmed.replace(/\s+/g, ' ').toLowerCase();
+  if (
+    norm === 'general nios stream' ||
+    norm === 'n/a' ||
+    norm === 'na' ||
+    norm === 'none' ||
+    norm === 'nil' ||
+    norm === 'not provided' ||
+    norm === '-' ||
+    norm === '—'
+  ) {
+    return '';
+  }
+  if (
+    options?.stripLegacyDefaultList === true &&
+    norm === 'hindi, english, mathematics, science, social science'
+  ) {
+    return '';
+  }
+  return trimmed.slice(0, 200);
+}
+
+export function countStudentSubjects(subject?: string): number {
+  const clean = sanitizeRealSubject(subject, { stripLegacyDefaultList: false });
+  if (!clean) return 0;
+  const parts = clean
+    .split(/[,;|\n/]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0 && s !== '-' && s !== '—');
+  return Math.min(20, parts.length);
 }
 
 const CANONICAL_COLOR_FIELDS: Array<keyof ExcelColumnMapping> = [
@@ -2176,7 +2614,7 @@ const CANONICAL_COLOR_FIELDS: Array<keyof ExcelColumnMapping> = [
 ];
 
 const PLACEHOLDER_STUDENT_ID_RE =
-  /^(pending|na|n-a|nil|none|null|new|tba|tbd|awaited|applied|not-allotted|not-generated|not-available|not-issued|not-assigned|unknown|same|yes|no|nios|student|active|inactive|completed|incomplete|regular|0+)$/i;
+  /^(pending|pending-id|na|n-a|nil|none|null|new|fresh|old|tba|tbd|awaited|wait|waiting|applied|apply|applying|process|under-process|running|continue|not-allotted|not-alloted|not-generated|not-available|not-issued|not-assigned|not-done|not-received|no-id|without-id|unknown|same|self|blank|empty|yes|no|nios|student|active|inactive|completed|incomplete|regular|0+|[x_-]+)$/i;
 
 export function sanitizeImportedStudentId(rawStudentId: string): string {
   const cleaned = String(rawStudentId ?? '')
@@ -2191,25 +2629,220 @@ export function sanitizeImportedStudentId(rawStudentId: string): string {
 
 export const COMMON_BRANCH_HEADERS_STORAGE_KEY = 'vp_common_lookerganj_headers_v1';
 
-function canonicalCommonHeaderToken(h: string): string {
-  return String(h ?? '')
+const HEADER_WORD_SYNONYMS: Record<string, string> = {
+  fathers: 'father',
+  mothers: 'mother',
+  subjects: 'subject',
+  fees: 'fee',
+  corrections: 'correction',
+  details: 'detail',
+  numbers: 'no',
+  number: 'no',
+  num: 'no',
+  password: 'pass',
+  pwd: 'pass',
+  passwd: 'pass',
+  enquiry: 'inquiry',
+  enquiries: 'inquiry',
+  inquiries: 'inquiry',
+  preparations: 'preparation',
+  prep: 'preparation',
+  plans: 'plan',
+  planning: 'plan',
+  mobiles: 'mobile',
+  phones: 'phone',
+  ids: 'id',
+  emails: 'email',
+};
+
+function tokenizeCommonHeaderWords(h: string): string[] {
+  const rawWords = String(h ?? '')
     .replace(/^\uFEFF/, '')
     .replace(/['’]s\b/gi, '')
     .toLowerCase()
-    .replace(/[^a-z0-9]/g, '');
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+
+  return rawWords.map((w) => {
+    if (HEADER_WORD_SYNONYMS[w]) return HEADER_WORD_SYNONYMS[w];
+    if (w.length > 4 && w.endsWith('s') && !/(ss|us|is|os)$/i.test(w)) {
+      return w.slice(0, -1);
+    }
+    return w;
+  });
+}
+
+export function canonicalCommonHeaderToken(h: string): string {
+  return tokenizeCommonHeaderWords(h).join('');
+}
+
+export function isKeepEmptyManualColumnHeading(header: string): boolean {
+  const cleaned = String(header ?? '')
+    .replace(/^\uFEFF/, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+  if (!cleaned) return false;
+  const compact = cleaned.replace(/\s+/g, '');
+  if (
+    compact === 'whynios' ||
+    compact === 'currenteducationstatus' ||
+    compact === 'futureplanning' ||
+    compact === 'sourceofinquiry' ||
+    compact === 'sourceofenquiry'
+  ) {
+    return true;
+  }
+  if (/\bwhy\b.*\b(nios|admission)\b/.test(cleaned)) return true;
+  if (/\bsource\b.*\b(inquiry|enquiry)\b/.test(cleaned) || /\b(inquiry|enquiry)\s+source\b/.test(cleaned)) {
+    return true;
+  }
+  if (/\bcurrent\b.*\beducation\b/.test(cleaned) || /\beducation\s+prep/.test(cleaned)) {
+    return true;
+  }
+  if (/\bfuture\b.*\bplan/.test(cleaned)) return true;
+  return false;
 }
 
 export function alignHeaderToCommonSchema(rawHeader: string, commonHeaders: string[]): string {
   const clean = String(rawHeader ?? '').trim().slice(0, 50);
   if (!clean || commonHeaders.length === 0) return clean;
-  const targetToken = canonicalCommonHeaderToken(clean);
+  const targetWords = tokenizeCommonHeaderWords(clean);
+  const targetToken = targetWords.join('');
   if (!targetToken) return clean;
+
+  // 1. Exact canonical match (handles Father's Name / Fathers Name / Father Name, TOC Subject / TOC Subjects, etc.)
   for (const ch of commonHeaders) {
     if (canonicalCommonHeaderToken(ch) === targetToken) {
       return ch.trim().slice(0, 50);
     }
   }
+
+  // 2. Safe abbreviation / extension match for multi-word sheet headers (e.g. "Email" -> "EMAIL ID", "NIOS Login ID" -> "NIOS LOGIN ID & PASSWORD")
+  const conflictPairs: Array<[string, string]> = [
+    ['name', 'no'],
+    ['name', 'mobile'],
+    ['name', 'phone'],
+    ['father', 'mother'],
+    ['father', 'student'],
+    ['tma', 'exam'],
+    ['total', 'left'],
+    ['paid', 'pending'],
+    ['toc', 'main'],
+  ];
+  const hasConflict = (aWords: string[], bWords: string[]) => {
+    const aSet = new Set(aWords);
+    const bSet = new Set(bWords);
+    for (const [x, y] of conflictPairs) {
+      if ((aSet.has(x) && bSet.has(y)) || (aSet.has(y) && bSet.has(x))) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  for (const ch of commonHeaders) {
+    const chWords = tokenizeCommonHeaderWords(ch);
+    if (chWords.length === 0 || hasConflict(targetWords, chWords)) continue;
+    const chSet = new Set(chWords);
+    const targetSet = new Set(targetWords);
+    // Exact email <-> email id
+    if (
+      (targetToken === 'email' && chWords.includes('email')) ||
+      (chWords.join('') === 'email' && targetWords.includes('email'))
+    ) {
+      return ch.trim().slice(0, 50);
+    }
+    // Meaningful multi-word subset match (at least 2 overlapping tokens or prefix word match on unique roots like nios+login / calling / correction)
+    const commonWords = targetWords.filter((w) => chSet.has(w));
+    const smallerLen = Math.min(targetWords.length, chWords.length);
+    if (
+      (smallerLen >= 2 && commonWords.length === smallerLen) ||
+      (smallerLen === 1 &&
+        commonWords.length === 1 &&
+        ['calling', 'correction', 'toc'].includes(commonWords[0]) &&
+        !targetSet.has('fee') &&
+        !chSet.has('fee'))
+    ) {
+      return ch.trim().slice(0, 50);
+    }
+  }
+
   return clean;
+}
+
+export function getStudentExtraColumnValue(
+  extraColumns: Record<string, string> | undefined,
+  targetKey: string,
+): string {
+  if (!extraColumns) return '';
+  const direct = extraColumns[targetKey];
+  if (direct !== undefined && String(direct).trim().length > 0) {
+    return String(direct).trim();
+  }
+  const targetToken = canonicalCommonHeaderToken(targetKey);
+  if (!targetToken) return '';
+  for (const [k, v] of Object.entries(extraColumns)) {
+    const val = String(v ?? '').trim();
+    if (!val) continue;
+    if (
+      canonicalCommonHeaderToken(k) === targetToken ||
+      alignHeaderToCommonSchema(k, [targetKey]) === targetKey.trim().slice(0, 50)
+    ) {
+      return val;
+    }
+  }
+  return '';
+}
+
+export function mergeImportedExtraColumns(
+  newExtra: Record<string, string> | undefined,
+  existingExtra?: Record<string, string>,
+): Record<string, string> {
+  const merged: Record<string, string> = {};
+  const seenTokens = new Set<string>();
+
+  const addEntry = (rawKey: string, rawVal: string) => {
+    const cleanKey = String(rawKey ?? '').trim().slice(0, 50);
+    const cleanVal = String(rawVal ?? '').trim().slice(0, 300);
+    if (!cleanKey || !cleanVal || isKeepEmptyManualColumnHeading(cleanKey)) return;
+    if (Object.keys(merged).length >= 35) return;
+    const tok = canonicalCommonHeaderToken(cleanKey);
+    if (tok && seenTokens.has(tok) && merged[cleanKey] === undefined) return;
+    if (tok) seenTokens.add(tok);
+    merged[cleanKey] = cleanVal;
+  };
+
+  if (newExtra) {
+    for (const [k, v] of Object.entries(newExtra)) {
+      addEntry(k, v);
+    }
+  }
+  if (existingExtra) {
+    for (const [k, v] of Object.entries(existingExtra)) {
+      addEntry(k, v);
+    }
+  }
+
+  return merged;
+}
+
+export function computeAutoExcelColumnWidth(
+  label: string,
+  colKey: string,
+  fitScreenMode: boolean,
+): number {
+  const cleanLabel = String(label ?? '').trim();
+  if (!cleanLabel) return fitScreenMode ? 115 : 155;
+  const words = cleanLabel.split(/\s+/).filter(Boolean);
+  const longestWord = words.reduce((max, w) => Math.max(max, w.length), 0);
+  const charPx = fitScreenMode ? 7.6 : 8.4;
+  const longestWordWidth = Math.ceil(longestWord * (fitScreenMode ? 8.3 : 9.0)) + 24;
+  const targetLineChars =
+    cleanLabel.length <= 13 ? cleanLabel.length : Math.ceil(cleanLabel.length / 2);
+  const wrappedWidth = Math.ceil(targetLineChars * charPx) + 26;
+  const minFloor = colKey.startsWith('extra:') ? (fitScreenMode ? 96 : 118) : fitScreenMode ? 60 : 86;
+  return Math.max(minFloor, longestWordWidth, Math.min(fitScreenMode ? 240 : 290, wrappedWidth));
 }
 
 export function loadStoredCommonBranchHeaders(): string[] {
@@ -2236,10 +2869,29 @@ export function saveCommonBranchHeaders(headers: string[]): void {
     const cleaned = headers.map((x) => String(x ?? '').trim().slice(0, 50)).filter(Boolean).slice(0, 35);
     if (cleaned.length > 0) {
       window.localStorage.setItem(COMMON_BRANCH_HEADERS_STORAGE_KEY, JSON.stringify(cleaned));
+    } else {
+      window.localStorage.removeItem(COMMON_BRANCH_HEADERS_STORAGE_KEY);
     }
   } catch {
     // ignore storage errors
   }
+}
+
+export function pruneStoredCommonBranchHeaders(deletedKeys: readonly string[]): void {
+  if (deletedKeys.length === 0) return;
+  const existing = loadStoredCommonBranchHeaders();
+  if (existing.length === 0) return;
+  const delLower = new Set(deletedKeys.map((k) => String(k ?? '').trim().toLowerCase()).filter(Boolean));
+  const delTokens = new Set(deletedKeys.map((k) => canonicalCommonHeaderToken(k)).filter(Boolean));
+  const remaining = existing.filter((h) => {
+    const clean = h.trim();
+    if (!clean) return false;
+    if (delLower.has(clean.toLowerCase())) return false;
+    const tok = canonicalCommonHeaderToken(clean);
+    if (tok && delTokens.has(tok)) return false;
+    return true;
+  });
+  saveCommonBranchHeaders(remaining);
 }
 
 export function extractCommonBranchExtraHeaders(students: Pick<Student, 'centreId' | 'extraColumns'>[]): string[] {
@@ -2291,31 +2943,35 @@ export function mergeExtraColumnsWithConfig(
   const deletedTokens = new Set(
     (config?.deletedExtraColumns || []).map((k) => canonicalCommonHeaderToken(k)).filter(Boolean),
   );
-  const deletedExact = new Set(
-    (config?.deletedExtraColumns || []).map((k) => String(k).trim()).filter(Boolean),
+  const deletedLower = new Set(
+    (config?.deletedExtraColumns || []).map((k) => String(k ?? '').trim().toLowerCase()).filter(Boolean),
   );
 
   const result: string[] = [];
   const seenTokens = new Set<string>();
+  const seenLower = new Set<string>();
 
   const pushHeader = (raw: string, allowIfDeleted = false) => {
     const clean = String(raw ?? '').trim().slice(0, 50);
     if (!clean || result.length >= 35) return;
+    const lower = clean.toLowerCase();
     const token = canonicalCommonHeaderToken(clean);
     if (!allowIfDeleted) {
-      if (deletedExact.has(clean) || (token && deletedTokens.has(token))) return;
+      if (deletedLower.has(lower) || (token && deletedTokens.has(token))) return;
     }
     if (token) {
       if (seenTokens.has(token)) return;
       seenTokens.add(token);
+      seenLower.add(lower);
       result.push(clean);
-    } else if (!result.includes(clean)) {
+    } else if (!seenLower.has(lower)) {
+      seenLower.add(lower);
       result.push(clean);
     }
   };
 
   for (const k of config?.customColumns || []) {
-    pushHeader(k, true);
+    pushHeader(k, false);
   }
   for (const k of extractedHeaders) {
     pushHeader(k, false);
@@ -2334,14 +2990,14 @@ export function extractJaunpurHeadingAndBlankColumns(
   const result: string[] = [];
   const seenTokens = new Set<string>();
 
-  const globalDeleted = new Set<string>();
+  const globalDeletedLower = new Set<string>();
   const globalDeletedTokens = new Set<string>();
   for (const cfg of sheetConfigs) {
     if (cfg.configId !== 'global' && cfg.configId !== 'xis_jaunpur') continue;
     for (const del of cfg.deletedExtraColumns || []) {
       const cleanDel = String(del || '').trim();
       if (!cleanDel) continue;
-      globalDeleted.add(cleanDel);
+      globalDeletedLower.add(cleanDel.toLowerCase());
       const tok = canonicalCommonHeaderToken(cleanDel);
       if (tok) globalDeletedTokens.add(tok);
     }
@@ -2352,12 +3008,12 @@ export function extractJaunpurHeadingAndBlankColumns(
     if (!clean || result.length >= 35) return;
     if (/^(__EMPTY(?:_\d+)?|col_\d+|column_\d+)$/i.test(clean)) return;
     const token = canonicalCommonHeaderToken(clean);
-    if (globalDeleted.has(clean) || (token && globalDeletedTokens.has(token))) return;
+    if (globalDeletedLower.has(clean.toLowerCase()) || (token && globalDeletedTokens.has(token))) return;
     if (token) {
       if (seenTokens.has(token)) return;
       seenTokens.add(token);
       result.push(clean);
-    } else if (!result.includes(clean)) {
+    } else if (!result.some((r) => r.toLowerCase() === clean.toLowerCase())) {
       result.push(clean);
     }
   };
@@ -2508,34 +3164,59 @@ export function computeRenameExtraColumnStudentUpdates<
   return updates;
 }
 
-export function computeDeleteExtraColumnStudentUpdates<
+export function computeDeleteMultipleExtraColumnsStudentUpdates<
   T extends { studentId: string; extraColumns?: Record<string, string>; cellColors?: Record<string, string> },
->(students: readonly T[], targetKey: string): StudentExtraColumnBatchUpdate[] {
-  const cleanKey = String(targetKey ?? '').trim().slice(0, 50);
-  if (!cleanKey) return [];
+>(students: readonly T[], targetKeys: readonly string[]): StudentExtraColumnBatchUpdate[] {
+  const cleanTargets = targetKeys
+    .map((k) => String(k ?? '').trim().slice(0, 50))
+    .filter(Boolean);
+  if (cleanTargets.length === 0) return [];
+
+  const targetExact = new Set(cleanTargets);
+  const targetLower = new Set(cleanTargets.map((k) => k.toLowerCase()));
+  const targetTokens = new Set(cleanTargets.map((k) => canonicalCommonHeaderToken(k)).filter(Boolean));
+
+  const isTargetKey = (rawKey: string): boolean => {
+    const trimmed = String(rawKey ?? '').trim();
+    if (!trimmed) return false;
+    if (targetExact.has(rawKey) || targetExact.has(trimmed)) return true;
+    if (targetLower.has(trimmed.toLowerCase())) return true;
+    const tok = canonicalCommonHeaderToken(trimmed);
+    return Boolean(tok && targetTokens.has(tok));
+  };
 
   const updates: StudentExtraColumnBatchUpdate[] = [];
-  const colorKey = `extra:${cleanKey}`;
 
   for (const s of students) {
-    const hasExtra = Boolean(s.extraColumns && Object.prototype.hasOwnProperty.call(s.extraColumns, cleanKey));
-    const hasColor = Boolean(s.cellColors && Object.prototype.hasOwnProperty.call(s.cellColors, colorKey));
-    if (!hasExtra && !hasColor) continue;
-
+    let removedExtra = false;
     const nextExtra: Record<string, string> = {};
     if (s.extraColumns) {
       for (const [k, v] of Object.entries(s.extraColumns)) {
-        if (k !== cleanKey) nextExtra[k] = v;
+        if (isTargetKey(k)) {
+          removedExtra = true;
+        } else {
+          nextExtra[k] = v;
+        }
       }
     }
 
+    let removedColor = false;
     let nextCellColors: Record<string, string> | undefined;
-    if (hasColor && s.cellColors) {
-      nextCellColors = {};
+    if (s.cellColors) {
+      const candidateColors: Record<string, string> = {};
       for (const [k, v] of Object.entries(s.cellColors)) {
-        if (k !== colorKey) nextCellColors[k] = v;
+        if (k.startsWith('extra:') && isTargetKey(k.slice(6))) {
+          removedColor = true;
+        } else {
+          candidateColors[k] = v;
+        }
+      }
+      if (removedColor) {
+        nextCellColors = candidateColors;
       }
     }
+
+    if (!removedExtra && !removedColor) continue;
 
     updates.push({
       studentId: s.studentId,
@@ -2545,6 +3226,12 @@ export function computeDeleteExtraColumnStudentUpdates<
   }
 
   return updates;
+}
+
+export function computeDeleteExtraColumnStudentUpdates<
+  T extends { studentId: string; extraColumns?: Record<string, string>; cellColors?: Record<string, string> },
+>(students: readonly T[], targetKey: string): StudentExtraColumnBatchUpdate[] {
+  return computeDeleteMultipleExtraColumnsStudentUpdates(students, [targetKey]);
 }
 
 export function computeAddExtraColumnDefaultUpdates<
@@ -2575,7 +3262,7 @@ export function normalizeImportedStudentRow(
   allowCentreOverride: boolean,
   explicitMapping?: ExcelColumnMapping,
   allowMissingMobile = true,
-  defaultTotalFee = 12000,
+  defaultTotalFee = 0,
   rawRowColors?: Record<string, string>,
   commonExtraHeadings: string[] = [],
 ): NormalizedImportStudent {
@@ -2603,11 +3290,82 @@ export function normalizeImportedStudentRow(
   const rawStudentId = getField('studentId');
   const sanitizedId = sanitizeImportedStudentId(rawStudentId);
 
-  const rawSubject = getField('subject').trim() || 'Hindi, English, Mathematics, Science, Social Science';
+  // Detect Subject(s) from either single Subjects column OR multi-column Subject 1..9 / Sub 1..9
+  let detectedSubjectRaw = getField('subject').trim();
+  const subjectHeaderToken = normalizeHeaderToken(activeMapping.subject || '');
+  const numberedSubjectHeaders = headers
+    .map((h) => {
+      const m = h.trim().match(/^(?:sub|subject)[\s_-]*([1-9])$/i);
+      if (!m || /\btoc\b/i.test(h)) return null;
+      return { header: h, idx: Number(m[1]) };
+    })
+    .filter((item): item is { header: string; idx: number } => item !== null)
+    .sort((a, b) => a.idx - b.idx);
+
+  if (
+    numberedSubjectHeaders.length > 0 &&
+    (!detectedSubjectRaw || /^(?:sub|subject)[1-9]$/.test(subjectHeaderToken))
+  ) {
+    const combined = numberedSubjectHeaders
+      .map((item) => String(rawRow[item.header] ?? '').trim())
+      .filter(Boolean);
+    if (combined.length > 0) {
+      detectedSubjectRaw = combined.join(', ');
+    }
+  }
+
+  const cleanedDetectedSubject = sanitizeRealSubject(detectedSubjectRaw, { stripLegacyDefaultList: false });
+  const explicitSubjectDetected = cleanedDetectedSubject.length > 0;
+  const rawSubject = cleanedDetectedSubject;
+
+  const paidHeader = activeMapping.paidAmount || '';
+  let effectivePaidRaw = getField('paidAmount');
+  const paidHeaderToken = normalizeHeaderToken(paidHeader);
+  const mappedIsInstallment =
+    /(inst|installment|instalment|kist|part\d|pay\d|dep\d|1st|first)/.test(paidHeaderToken) &&
+    !/total|sum|overall|combined/.test(paidHeaderToken);
+
+  if (!effectivePaidRaw || mappedIsInstallment) {
+    const initialSum = mappedIsInstallment ? (parseFeeNumberNullable(effectivePaidRaw) ?? 0) : 0;
+    let instHits = mappedIsInstallment && effectivePaidRaw ? 1 : 0;
+    let instTotal = initialSum;
+    for (const h of headers) {
+      if (h === paidHeader) continue;
+      const t = normalizeHeaderToken(h);
+      if (
+        !t ||
+        t.includes('tma') ||
+        t.includes('exam') ||
+        t.includes('pending') ||
+        t.includes('due') ||
+        t.includes('baki') ||
+        t.includes('balance') ||
+        t.includes('left') ||
+        t.includes('unpaid') ||
+        t.includes('total') ||
+        t.includes('date')
+      ) {
+        continue;
+      }
+      if (
+        /^(1st|2nd|3rd|4th|first|second|third|fourth|inst|installment|instalment|kist|part|pay\d|dep\d)/.test(t) ||
+        /(installment|instalment|kist)/.test(t)
+      ) {
+        const n = parseFeeNumberNullable(rawRow[h]);
+        if (n !== null) {
+          instTotal += n;
+          instHits += 1;
+        }
+      }
+    }
+    if (instHits > 0 && (instTotal > 0 || !effectivePaidRaw)) {
+      effectivePaidRaw = String(instTotal);
+    }
+  }
 
   const reconciledFee = reconcileFeeNumbers({
     totalFeeRaw: getField('totalFee'),
-    paidAmountRaw: getField('paidAmount'),
+    paidAmountRaw: effectivePaidRaw,
     pendingAmountRaw: getField('pendingAmount'),
     feeStatusRaw: getField('feeStatus'),
     defaultTotalFee,
@@ -2617,25 +3375,79 @@ export function normalizeImportedStudentRow(
   const tmaFee = parsedTmaFee !== null ? clampFeeNumber(parsedTmaFee) : 0;
   const examFee = parsedExamFee !== null ? clampFeeNumber(parsedExamFee) : 0;
 
-  // Preserve ALL other custom Excel columns up to Firestore limit (35 keys), aligned onto common Lookerganj headings.
-  // If studentId column contained a non-unique placeholder (e.g. "Pending"), keep that column in extraColumns!
+  // Preserve custom Excel columns up to Firestore limit (35 keys), aligned onto common sheet headings.
+  // Priority 1: Columns matching commonExtraHeadings (including mapped sheet boxes like LEFT, TOTAL, CALLING NO if present in grid!)
+  // Priority 2: Other unmapped named Excel columns
+  // Priority 3: Synthetic Column_X / __EMPTY columns (only if room < 35)
+  // Always keep the 4 manual qualitative columns (whyNios, source of inquiry, current education, future plan) empty!
   const mappedHeadersUsed = new Set(
     Object.entries(activeMapping)
       .filter(([field, hdr]) => Boolean(hdr) && !(field === 'studentId' && !sanitizedId))
       .map(([, hdr]) => hdr as string),
   );
-  const extraColumns: Record<string, string> = {};
+  const commonHeadingTokens = new Set(
+    commonExtraHeadings.map((ch) => canonicalCommonHeaderToken(ch)).filter(Boolean),
+  );
+
+  const priorityExtraEntries: Array<{ key: string; val: string; rawHeader: string }> = [];
+  const regularExtraEntries: Array<{ key: string; val: string; rawHeader: string }> = [];
+  const fallbackExtraEntries: Array<{ key: string; val: string; rawHeader: string }> = [];
   const extraHeaderToCleanKey = new Map<string, string>();
+
   for (const h of headers) {
-    if (mappedHeadersUsed.has(h)) continue;
     const token = normalizeHeaderToken(h);
-    if (token === 'sno' || token === 'srno' || token === 'slno' || token === 'serialno' || token === 'serialnumber') continue;
-    const val = String(rawRow[h] ?? '').trim();
+    if (token === 'sno' || token === 'srno' || token === 'slno' || token === 'serialno' || token === 'serialnumber') {
+      continue;
+    }
     const cleanKey = alignHeaderToCommonSchema(h, commonExtraHeadings);
-    if (cleanKey) extraHeaderToCleanKey.set(h, cleanKey);
+    if (!cleanKey) continue;
+    if (isKeepEmptyManualColumnHeading(h) || isKeepEmptyManualColumnHeading(cleanKey)) {
+      continue;
+    }
+    const alignedToken = canonicalCommonHeaderToken(cleanKey);
+    const matchesCommonExtraHeading = Boolean(alignedToken && commonHeadingTokens.has(alignedToken));
+    const isMappedCore = mappedHeadersUsed.has(h);
+    // Skip mapped core columns unless the visible sheet grid explicitly has an extra column matching them (e.g. LEFT, TOTAL, CALLING NO)
+    if (isMappedCore && !matchesCommonExtraHeading) continue;
+
+    extraHeaderToCleanKey.set(h, cleanKey);
+    const val = String(rawRow[h] ?? '').trim();
     if (!val) continue;
-    if (cleanKey && Object.keys(extraColumns).length < 35) {
-      extraColumns[cleanKey] = val.slice(0, 300);
+
+    if (matchesCommonExtraHeading) {
+      priorityExtraEntries.push({ key: cleanKey, val: val.slice(0, 300), rawHeader: h });
+    } else if (/^(__EMPTY(?:_\d+)?|col_\d+|column_\d+)$/i.test(cleanKey)) {
+      fallbackExtraEntries.push({ key: cleanKey, val: val.slice(0, 300), rawHeader: h });
+    } else {
+      regularExtraEntries.push({ key: cleanKey, val: val.slice(0, 300), rawHeader: h });
+    }
+  }
+
+  const extraColumns: Record<string, string> = {};
+  for (const item of [...priorityExtraEntries, ...regularExtraEntries, ...fallbackExtraEntries]) {
+    if (Object.keys(extraColumns).length >= 35) break;
+    if (extraColumns[item.key] === undefined) {
+      extraColumns[item.key] = item.val;
+    }
+  }
+
+  // Synonym backfill for grid boxes like TOTAL, LEFT, CALLING NO when Excel used Total Fee / Left Fees / Mobile No
+  for (const ch of commonExtraHeadings) {
+    if (Object.keys(extraColumns).length >= 35) break;
+    const cleanCh = ch.trim().slice(0, 50);
+    if (!cleanCh || isKeepEmptyManualColumnHeading(cleanCh)) continue;
+    if (extraColumns[cleanCh] !== undefined) continue;
+    const tok = canonicalCommonHeaderToken(cleanCh);
+    if (tok === 'total' && (reconciledFee.totalFee > 0 || getField('totalFee'))) {
+      extraColumns[cleanCh] = (getField('totalFee') || String(reconciledFee.totalFee)).slice(0, 300);
+    } else if (tok === 'left' && (getField('pendingAmount') || reconciledFee.explicitFeeDetected)) {
+      extraColumns[cleanCh] = (getField('pendingAmount') || String(reconciledFee.pendingAmount)).slice(0, 300);
+    } else if (
+      (tok === 'callingno' || tok === 'calling') &&
+      cleanMobile.length >= 7 &&
+      cleanMobile.toLowerCase() !== 'not provided'
+    ) {
+      extraColumns[cleanCh] = cleanMobile.slice(0, 300);
     }
   }
 
@@ -2728,9 +3540,10 @@ export function normalizeImportedStudentRow(
     practicalStatus: normalizePractical(getField('practicalStatus')),
     examinationStatus: normalizeExam(getField('examinationStatus')),
     admissionDate: normalizeExcelDate(getField('admissionDate'), todayIso).slice(0, 30),
-    whyNios: getField('whyNios').slice(0, 1000),
-    currentEducationStatus: getField('currentEducationStatus').slice(0, 1000),
-    futurePlanning: getField('futurePlanning').slice(0, 1000),
+    // Keep the 4 qualitative/manual columns empty during Excel import
+    whyNios: '',
+    currentEducationStatus: '',
+    futurePlanning: '',
     additionalRemarks: (getField('additionalRemarks') || 'Excel Bulk Import').slice(0, 1000),
     totalFee: reconciledFee.totalFee,
     paidAmount: reconciledFee.paidAmount,
@@ -2742,6 +3555,9 @@ export function normalizeImportedStudentRow(
     explicitFeeDetected: reconciledFee.explicitFeeDetected,
     explicitTmaFeeDetected: parsedTmaFee !== null,
     explicitExamFeeDetected: parsedExamFee !== null,
+    explicitSubjectDetected,
+    explicitTmaDetected: Boolean(activeMapping.tmaStatus && getField('tmaStatus')),
+    explicitPracticalDetected: Boolean(activeMapping.practicalStatus && getField('practicalStatus')),
     extraColumns,
     rowColor,
     cellColors,

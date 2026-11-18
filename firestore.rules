@@ -135,7 +135,7 @@ service cloud.firestore {
       && isValidId(data.studentId)
       && isValidStr(data.studentName, 2, 120)
       && isValidStr(data.mobileNumber, 7, 20)
-      && isValidStr(data.subject, 1, 200)
+      && isValidStr(data.subject, 0, 200)
       && data.tcStatus in ['Received', 'Not Received', 'Not Applicable']
       && data.bookStatus in ['Received', 'Not Received', 'Pending']
       && data.classAttendanceStatus in ['Regular', 'Irregular', 'Not Attending']
@@ -253,7 +253,7 @@ service cloud.firestore {
       && isValidId(data.centreId)
       && data.tmaStatus in ['Submitted', 'Not Submitted', 'Pending']
       && data.subjectsSubmittedCount is number && data.subjectsSubmittedCount >= 0 && data.subjectsSubmittedCount <= 20
-      && data.totalSubjectsCount is number && data.totalSubjectsCount >= 1 && data.totalSubjectsCount <= 20
+      && data.totalSubjectsCount is number && data.totalSubjectsCount >= 0 && data.totalSubjectsCount <= 20
       && isValidStr(data.submissionDate, 0, 30)
       && isValidStr(data.assignedEmployeeUid, 0, 128)
       && isValidStr(data.assignedEmployeeName, 0, 100)
@@ -312,7 +312,7 @@ service cloud.firestore {
       && isValidStr(data.studentName, 2, 120)
       && isValidId(data.centreId)
       && data.admissionStatus in ['Confirmed', 'Provisional', 'Pending Verification', 'Cancelled']
-      && isValidStr(data.stream, 1, 80)
+      && isValidStr(data.stream, 0, 80)
       && isValidStr(data.niosPurpose, 0, 1000)
       && isValidStr(data.academicBackground, 0, 1000)
       && data.followUpStatus in ['Completed', 'Pending Follow-up', 'Document Due']

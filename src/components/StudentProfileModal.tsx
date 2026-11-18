@@ -162,7 +162,7 @@ export const StudentProfileModal: React.FC<StudentProfileModalProps> = ({
             <div className="p-4 rounded-xl border border-slate-200 bg-white space-y-3">
               <div>
                 <p className="text-xs font-bold text-slate-600">Enrolled Subjects</p>
-                <p className="text-sm text-[#08152E] mt-1 font-semibold">{student.subject}</p>
+                <p className="text-sm text-[#08152E] mt-1 font-semibold">{student.subject?.trim() || '—'}</p>
               </div>
               <div className="pt-3 border-t border-slate-200">
                 <p className="text-xs font-bold text-slate-600">Why Admission in NIOS?</p>

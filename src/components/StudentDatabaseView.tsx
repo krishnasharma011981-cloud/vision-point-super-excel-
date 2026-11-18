@@ -11,7 +11,6 @@ import {
   Download,
   Edit3,
   Eye,
-  EyeOff,
   FileSpreadsheet,
   GripVertical,
   IndianRupee,
@@ -42,8 +41,10 @@ import {
 } from '../lib/analyticsMath';
 import {
   buildContextualSerialMap,
+  canonicalCommonHeaderToken,
   computeAddExtraColumnDefaultUpdates,
-  computeDeleteExtraColumnStudentUpdates,
+  computeAutoExcelColumnWidth,
+  computeDeleteMultipleExtraColumnsStudentUpdates,
   computeInsertRowSerialPlan,
   computeRenameExtraColumnStudentUpdates,
   computeShuffledStudentOrderUpdates,
@@ -52,8 +53,11 @@ import {
   exportToExcel,
   extractJaunpurHeadingAndBlankColumns,
   getReadableTextColor,
+  getStudentExtraColumnValue,
   mergeExtraColumnsWithConfig,
+  pruneStoredCommonBranchHeaders,
 } from '../lib/csvUtils';
+import { playDeleteWarningVoice } from '../lib/deleteSecurity';
 import { verifyOperationLocation } from '../lib/securityClient';
 import {
   batchUpdateStudentExtraColumns,
@@ -84,6 +88,7 @@ import type {
 } from '../types/domain';
 import { BulkImportModal } from './BulkImportModal';
 import { ConfirmDialog } from './ConfirmDialog';
+import { DeleteProtectionModal } from './DeleteProtectionModal';
 import { StudentFormModal } from './StudentFormModal';
 import { StudentProfileModal } from './StudentProfileModal';
 
@@ -155,15 +160,14 @@ interface CoreExcelColumnMeta {
   fitLabel: string;
   wideLabel: string;
   exportLabel: string;
-  protected?: boolean;
   isFee?: boolean;
   sortKey?: SortKey;
   align?: 'left' | 'right' | 'center';
 }
 
 const CORE_EXCEL_COLUMNS: CoreExcelColumnMeta[] = [
-  { key: 'serialNumber', fitLabel: 'S.No', wideLabel: 'S.No', exportLabel: 'S.No', protected: true, sortKey: 'serialNumber', align: 'left' },
-  { key: 'studentName', fitLabel: 'Student Name', wideLabel: 'Student Name', exportLabel: 'Student Name', protected: true, sortKey: 'studentName', align: 'left' },
+  { key: 'serialNumber', fitLabel: 'S.No', wideLabel: 'S.No', exportLabel: 'S.No', sortKey: 'serialNumber', align: 'left' },
+  { key: 'studentName', fitLabel: 'Student Name', wideLabel: 'Student Name', exportLabel: 'Student Name', sortKey: 'studentName', align: 'left' },
   { key: 'mobile', fitLabel: 'Mobile · Call/WA', wideLabel: 'Mobile No (Call / WhatsApp)', exportLabel: 'Mobile No', align: 'left' },
   { key: 'tma', fitLabel: 'TMA', wideLabel: 'TMA', exportLabel: 'TMA', sortKey: 'tmaStatus', align: 'left' },
   { key: 'practical', fitLabel: 'Practical', wideLabel: 'Practical', exportLabel: 'Practical', sortKey: 'practicalStatus', align: 'left' },
@@ -174,7 +178,7 @@ const CORE_EXCEL_COLUMNS: CoreExcelColumnMeta[] = [
   { key: 'tmaFee', fitLabel: 'TMA ₹', wideLabel: 'TMA Fee (₹)', exportLabel: 'TMA Fee', isFee: true, align: 'right' },
   { key: 'examFee', fitLabel: 'Exam ₹', wideLabel: 'Exam Fee (₹)', exportLabel: 'Exam Fee', isFee: true, align: 'right' },
   { key: 'feeStatus', fitLabel: 'Fee', wideLabel: 'Fee Status', exportLabel: 'Fee Status', isFee: true, align: 'center' },
-  { key: 'actions', fitLabel: 'Actions', wideLabel: 'Actions', exportLabel: 'Actions', protected: true, align: 'center' },
+  { key: 'actions', fitLabel: 'Actions', wideLabel: 'Actions', exportLabel: 'Actions', align: 'center' },
 ];
 
 const CORE_COLUMN_META_MAP: Record<string, CoreExcelColumnMeta> = Object.fromEntries(
@@ -260,7 +264,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
   const [inlineTma, setInlineTma] = useState<TmaStatus>('Pending');
   const [inlinePractical, setInlinePractical] = useState<PracticalStatus>('Pending');
   const [inlineAttendance, setInlineAttendance] = useState<ClassAttendanceStatus>('Not Attending');
-  const [inlineTotalFee, setInlineTotalFee] = useState('12000');
+  const [inlineTotalFee, setInlineTotalFee] = useState('0');
   const [inlinePaidAmount, setInlinePaidAmount] = useState('0');
   const [inlineTmaFee, setInlineTmaFee] = useState('0');
   const [inlineExamFee, setInlineExamFee] = useState('0');
@@ -287,13 +291,14 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
   const [addColToAllCentres, setAddColToAllCentres] = useState<boolean>(true);
   const [showColumnManagerModal, setShowColumnManagerModal] = useState(false);
   const [managerDraftLabels, setManagerDraftLabels] = useState<Record<string, string>>({});
-  const [deletingColumnTarget, setDeletingColumnTarget] = useState<{
+  const [selectedManagerCols, setSelectedManagerCols] = useState<Set<string>>(new Set());
+  const [deletingColumnTargets, setDeletingColumnTargets] = useState<Array<{
     colKey: string;
     label: string;
     isExtra: boolean;
     extraName?: string;
     affectedCount: number;
-  } | null>(null);
+  }> | null>(null);
 
   useEffect(() => {
     setOptimisticSerialMap(null);
@@ -367,17 +372,6 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
     startWidth: number;
   } | null>(null);
 
-  const getColWidth = useCallback(
-    (colKey: string): number => {
-      if (customColWidths[colKey] !== undefined) return customColWidths[colKey];
-      if (colKey.startsWith('extra:')) return fitScreenMode ? 115 : 155;
-      return fitScreenMode
-        ? DEFAULT_FIT_COL_WIDTHS[colKey] ?? 96
-        : DEFAULT_WIDE_COL_WIDTHS[colKey] ?? 135;
-    },
-    [customColWidths, fitScreenMode],
-  );
-
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       const active = resizeDragRef.current;
@@ -400,32 +394,6 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
       window.removeEventListener('mouseup', handleMouseUp);
     };
   }, []);
-
-  const handleStartColResize = (e: React.MouseEvent, colKey: string) => {
-    e.preventDefault();
-    e.stopPropagation();
-    resizeDragRef.current = {
-      colKey,
-      startX: e.clientX,
-      startWidth: getColWidth(colKey),
-    };
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-  };
-
-  const handleToggleColAutoSize = (e: React.MouseEvent, colKey: string) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const base =
-      colKey.startsWith('extra:')
-        ? 125
-        : (fitScreenMode ? DEFAULT_FIT_COL_WIDTHS[colKey] : DEFAULT_WIDE_COL_WIDTHS[colKey]) ?? 100;
-    const current = getColWidth(colKey);
-    const expanded = colKey === 'studentName' ? 260 : Math.min(420, Math.round(base * 1.45));
-    const compact = colKey === 'actions' ? 110 : Math.max(42, Math.round(base * 0.85));
-    const nextWidth = Math.abs(current - expanded) < 12 ? compact : current > base + 6 ? base : expanded;
-    setCustomColWidths((prev) => ({ ...prev, [colKey]: nextWidth }));
-  };
 
   // Per-department Permission Request & Centre Head Review State
   const [permissionStudent, setPermissionStudent] = useState<Student | null>(null);
@@ -550,16 +518,27 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
       ...(globalSheetConfig?.headerLabels || {}),
       ...(centreSheetConfig?.headerLabels || {}),
     };
-    const deletedSet = new Set<string>([
+    const deletedRaw = [
       ...(globalSheetConfig?.deletedExtraColumns || []),
       ...(centreSheetConfig?.deletedExtraColumns || []),
-    ]);
+    ];
+    const deletedSet = new Set<string>(deletedRaw);
+    const deletedLowerSet = new Set<string>(
+      deletedRaw.map((k) => String(k || '').trim().toLowerCase()).filter(Boolean),
+    );
+    const deletedTokenSet = new Set<string>(
+      deletedRaw.map((k) => canonicalCommonHeaderToken(k)).filter(Boolean),
+    );
     const customCols: string[] = [];
     const customSeen = new Set<string>();
     const addCustom = (raw: string) => {
       const clean = String(raw || '').trim();
-      if (clean && !customSeen.has(clean.toLowerCase()) && !deletedSet.has(clean)) {
-        customSeen.add(clean.toLowerCase());
+      if (!clean) return;
+      const lower = clean.toLowerCase();
+      const tok = canonicalCommonHeaderToken(clean);
+      if (deletedLowerSet.has(lower) || (tok && deletedTokenSet.has(tok))) return;
+      if (!customSeen.has(lower)) {
+        customSeen.add(lower);
         customCols.push(clean);
       }
     };
@@ -604,6 +583,50 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
     [activeSheetConfig.headerLabels, fitScreenMode],
   );
 
+  const getColWidth = useCallback(
+    (colKey: string): number => {
+      if (customColWidths[colKey] !== undefined) return customColWidths[colKey];
+      const label = getHeaderLabel(colKey);
+      if (colKey.startsWith('extra:')) {
+        return computeAutoExcelColumnWidth(label, colKey, fitScreenMode);
+      }
+      const baseDefault = fitScreenMode
+        ? DEFAULT_FIT_COL_WIDTHS[colKey] ?? 96
+        : DEFAULT_WIDE_COL_WIDTHS[colKey] ?? 135;
+      if (activeSheetConfig.headerLabels?.[colKey]?.trim()) {
+        return Math.max(baseDefault, computeAutoExcelColumnWidth(label, colKey, fitScreenMode));
+      }
+      return baseDefault;
+    },
+    [customColWidths, fitScreenMode, getHeaderLabel, activeSheetConfig.headerLabels],
+  );
+
+  const handleStartColResize = (e: React.MouseEvent, colKey: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    resizeDragRef.current = {
+      colKey,
+      startX: e.clientX,
+      startWidth: getColWidth(colKey),
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  };
+
+  const handleToggleColAutoSize = (e: React.MouseEvent, colKey: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const base =
+      colKey.startsWith('extra:')
+        ? computeAutoExcelColumnWidth(getHeaderLabel(colKey), colKey, fitScreenMode)
+        : (fitScreenMode ? DEFAULT_FIT_COL_WIDTHS[colKey] : DEFAULT_WIDE_COL_WIDTHS[colKey]) ?? 100;
+    const current = getColWidth(colKey);
+    const expanded = colKey === 'studentName' ? 260 : Math.min(420, Math.round(base * 1.45));
+    const compact = colKey === 'actions' ? 110 : Math.max(42, Math.round(base * 0.85));
+    const nextWidth = Math.abs(current - expanded) < 12 ? compact : current > base + 6 ? base : expanded;
+    setCustomColWidths((prev) => ({ ...prev, [colKey]: nextWidth }));
+  };
+
   const showFeeColumns =
     currentUser.role !== 'employee' || currentUser.department === 'fee_recovery';
 
@@ -611,7 +634,6 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
     (colKey: string): boolean => {
       const meta = CORE_COLUMN_META_MAP[colKey];
       if (!meta) return true;
-      if (meta.protected) return true;
       if (meta.isFee && !showFeeColumns) return false;
       return !hiddenCoreSet.has(colKey);
     },
@@ -799,7 +821,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
     setInlineTma('Pending');
     setInlinePractical('Pending');
     setInlineAttendance('Not Attending');
-    setInlineTotalFee('12000');
+    setInlineTotalFee('0');
     setInlinePaidAmount('0');
     setInlineTmaFee('0');
     setInlineExamFee('0');
@@ -980,7 +1002,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
       const parsedTmaFee = clampFeeNumber(inlineTmaFee);
       const parsedExamFee = clampFeeNumber(inlineExamFee);
       const parsedPaid = clampFeeNumber(inlinePaidAmount);
-      const parsedTotal = Math.max(parsedPaid, clampFeeNumber(inlineTotalFee || 12000));
+      const parsedTotal = Math.max(parsedPaid, clampFeeNumber(inlineTotalFee || 0));
       const cleanExtras: Record<string, string> = {};
       for (const [k, v] of Object.entries(inlineExtraColumns)) {
         const val = String(v ?? '').trim().slice(0, 300);
@@ -993,7 +1015,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
           studentId: internalId,
           studentName: inlineName.trim(),
           mobileNumber: effectiveInlineMobile,
-          subject: 'Hindi, English, Mathematics, Science, Social Science',
+          subject: '',
           tcStatus: 'Not Received',
           bookStatus: 'Pending',
           classAttendanceStatus: inlineAttendance,
@@ -1045,7 +1067,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
 
       setInlineName('');
       setInlineMobile('');
-      setInlineTotalFee('12000');
+      setInlineTotalFee('0');
       setInlinePaidAmount('0');
       setInlineTmaFee('0');
       setInlineExamFee('0');
@@ -1088,11 +1110,20 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
       tmaStatus: s.tmaStatus,
       practicalStatus: s.practicalStatus,
       classAttendanceStatus: s.classAttendanceStatus,
-      totalFee: String(fee.hasFeeData ? fee.totalFee : 12000),
+      totalFee: String(fee.hasFeeData ? fee.totalFee : 0),
       paidAmount: String(fee.hasFeeData ? fee.paidAmount : 0),
       tmaFee: String(fee.tmaFee ?? 0),
       examFee: String(fee.examFee ?? 0),
-      extraColumns: { ...(s.extraColumns || {}) },
+      extraColumns: (() => {
+        const mapped: Record<string, string> = { ...(s.extraColumns || {}) };
+        for (const ek of extraColumnKeys) {
+          if (mapped[ek] === undefined || !String(mapped[ek]).trim()) {
+            const resolved = getStudentExtraColumnValue(s.extraColumns, ek);
+            if (resolved) mapped[ek] = resolved;
+          }
+        }
+        return mapped;
+      })(),
     });
     setSelectedCell({
       coord: `EDIT:${s.studentName.slice(0, 18)}`,
@@ -1286,6 +1317,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
       initialDrafts[`extra:${ek}`] = ek;
     }
     setManagerDraftLabels(initialDrafts);
+    setSelectedManagerCols(new Set());
     setShowColumnManagerModal(true);
   };
 
@@ -1525,7 +1557,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
   const handleToggleCoreColumnHidden = async (colKey: string, hide: boolean) => {
     if (!canManageColumns || columnBusy) return;
     const meta = CORE_COLUMN_META_MAP[colKey];
-    if (!meta || meta.protected) return;
+    if (!meta) return;
 
     setColumnBusy(true);
     try {
@@ -1539,7 +1571,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
         targetConfigId,
         nextConfig,
         currentUser,
-        `${hide ? 'Hidden/Deleted' : 'Restored'} core column "${getHeaderLabel(colKey, 'export')}"`,
+        `${hide ? 'Deleted/Hidden' : 'Restored'} core column "${getHeaderLabel(colKey, 'export')}"`,
       );
       onNotify(
         hide ? 'Column Removed from Sheet' : 'Column Restored to Sheet',
@@ -1584,134 +1616,190 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
     }
   };
 
+  const buildDeleteItemForKey = useCallback(
+    (colKey: string) => {
+      const isExtra = colKey.startsWith('extra:');
+      if (isExtra) {
+        const extraName = colKey.slice(6);
+        const affectedCount = computeDeleteMultipleExtraColumnsStudentUpdates(
+          columnMutationStudents,
+          [extraName],
+        ).length;
+        return {
+          colKey,
+          label: extraName,
+          isExtra: true,
+          extraName,
+          affectedCount,
+        };
+      }
+      const meta = CORE_COLUMN_META_MAP[colKey];
+      if (!meta) return null;
+      return {
+        colKey,
+        label: getHeaderLabel(colKey, 'export'),
+        isExtra: false,
+        affectedCount: 0,
+      };
+    },
+    [columnMutationStudents, getHeaderLabel],
+  );
+
   const handleRequestDeleteColumn = (colKey: string) => {
     if (!canManageColumns) return;
-    const isExtra = colKey.startsWith('extra:');
-    if (isExtra) {
-      const extraName = colKey.slice(6);
-      const affectedCount = columnMutationStudents.filter(
-        (s) => s.extraColumns && Object.prototype.hasOwnProperty.call(s.extraColumns, extraName),
-      ).length;
-      setDeletingColumnTarget({
-        colKey,
-        label: extraName,
-        isExtra: true,
-        extraName,
-        affectedCount,
-      });
-      return;
-    }
-    const meta = CORE_COLUMN_META_MAP[colKey];
-    if (!meta || meta.protected) return;
-    setDeletingColumnTarget({
-      colKey,
-      label: getHeaderLabel(colKey, 'export'),
-      isExtra: false,
-      affectedCount: 0,
-    });
+    const item = buildDeleteItemForKey(colKey);
+    if (!item) return;
+    playDeleteWarningVoice();
+    setDeletingColumnTargets([item]);
+  };
+
+  const handleRequestDeleteMultipleColumns = (colKeys: string[]) => {
+    if (!canManageColumns || colKeys.length === 0) return;
+    const items = colKeys
+      .map((k) => buildDeleteItemForKey(k))
+      .filter((x): x is NonNullable<typeof x> => x !== null);
+    if (items.length === 0) return;
+    playDeleteWarningVoice();
+    setDeletingColumnTargets(items);
   };
 
   const handleConfirmDeleteColumn = async () => {
-    if (!deletingColumnTarget || !canManageColumns || columnBusy) return;
-    const target = deletingColumnTarget;
+    if (!deletingColumnTargets || deletingColumnTargets.length === 0 || !canManageColumns || columnBusy) {
+      return;
+    }
+    const targets = deletingColumnTargets;
+    const extraTargets = targets.filter((t) => t.isExtra && t.extraName);
+    const coreTargets = targets.filter((t) => !t.isExtra);
+
     setColumnBusy(true);
     try {
-      if (target.isExtra && target.extraName) {
-        const extraName = target.extraName;
-        const nextConfig = buildEditableConfigBase(targetConfigId);
-        nextConfig.customColumns = nextConfig.customColumns.filter((k) => k !== extraName);
-        if (!nextConfig.deletedExtraColumns.includes(extraName)) {
-          nextConfig.deletedExtraColumns = [...nextConfig.deletedExtraColumns, extraName].slice(-60);
+      const extraNames = extraTargets.map((t) => t.extraName!).filter(Boolean);
+      const extraLower = new Set(extraNames.map((n) => n.toLowerCase()));
+      const extraTokens = new Set(extraNames.map((n) => canonicalCommonHeaderToken(n)).filter(Boolean));
+      const matchesDeletedExtra = (candidate: string): boolean => {
+        const clean = String(candidate || '').trim();
+        if (!clean) return false;
+        if (extraLower.has(clean.toLowerCase())) return true;
+        const tok = canonicalCommonHeaderToken(clean);
+        return Boolean(tok && extraTokens.has(tok));
+      };
+
+      const mergeDeletedExtras = (existing: readonly string[], additions: readonly string[]) => {
+        const out = [...existing];
+        const seenLower = new Set(existing.map((k) => String(k || '').trim().toLowerCase()).filter(Boolean));
+        for (const name of additions) {
+          const clean = String(name || '').trim().slice(0, 50);
+          if (!clean || seenLower.has(clean.toLowerCase())) continue;
+          seenLower.add(clean.toLowerCase());
+          out.push(clean);
         }
-        delete nextConfig.headerLabels[target.colKey];
+        return out.slice(-60);
+      };
 
-        await saveExcelSheetConfig(
-          targetConfigId,
-          nextConfig,
-          currentUser,
-          `Deleted Excel column "${extraName}"`,
-        );
+      // 1. Update primary targetConfigId (covers both extra + core column deletions in one write)
+      const nextConfig = buildEditableConfigBase(targetConfigId);
+      if (extraNames.length > 0) {
+        nextConfig.customColumns = nextConfig.customColumns.filter((k) => !matchesDeletedExtra(k));
+        nextConfig.deletedExtraColumns = mergeDeletedExtras(nextConfig.deletedExtraColumns, extraNames);
+        for (const t of extraTargets) {
+          delete nextConfig.headerLabels[t.colKey];
+        }
+      }
+      if (coreTargets.length > 0) {
+        const hiddenSet = new Set(nextConfig.hiddenCoreColumns);
+        for (const c of coreTargets) {
+          hiddenSet.add(c.colKey);
+        }
+        nextConfig.hiddenCoreColumns = Array.from(hiddenSet).slice(0, 20);
+      }
 
-        if (isSuperAdmin) {
-          const isSharedOrJaunpur =
-            targetConfigId === 'global' ||
-            Boolean(globalSheetConfig?.customColumns?.includes(extraName)) ||
-            Boolean(jaunpurSheetConfig?.customColumns?.includes(extraName)) ||
-            baseExtractedExtraHeaders.includes(extraName);
+      const deletedSummaryLabel =
+        targets.length === 1
+          ? `"${targets[0].label}"`
+          : `${targets.length} columns (${targets.map((t) => t.label).slice(0, 3).join(', ')}${targets.length > 3 ? '...' : ''})`;
 
-          if (targetConfigId !== 'global' && isSharedOrJaunpur) {
-            const globalBase = buildEditableConfigBase('global');
-            globalBase.customColumns = globalBase.customColumns.filter((k) => k !== extraName);
-            if (!globalBase.deletedExtraColumns.includes(extraName)) {
-              globalBase.deletedExtraColumns = [...globalBase.deletedExtraColumns, extraName].slice(-60);
-            }
-            delete globalBase.headerLabels[target.colKey];
-            await saveExcelSheetConfig(
-              'global',
-              globalBase,
-              currentUser,
-              `Deleted shared Excel column "${extraName}" across centres`,
-            );
-          }
+      await saveExcelSheetConfig(
+        targetConfigId,
+        nextConfig,
+        currentUser,
+        `Deleted Excel column(s): ${deletedSummaryLabel}`,
+      );
 
-          if (
-            targetConfigId !== 'xis_jaunpur' &&
-            jaunpurSheetConfig?.customColumns?.includes(extraName)
-          ) {
-            const jprBase = buildEditableConfigBase('xis_jaunpur');
-            jprBase.customColumns = jprBase.customColumns.filter((k) => k !== extraName);
-            if (!jprBase.deletedExtraColumns.includes(extraName)) {
-              jprBase.deletedExtraColumns = [...jprBase.deletedExtraColumns, extraName].slice(-60);
-            }
-            delete jprBase.headerLabels[target.colKey];
-            await saveExcelSheetConfig(
-              'xis_jaunpur',
-              jprBase,
-              currentUser,
-              `Removed deleted column "${extraName}" from Jaunpur config`,
-            );
+      // 2. For Super Admin, clean shared/custom extra columns across global + any centre sheetConfig that holds them
+      if (isSuperAdmin && extraNames.length > 0) {
+        const additionalConfigIds = new Set<string>();
+        if (targetConfigId !== 'global') {
+          additionalConfigIds.add('global');
+        }
+        for (const cfg of sheetConfigs) {
+          if (cfg.configId === targetConfigId || cfg.configId === 'global') continue;
+          if ((cfg.customColumns || []).some((k) => matchesDeletedExtra(k))) {
+            additionalConfigIds.add(cfg.configId);
           }
         }
-
-        const stripUpdates = computeDeleteExtraColumnStudentUpdates(columnMutationStudents, extraName);
-        if (stripUpdates.length > 0) {
-          await batchUpdateStudentExtraColumns(
-            stripUpdates,
+        for (const cfgId of additionalConfigIds) {
+          const base = buildEditableConfigBase(cfgId);
+          base.customColumns = base.customColumns.filter((k) => !matchesDeletedExtra(k));
+          base.deletedExtraColumns = mergeDeletedExtras(base.deletedExtraColumns, extraNames);
+          for (const t of extraTargets) {
+            delete base.headerLabels[t.colKey];
+          }
+          await saveExcelSheetConfig(
+            cfgId,
+            base,
             currentUser,
-            `Removed data for deleted column "${extraName}"`,
+            `Synced deleted Excel column(s) ${deletedSummaryLabel} on ${cfgId}`,
           );
         }
-
-        setCustomColWidths((prev) => {
-          if (prev[target.colKey] === undefined) return prev;
-          const copy = { ...prev };
-          delete copy[target.colKey];
-          return copy;
-        });
-
-        onNotify(
-          'Column Deleted',
-          `"${extraName}" column aur uska data (${stripUpdates.length} rows) successfully delete ho gaya.`,
-          'info',
-        );
-      } else {
-        const nextConfig = buildEditableConfigBase(targetConfigId);
-        if (!nextConfig.hiddenCoreColumns.includes(target.colKey)) {
-          nextConfig.hiddenCoreColumns = [...nextConfig.hiddenCoreColumns, target.colKey];
-        }
-        await saveExcelSheetConfig(
-          targetConfigId,
-          nextConfig,
-          currentUser,
-          `Removed core column "${target.label}" from Excel grid`,
-        );
-        onNotify(
-          'Column Removed from Sheet',
-          `"${target.label}" ab Excel grid se hat gaya hai (Columns Manager se kabhi bhi restore karein).`,
-          'info',
-        );
       }
-      setDeletingColumnTarget(null);
+
+      // 3. Strip deleted extra column values & cell colors from affected student documents + local common header cache
+      let strippedRowsCount = 0;
+      if (extraNames.length > 0) {
+        pruneStoredCommonBranchHeaders(extraNames);
+        const studentsToClean =
+          isSuperAdmin && (targetConfigId === 'global' || extraNames.some((n) => baseExtractedExtraHeaders.includes(n)))
+            ? students
+            : columnMutationStudents;
+        const stripUpdates = computeDeleteMultipleExtraColumnsStudentUpdates(
+          studentsToClean,
+          extraNames,
+        );
+        if (stripUpdates.length > 0) {
+          strippedRowsCount = await batchUpdateStudentExtraColumns(
+            stripUpdates,
+            currentUser,
+            `Removed data for deleted column(s) ${deletedSummaryLabel}`,
+          );
+        }
+      }
+
+      setCustomColWidths((prev) => {
+        const copy = { ...prev };
+        let changed = false;
+        for (const t of targets) {
+          if (copy[t.colKey] !== undefined) {
+            delete copy[t.colKey];
+            changed = true;
+          }
+        }
+        return changed ? copy : prev;
+      });
+      setSelectedManagerCols((prev) => {
+        if (prev.size === 0) return prev;
+        const next = new Set(prev);
+        for (const t of targets) next.delete(t.colKey);
+        return next;
+      });
+
+      setDeletingColumnTargets(null);
+      onNotify(
+        targets.length === 1 ? 'Column Deleted' : `${targets.length} Columns Deleted`,
+        extraNames.length > 0
+          ? `${deletedSummaryLabel} Excel sheet se delete ho gaya (${strippedRowsCount} student rows cleaned).`
+          : `${deletedSummaryLabel} Excel sheet se remove ho gaya. Zarurat padne par "Columns & Headings" se restore kar sakte hain.`,
+        'info',
+      );
     } catch (err) {
       onNotify('Delete Column Failed', err instanceof Error ? err.message : 'Unable to delete column.', 'error');
     } finally {
@@ -1727,9 +1815,11 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
 
   const handleExportCsv = () => {
     const includeCentreCol = effectiveCentre === 'all';
+    const showSno = isCoreColVisible('serialNumber');
+    const showName = isCoreColVisible('studentName');
     const headers = [
-      getHeaderLabel('serialNumber', 'export'),
-      getHeaderLabel('studentName', 'export'),
+      ...(showSno ? [getHeaderLabel('serialNumber', 'export')] : []),
+      ...(showName ? [getHeaderLabel('studentName', 'export')] : []),
       ...(isCoreColVisible('mobile') ? [getHeaderLabel('mobile', 'export')] : []),
       ...(includeCentreCol ? ['Centre'] : []),
       ...(isCoreColVisible('tma') ? [getHeaderLabel('tma', 'export')] : []),
@@ -1751,8 +1841,8 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
       filtered.map((s) => {
         const fee = studentFeeSummaryMap.get(s.studentId);
         return [
-          displaySerialMap.get(s.studentId) ?? s.serialNumber,
-          s.studentName,
+          ...(showSno ? [displaySerialMap.get(s.studentId) ?? s.serialNumber] : []),
+          ...(showName ? [s.studentName] : []),
           ...(isCoreColVisible('mobile') ? [maskMobileNumber(s.mobileNumber)] : []),
           ...(includeCentreCol ? [s.centreName] : []),
           ...(isCoreColVisible('tma') ? [s.tmaStatus] : []),
@@ -1767,7 +1857,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
           s.subject,
           s.admissionDate,
           ...extraColumnKeys.map((k) => {
-            const val = s.extraColumns?.[k] || '';
+            const val = getStudentExtraColumnValue(s.extraColumns, k);
             return /mobile|phone|contact|whatsapp/i.test(k) ? maskMobileNumber(val) : val;
           }),
         ];
@@ -1778,9 +1868,11 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
 
   const handleExportExcel = () => {
     const includeCentreCol = effectiveCentre === 'all';
+    const showSno = isCoreColVisible('serialNumber');
+    const showName = isCoreColVisible('studentName');
     const headers = [
-      getHeaderLabel('serialNumber', 'export'),
-      getHeaderLabel('studentName', 'export'),
+      ...(showSno ? [getHeaderLabel('serialNumber', 'export')] : []),
+      ...(showName ? [getHeaderLabel('studentName', 'export')] : []),
       ...(isCoreColVisible('mobile') ? [getHeaderLabel('mobile', 'export')] : []),
       ...(includeCentreCol ? ['Centre'] : []),
       ...(isCoreColVisible('tma') ? [getHeaderLabel('tma', 'export')] : []),
@@ -1803,8 +1895,8 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
       filtered.map((s) => {
         const fee = studentFeeSummaryMap.get(s.studentId);
         return [
-          displaySerialMap.get(s.studentId) ?? s.serialNumber,
-          s.studentName,
+          ...(showSno ? [displaySerialMap.get(s.studentId) ?? s.serialNumber] : []),
+          ...(showName ? [s.studentName] : []),
           ...(isCoreColVisible('mobile') ? [maskMobileNumber(s.mobileNumber)] : []),
           ...(includeCentreCol ? [s.centreName] : []),
           ...(isCoreColVisible('tma') ? [s.tmaStatus] : []),
@@ -1819,7 +1911,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
           s.subject,
           s.admissionDate,
           ...extraColumnKeys.map((k) => {
-            const val = s.extraColumns?.[k] || '';
+            const val = getStudentExtraColumnValue(s.extraColumns, k);
             return /mobile|phone|contact|whatsapp/i.test(k) ? maskMobileNumber(val) : val;
           }),
         ];
@@ -2083,7 +2175,10 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
             {canDelete && filtered.length > 0 && (
               <button
                 type="button"
-                onClick={() => setShowDeleteAllConfirm(true)}
+                onClick={() => {
+                  playDeleteWarningVoice();
+                  setShowDeleteAllConfirm(true);
+                }}
                 className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-bold text-rose-100 bg-red-600/35 hover:bg-red-600/60 border border-red-400/50 rounded-xl whitespace-nowrap"
                 title="Delete all currently shown student records so you can re-upload fresh Excel"
               >
@@ -2269,13 +2364,13 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                 ? 'bg-sky-50 text-[#0B2454] border-sky-300 hover:bg-sky-100'
                 : 'bg-white text-[#08152E] border-slate-300 hover:bg-slate-100'
             }`}
-            title="Columns add/delete karein aur kisi bhi Excel heading ko edit karein"
+            title="Koi bhi column delete/restore karein aur kisi bhi Excel heading ko edit karein"
           >
             <Columns3 className="w-3.5 h-3.5 text-[#0F2F6B]" />
-            Columns & Headings
+            Columns / Delete
             {hiddenCoreSet.size > 0 && (
               <span className="ml-0.5 font-mono text-[10px] text-[#B91C1C]">
-                ({hiddenCoreSet.size} hidden)
+                ({hiddenCoreSet.size} deleted)
               </span>
             )}
           </button>
@@ -2481,8 +2576,8 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
         ) : (
           (() => {
             const visibleColKeys: string[] = [
-              'serialNumber',
-              'studentName',
+              ...(isCoreColVisible('serialNumber') ? ['serialNumber'] : []),
+              ...(isCoreColVisible('studentName') ? ['studentName'] : []),
               ...(isCoreColVisible('mobile') ? ['mobile'] : []),
               ...(isCoreColVisible('tma') ? ['tma'] : []),
               ...(isCoreColVisible('practical') ? ['practical'] : []),
@@ -2494,8 +2589,40 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
               ...(isCoreColVisible('examFee') ? ['examFee'] : []),
               ...(isCoreColVisible('feeStatus') ? ['feeStatus'] : []),
               ...extraColumnKeys.map((k) => `extra:${k}`),
-              'actions',
+              ...(isCoreColVisible('actions') ? ['actions'] : []),
             ];
+            if (visibleColKeys.length === 0) {
+              return (
+                <div className="p-10 text-center bg-white space-y-3">
+                  <Columns3 className="w-10 h-10 text-slate-400 mx-auto" />
+                  <h3 className="text-sm font-bold text-[#08152E]">Saare Columns Delete / Hide Kiye Gaye Hain</h3>
+                  <p className="text-xs text-slate-600 max-w-md mx-auto">
+                    Abhi is Excel sheet me koi visible column nahi bacha hai. Wapas columns laane ke liye niche button par click karein.
+                  </p>
+                  {canManageColumns && (
+                    <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        disabled={columnBusy}
+                        onClick={() => void handleRestoreAllCoreAndHeadings()}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white btn-crimson-gloss rounded-lg disabled:opacity-50"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        Restore All Core Columns
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleOpenColumnManager}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-[#08152E] bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg"
+                      >
+                        <Columns3 className="w-3.5 h-3.5" />
+                        Open Columns Manager
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            }
             const colLetterMap: Record<string, string> = Object.fromEntries(
               visibleColKeys.map((k, idx) => [k, toExcelColName(idx)]),
             );
@@ -2550,7 +2677,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                       ? `${label} — Double-click to edit heading`
                       : label
                   }
-                  className={`group/hdr relative overflow-hidden whitespace-nowrap ${
+                  className={`group/hdr relative align-middle whitespace-normal ${
                     opts.align === 'right'
                       ? 'text-right'
                       : opts.align === 'center'
@@ -2600,22 +2727,22 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                       </button>
                     </div>
                   ) : (
-                    <div className={`flex items-center gap-1 pr-1.5 min-w-0 ${alignClass}`}>
+                    <div className={`flex items-center gap-1 pr-1 min-w-0 ${alignClass}`}>
                       {opts.sortKey ? (
                         <button
                           type="button"
                           onClick={() => toggleSort(opts.sortKey!)}
-                          className="inline-flex items-center gap-0.5 hover:text-[#F59E0B] truncate min-w-0"
+                          className="inline-flex items-center gap-0.5 hover:text-[#F59E0B] text-left min-w-0"
                         >
-                          <span className="truncate">{label}</span>
+                          <span className="whitespace-normal break-words leading-snug">{label}</span>
                           <ArrowUpDown className="w-2.5 h-2.5 shrink-0" />
                         </button>
                       ) : (
-                        <span className="truncate">{label}</span>
+                        <span className="whitespace-normal break-words leading-snug block">{label}</span>
                       )}
 
                       {canManageColumns && (
-                        <span className="inline-flex items-center gap-0.5 opacity-0 group-hover/hdr:opacity-100 focus-within:opacity-100 transition-opacity shrink-0">
+                        <span className="hidden group-hover/hdr:inline-flex focus-within:inline-flex items-center gap-0.5 absolute top-1 right-1.5 bg-[#121c38]/95 px-1 py-0.5 rounded border border-white/20 shadow z-20">
                           <button
                             type="button"
                             onClick={(e) => {
@@ -2680,40 +2807,44 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
 
               return (
               <tr key="__inline_add_row__" className="bg-amber-50/95 border-y-2 border-[#F59E0B]">
-                <td className="px-1.5 py-2 text-center font-mono font-bold text-[#0B2454]">
-                  <div className="leading-tight">
-                    <div>{nextSerialPreview}</div>
-                    <div className="text-[9px] uppercase tracking-wider text-amber-800">
-                      {inlineInsertIndex !== null && inlineInsertIndex < filtered.length ? 'Mid+' : 'New'}
+                {isCoreColVisible('serialNumber') && (
+                  <td className="px-1.5 py-2 text-center font-mono font-bold text-[#0B2454]">
+                    <div className="leading-tight">
+                      <div>{nextSerialPreview}</div>
+                      <div className="text-[9px] uppercase tracking-wider text-amber-800">
+                        {inlineInsertIndex !== null && inlineInsertIndex < filtered.length ? 'Mid+' : 'New'}
+                      </div>
                     </div>
-                  </div>
-                </td>
-                <td className="p-1.5 space-y-1">
-                  <input
-                    autoFocus
-                    type="text"
-                    value={inlineName}
-                    onChange={(e) => setInlineName(e.target.value)}
-                    onKeyDown={handleInlineAddKeyDown}
-                    placeholder="Enter Student Name*"
-                    className="w-full px-2 py-1 text-xs bg-white border border-[#0F2F6B] rounded text-[#08152E] focus:outline-none"
-                  />
-                  {isSuperAdmin && effectiveCentre === 'all' && (
-                    <select
-                      value={inlineCentre}
-                      onChange={(e) => setInlineCentre(e.target.value as CentreId)}
+                  </td>
+                )}
+                {isCoreColVisible('studentName') && (
+                  <td className="p-1.5 space-y-1">
+                    <input
+                      autoFocus
+                      type="text"
+                      value={inlineName}
+                      onChange={(e) => setInlineName(e.target.value)}
                       onKeyDown={handleInlineAddKeyDown}
-                      className="w-full px-1.5 py-0.5 text-[10px] bg-white border border-slate-300 rounded text-[#08152E]"
-                      title="Select Centre for this new student"
-                    >
-                      {CANONICAL_CENTRES.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.code} · {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                </td>
+                      placeholder="Enter Student Name*"
+                      className="w-full px-2 py-1 text-xs bg-white border border-[#0F2F6B] rounded text-[#08152E] focus:outline-none"
+                    />
+                    {isSuperAdmin && effectiveCentre === 'all' && (
+                      <select
+                        value={inlineCentre}
+                        onChange={(e) => setInlineCentre(e.target.value as CentreId)}
+                        onKeyDown={handleInlineAddKeyDown}
+                        className="w-full px-1.5 py-0.5 text-[10px] bg-white border border-slate-300 rounded text-[#08152E]"
+                        title="Select Centre for this new student"
+                      >
+                        {CANONICAL_CENTRES.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.code} · {c.name}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </td>
+                )}
                 {isCoreColVisible('mobile') && (
                   <td className="p-1.5">
                     <input
@@ -2847,38 +2978,40 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                     />
                   </td>
                 ))}
-                <td className="p-1 text-center">
-                  <div className="inline-flex items-center gap-1">
-                    <button
-                      type="button"
-                      disabled={inlineSaving}
-                      onClick={() => void handleSaveInlineRow(false)}
-                      className="inline-flex items-center gap-0.5 px-2 py-1 text-[10px] font-bold btn-crimson-gloss text-white rounded disabled:opacity-50"
-                      title="Save Row (Enter)"
-                    >
-                      <Check className="w-3 h-3" />
-                      {inlineSaving ? '..' : 'Save'}
-                    </button>
-                    <button
-                      type="button"
-                      disabled={inlineSaving}
-                      onClick={() => void handleSaveInlineRow(true)}
-                      className="px-1.5 py-1 text-[10px] font-bold bg-emerald-700 hover:bg-emerald-800 text-white rounded disabled:opacity-50"
-                      title="Save & immediately add next row below (Shift+Enter)"
-                    >
-                      +Next
-                    </button>
-                    <button
-                      type="button"
-                      disabled={inlineSaving}
-                      onClick={() => setInlineInsertIndex(null)}
-                      className="p-1 text-slate-600 hover:text-[#08152E] rounded hover:bg-slate-200"
-                      title="Cancel row (Esc)"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </td>
+                {isCoreColVisible('actions') && (
+                  <td className="p-1 text-center">
+                    <div className="inline-flex items-center gap-1">
+                      <button
+                        type="button"
+                        disabled={inlineSaving}
+                        onClick={() => void handleSaveInlineRow(false)}
+                        className="inline-flex items-center gap-0.5 px-2 py-1 text-[10px] font-bold btn-crimson-gloss text-white rounded disabled:opacity-50"
+                        title="Save Row (Enter)"
+                      >
+                        <Check className="w-3 h-3" />
+                        {inlineSaving ? '..' : 'Save'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={inlineSaving}
+                        onClick={() => void handleSaveInlineRow(true)}
+                        className="px-1.5 py-1 text-[10px] font-bold bg-emerald-700 hover:bg-emerald-800 text-white rounded disabled:opacity-50"
+                        title="Save & immediately add next row below (Shift+Enter)"
+                      >
+                        +Next
+                      </button>
+                      <button
+                        type="button"
+                        disabled={inlineSaving}
+                        onClick={() => setInlineInsertIndex(null)}
+                        className="p-1 text-slate-600 hover:text-[#08152E] rounded hover:bg-slate-200"
+                        title="Cancel row (Esc)"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </td>
+                )}
               </tr>
               );
             };
@@ -2910,8 +3043,10 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
 
                     {/* Editable Excel Header Columns */}
                     <tr className="excel-col-header text-left">
-                      {renderHeaderTh('serialNumber', { sortKey: 'serialNumber', align: 'left', canDelete: false })}
-                      {renderHeaderTh('studentName', { sortKey: 'studentName', align: 'left', canDelete: false })}
+                      {isCoreColVisible('serialNumber') &&
+                        renderHeaderTh('serialNumber', { sortKey: 'serialNumber', align: 'left', canDelete: true })}
+                      {isCoreColVisible('studentName') &&
+                        renderHeaderTh('studentName', { sortKey: 'studentName', align: 'left', canDelete: true })}
                       {isCoreColVisible('mobile') &&
                         renderHeaderTh('mobile', { align: 'left', canDelete: true })}
                       {isCoreColVisible('tma') &&
@@ -2935,7 +3070,8 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                       {extraColumnKeys.map((k) =>
                         renderHeaderTh(`extra:${k}`, { align: 'left', canDelete: true, isExtra: true }),
                       )}
-                      {renderHeaderTh('actions', { align: 'center', canDelete: false })}
+                      {isCoreColVisible('actions') &&
+                        renderHeaderTh('actions', { align: 'center', canDelete: true })}
                     </tr>
                   </thead>
 
@@ -3050,9 +3186,10 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                         }`}
                       >
                         {/* A: S.No + Drag / Move / Middle-Insert Controls */}
+                        {isCoreColVisible('serialNumber') && (
                         <td
                           style={snoStyle}
-                          onClick={() => handleSelectRowCell(s, `A${rowNum}`, String(displaySerial), rowNum)}
+                          onClick={() => handleSelectRowCell(s, `${colLetterMap.serialNumber || 'A'}${rowNum}`, String(displaySerial), rowNum)}
                           onDoubleClick={() =>
                             canEditRow && canEditIdentityInline && handleStartInlineEdit(s, 'studentName')
                           }
@@ -3113,12 +3250,14 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                             )}
                           </div>
                         </td>
+                        )}
 
                         {/* B: Student Name */}
+                        {isCoreColVisible('studentName') && (
                         <td
                           style={nameStyle}
                           onClick={() =>
-                            handleSelectRowCell(s, `B${rowNum}`, `${s.studentName} (${s.subject})`, rowNum)
+                            handleSelectRowCell(s, `${colLetterMap.studentName || 'B'}${rowNum}`, `${s.studentName} (${s.subject})`, rowNum)
                           }
                           onDoubleClick={() =>
                             canEditRow && canEditIdentityInline && handleStartInlineEdit(s, 'studentName')
@@ -3147,6 +3286,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                           s.studentName
                         )}
                       </td>
+                        )}
 
                       {/* Mobile No (Masked Privacy + Direct Call & WhatsApp Icons) */}
                       {isCoreColVisible('mobile') && (
@@ -3627,7 +3767,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
 
                       {/* Dynamic Shared & Jaunpur Extra Excel Columns */}
                       {extraColumnKeys.map((colKey) => {
-                        const rawCellVal = s.extraColumns?.[colKey] || '';
+                        const rawCellVal = getStudentExtraColumnValue(s.extraColumns, colKey);
                         const isPhoneCol = /mobile|phone|contact|whatsapp/i.test(colKey);
                         const cellVal = isPhoneCol && rawCellVal ? maskMobileNumber(rawCellVal) : rawCellVal;
                         const canEditExtra = isSuperAdmin || isCentreHead;
@@ -3676,6 +3816,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                       })}
 
                       {/* Actions */}
+                      {isCoreColVisible('actions') && (
                       <td className="px-1 py-1 text-center whitespace-nowrap">
                         <div className="inline-flex items-center justify-center gap-0.5">
                           {isEditingThisRow ? (
@@ -3786,7 +3927,10 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                               {canDelete && (
                                 <button
                                   type="button"
-                                  onClick={() => setDeletingStudent(s)}
+                                  onClick={() => {
+                                    playDeleteWarningVoice();
+                                    setDeletingStudent(s);
+                                  }}
                                   className="p-1.5 text-slate-600 hover:text-red-700 hover:bg-red-50 rounded"
                                   title="Delete Student"
                                 >
@@ -3797,6 +3941,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                           )}
                         </div>
                       </td>
+                      )}
                     </tr>
                   </React.Fragment>
                   );
@@ -3832,10 +3977,16 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
               {showFeeColumns && filtered.length > 0 && (
                 <tfoot>
                   <tr className="bg-slate-900 text-white font-mono font-bold text-[11px] border-t-2 border-[#DC2626]">
-                    <td className="px-2 py-2 text-center text-[#FBBF24]">Σ</td>
-                    <td className="px-2 py-2 text-left font-sans uppercase tracking-wider text-rose-100">
-                      TOTAL ({filtered.length})
-                    </td>
+                    {isCoreColVisible('serialNumber') && (
+                      <td className="px-2 py-2 text-center text-[#FBBF24]">
+                        {isCoreColVisible('studentName') ? 'Σ' : `Σ (${filtered.length})`}
+                      </td>
+                    )}
+                    {isCoreColVisible('studentName') && (
+                      <td className="px-2 py-2 text-left font-sans uppercase tracking-wider text-rose-100">
+                        TOTAL ({filtered.length})
+                      </td>
+                    )}
                     {isCoreColVisible('mobile') && (
                       <td className="px-2 py-2 text-slate-400 text-center">—</td>
                     )}
@@ -3883,9 +4034,11 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                         —
                       </td>
                     ))}
-                    <td className="px-2 py-2 text-center text-[10px] font-sans uppercase text-slate-300">
-                      Summary Row
-                    </td>
+                    {isCoreColVisible('actions') && (
+                      <td className="px-2 py-2 text-center text-[10px] font-sans uppercase text-slate-300">
+                        Summary Row
+                      </td>
+                    )}
                   </tr>
                 </tfoot>
               )}
@@ -3963,7 +4116,9 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
         open={showBulkImport}
         currentUser={currentUser}
         defaultCentreId={effectiveCentre === 'all' ? 'vp_lookerganj' : effectiveCentre}
+        isCentreLocked={effectiveCentre !== 'all'}
         existingStudents={students}
+        sheetConfigs={sheetConfigs}
         onClose={() => setShowBulkImport(false)}
         onSuccess={(msg) => {
           setLocalSearch('');
@@ -3976,18 +4131,19 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
         onError={(title, desc) => onNotify(title, desc, 'error')}
       />
 
-      <ConfirmDialog
+      <DeleteProtectionModal
         open={Boolean(deletingStudent)}
         title="Confirm Student Deletion"
         description={`Are you sure you want to permanently delete ${deletingStudent?.studentName} (Serial #${deletingStudent?.serialNumber}) and all linked department records? This action is recorded in the audit log.`}
-        confirmLabel="Delete Student"
-        destructive
+        confirmLabel="Verify & Delete Student"
         busy={deleteBusy}
         onConfirm={handleConfirmDelete}
-        onCancel={() => setDeletingStudent(null)}
+        onCancel={() => {
+          if (!deleteBusy) setDeletingStudent(null);
+        }}
       />
 
-      <ConfirmDialog
+      <DeleteProtectionModal
         open={showDeleteAllConfirm}
         title={
           filtered.length === students.length
@@ -4004,9 +4160,8 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
         confirmLabel={
           deleteProgress
             ? `Deleting ${deleteProgress.done}/${deleteProgress.total}...`
-            : `Yes, Delete ${filtered.length} Records`
+            : `Verify & Delete ${filtered.length} Records`
         }
-        destructive
         busy={deleteAllBusy}
         onConfirm={handleConfirmDeleteAll}
         onCancel={() => {
@@ -4026,26 +4181,36 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
         }}
       />
 
-      <ConfirmDialog
-        open={Boolean(deletingColumnTarget)}
+      <DeleteProtectionModal
+        open={Boolean(deletingColumnTargets && deletingColumnTargets.length > 0)}
         title={
-          deletingColumnTarget?.isExtra
-            ? `Delete Column "${deletingColumnTarget.label}" Permanently?`
-            : `Remove Column "${deletingColumnTarget?.label}" from Sheet?`
+          deletingColumnTargets && deletingColumnTargets.length > 1
+            ? `Delete ${deletingColumnTargets.length} Selected Columns?`
+            : deletingColumnTargets?.[0]?.isExtra
+              ? `Delete Column "${deletingColumnTargets[0].label}" Permanently?`
+              : `Delete Column "${deletingColumnTargets?.[0]?.label}" from Sheet?`
         }
         description={
-          deletingColumnTarget?.isExtra
-            ? `"${deletingColumnTarget.label}" column Excel sheet se permanently delete ho jayega aur ${deletingColumnTarget.affectedCount} students ke is column ki values bhi remove ho jayengi.`
-            : `"${deletingColumnTarget?.label}" column Excel grid aur CSV/Excel exports se hide ho jayega. Aap isse kabhi bhi "Columns & Headings" manager se wapas restore kar sakte hain.`
+          deletingColumnTargets && deletingColumnTargets.length > 1
+            ? `Aap ${deletingColumnTargets.length} columns (${deletingColumnTargets
+                .map((t) => t.label)
+                .slice(0, 5)
+                .join(', ')}${
+                deletingColumnTargets.length > 5 ? ` +${deletingColumnTargets.length - 5} more` : ''
+              }) delete karne ja rahe hain. Custom columns ka data permanently remove ho jayega aur standard columns sheet se hat jayenge (baad me Columns Manager se restore kar sakte hain).`
+            : deletingColumnTargets?.[0]?.isExtra
+              ? `"${deletingColumnTargets[0].label}" column Excel sheet se permanently delete ho jayega aur ${deletingColumnTargets[0].affectedCount} students ke is column ki values bhi remove ho jayengi.`
+              : `"${deletingColumnTargets?.[0]?.label}" column Excel grid aur CSV/Excel exports se delete/remove ho jayega. Aap isse kabhi bhi "Columns / Delete" manager se wapas restore kar sakte hain.`
         }
         confirmLabel={
-          deletingColumnTarget?.isExtra ? 'Yes, Delete Column' : 'Yes, Remove Column'
+          deletingColumnTargets && deletingColumnTargets.length > 1
+            ? `Verify & Delete ${deletingColumnTargets.length} Columns`
+            : 'Verify & Delete Column'
         }
-        destructive={Boolean(deletingColumnTarget?.isExtra)}
         busy={columnBusy}
         onConfirm={handleConfirmDeleteColumn}
         onCancel={() => {
-          if (!columnBusy) setDeletingColumnTarget(null);
+          if (!columnBusy) setDeletingColumnTargets(null);
         }}
       />
 
@@ -4142,11 +4307,11 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                 <div className="flex items-center gap-2">
                   <Columns3 className="w-5 h-5 text-[#B91C1C]" />
                   <h3 className="text-base font-bold text-[#08152E]">
-                    Excel Columns & Headings Manager
+                    Excel Columns & Headings Manager (Delete / Edit Any Column)
                   </h3>
                 </div>
                 <p className="text-xs text-slate-600 mt-0.5 font-mono">
-                  Scope: {saveScopeLabel} · Double-click any column header in sheet or edit/delete directly here
+                  Scope: {saveScopeLabel} · Select single ya multiple columns aur kisi ko bhi delete/restore karein
                 </p>
               </div>
               <button
@@ -4161,52 +4326,92 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
 
             <div className="p-5 overflow-y-auto space-y-5 flex-1">
               {/* Top quick bar */}
-              <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-50 border border-slate-200 rounded-xl p-3">
-                <div className="text-xs text-slate-700">
-                  <strong className="text-[#08152E]">{CORE_EXCEL_COLUMNS.length} Core</strong> ·{' '}
-                  <strong className="text-[#0F2F6B]">{extraColumnKeys.length} Shared/Custom</strong> columns
-                  {hiddenCoreSet.size > 0 && (
-                    <span className="ml-2 font-mono text-[#B91C1C]">
-                      ({hiddenCoreSet.size} core hidden)
-                    </span>
-                  )}
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  {(hiddenCoreSet.size > 0 ||
-                    Object.keys(activeSheetConfig.headerLabels).length > 0) && (
-                    <button
-                      type="button"
-                      disabled={columnBusy}
-                      onClick={() => void handleRestoreAllCoreAndHeadings()}
-                      className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-[#0B2454] bg-sky-50 hover:bg-sky-100 border border-sky-200 rounded-lg disabled:opacity-50"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      Restore Hidden & Reset Headings
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    disabled={columnBusy || extraColumnKeys.length >= 35}
-                    onClick={() => {
-                      setShowColumnManagerModal(false);
-                      handleOpenAddColumnModal();
-                    }}
-                    className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-white btn-crimson-gloss rounded-lg disabled:opacity-50"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    Add Custom Column
-                  </button>
-                </div>
-              </div>
+              {(() => {
+                const deletableKeys = [
+                  ...CORE_EXCEL_COLUMNS.filter((c) => !hiddenCoreSet.has(c.key)).map((c) => c.key),
+                  ...extraColumnKeys.map((ek) => `extra:${ek}`),
+                ];
+                return (
+                  <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-50 border border-slate-200 rounded-xl p-3">
+                    <div className="text-xs text-slate-700">
+                      <strong className="text-[#08152E]">{CORE_EXCEL_COLUMNS.length} Core</strong> ·{' '}
+                      <strong className="text-[#0F2F6B]">{extraColumnKeys.length} Shared/Custom</strong> columns
+                      {hiddenCoreSet.size > 0 && (
+                        <span className="ml-2 font-mono text-[#B91C1C]">
+                          ({hiddenCoreSet.size} core removed)
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {deletableKeys.length > 0 && (
+                        <button
+                          type="button"
+                          disabled={columnBusy}
+                          onClick={() => {
+                            if (selectedManagerCols.size === deletableKeys.length) {
+                              setSelectedManagerCols(new Set());
+                            } else {
+                              setSelectedManagerCols(new Set(deletableKeys));
+                            }
+                          }}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-[#08152E] bg-white hover:bg-slate-100 border border-slate-300 rounded-lg disabled:opacity-50"
+                        >
+                          {selectedManagerCols.size === deletableKeys.length && deletableKeys.length > 0
+                            ? 'Unselect All'
+                            : `Select All (${deletableKeys.length})`}
+                        </button>
+                      )}
+                      {selectedManagerCols.size > 0 && (
+                        <button
+                          type="button"
+                          disabled={columnBusy}
+                          onClick={() =>
+                            handleRequestDeleteMultipleColumns(Array.from(selectedManagerCols))
+                          }
+                          className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-white bg-red-600 hover:bg-red-700 rounded-lg disabled:opacity-50"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          Delete Selected ({selectedManagerCols.size})
+                        </button>
+                      )}
+                      {(hiddenCoreSet.size > 0 ||
+                        Object.keys(activeSheetConfig.headerLabels).length > 0) && (
+                        <button
+                          type="button"
+                          disabled={columnBusy}
+                          onClick={() => void handleRestoreAllCoreAndHeadings()}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-[#0B2454] bg-sky-50 hover:bg-sky-100 border border-sky-200 rounded-lg disabled:opacity-50"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          Restore All Core Columns
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        disabled={columnBusy || extraColumnKeys.length >= 35}
+                        onClick={() => {
+                          setShowColumnManagerModal(false);
+                          handleOpenAddColumnModal();
+                        }}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-white btn-crimson-gloss rounded-lg disabled:opacity-50"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        Add Custom Column
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Core Columns */}
               <div className="space-y-2">
                 <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                  Standard Excel Columns (Edit Heading or Hide / Restore)
+                  Standard Excel Columns (Kisi Ko Bhi Delete, Rename Ya Restore Karein)
                 </h4>
                 <div className="divide-y divide-slate-200 border border-slate-200 rounded-xl overflow-hidden">
                   {CORE_EXCEL_COLUMNS.map((c) => {
-                    const isHidden = !c.protected && hiddenCoreSet.has(c.key);
+                    const isHidden = hiddenCoreSet.has(c.key);
+                    const isSelected = selectedManagerCols.has(c.key);
                     const currentLabel = activeSheetConfig.headerLabels[c.key] || '';
                     const draftVal = managerDraftLabels[c.key] ?? currentLabel;
                     const dirty = draftVal.trim() !== currentLabel.trim();
@@ -4215,21 +4420,34 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                       <div
                         key={c.key}
                         className={`flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs ${
-                          isHidden ? 'bg-slate-100/80 opacity-75' : 'bg-white'
+                          isHidden ? 'bg-slate-100/80 opacity-80' : isSelected ? 'bg-red-50/40' : 'bg-white'
                         }`}
                       >
-                        <div className="min-w-[140px]">
-                          <div className="font-bold text-[#08152E]">{c.exportLabel}</div>
-                          <div className="text-[10px] font-mono text-slate-500">
-                            {c.protected
-                              ? 'Essential column (heading editable)'
-                              : isHidden
-                                ? 'Hidden from grid & exports'
-                                : 'Visible in sheet'}
+                        <div className="flex items-center gap-2 min-w-[155px]">
+                          <input
+                            type="checkbox"
+                            disabled={isHidden || columnBusy}
+                            checked={isSelected}
+                            onChange={(e) => {
+                              setSelectedManagerCols((prev) => {
+                                const next = new Set(prev);
+                                if (e.target.checked) next.add(c.key);
+                                else next.delete(c.key);
+                                return next;
+                              });
+                            }}
+                            className="rounded border-slate-300 text-red-600 focus:ring-red-500 disabled:opacity-40"
+                            title={isHidden ? 'Already removed' : `Select ${c.exportLabel} to delete`}
+                          />
+                          <div>
+                            <div className="font-bold text-[#08152E]">{c.exportLabel}</div>
+                            <div className="text-[10px] font-mono text-slate-500">
+                              {isHidden ? 'Removed from grid & exports' : 'Visible in sheet'}
+                            </div>
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-1.5 flex-1 min-w-[200px] max-w-sm">
+                        <div className="flex items-center gap-1.5 flex-1 min-w-[190px] max-w-sm">
                           <input
                             type="text"
                             maxLength={60}
@@ -4262,11 +4480,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                         </div>
 
                         <div className="shrink-0">
-                          {c.protected ? (
-                            <span className="text-[10px] font-mono text-slate-400 px-2">
-                              Protected
-                            </span>
-                          ) : isHidden ? (
+                          {isHidden ? (
                             <button
                               type="button"
                               disabled={columnBusy}
@@ -4274,17 +4488,17 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                               className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg"
                             >
                               <Eye className="w-3 h-3" />
-                              Show
+                              Restore
                             </button>
                           ) : (
                             <button
                               type="button"
                               disabled={columnBusy}
-                              onClick={() => void handleToggleCoreColumnHidden(c.key, true)}
-                              className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-slate-700 bg-slate-50 hover:bg-rose-50 hover:text-red-700 border border-slate-300 hover:border-red-200 rounded-lg"
+                              onClick={() => handleRequestDeleteColumn(c.key)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg disabled:opacity-50"
                             >
-                              <EyeOff className="w-3 h-3" />
-                              Hide
+                              <Trash2 className="w-3 h-3" />
+                              Delete
                             </button>
                           )}
                         </div>
@@ -4297,7 +4511,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
               {/* Custom & Extra Columns */}
               <div className="space-y-2">
                 <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                  Shared Jaunpur & Custom Columns ({extraColumnKeys.length})
+                  Shared & Custom Excel Columns ({extraColumnKeys.length})
                 </h4>
                 {extraColumnKeys.length === 0 ? (
                   <div className="p-4 text-center text-xs text-slate-500 bg-slate-50 border border-dashed border-slate-300 rounded-xl">
@@ -4307,21 +4521,41 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
                   <div className="divide-y divide-slate-200 border border-slate-200 rounded-xl overflow-hidden">
                     {extraColumnKeys.map((ek) => {
                       const colKey = `extra:${ek}`;
+                      const isSelected = selectedManagerCols.has(colKey);
                       const draftVal = managerDraftLabels[colKey] ?? ek;
                       const dirty = draftVal.trim() !== '' && draftVal.trim() !== ek;
                       return (
                         <div
                           key={ek}
-                          className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs bg-white"
+                          className={`flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs ${
+                            isSelected ? 'bg-red-50/40' : 'bg-white'
+                          }`}
                         >
-                          <div className="min-w-[140px]">
-                            <div className="font-bold text-[#0B2454]">{ek}</div>
-                            <div className="text-[10px] font-mono text-slate-500">
-                              Custom Sheet Column
+                          <div className="flex items-center gap-2 min-w-[155px]">
+                            <input
+                              type="checkbox"
+                              disabled={columnBusy}
+                              checked={isSelected}
+                              onChange={(e) => {
+                                setSelectedManagerCols((prev) => {
+                                  const next = new Set(prev);
+                                  if (e.target.checked) next.add(colKey);
+                                  else next.delete(colKey);
+                                  return next;
+                                });
+                              }}
+                              className="rounded border-slate-300 text-red-600 focus:ring-red-500"
+                              title={`Select ${ek} to delete`}
+                            />
+                            <div>
+                              <div className="font-bold text-[#0B2454]">{ek}</div>
+                              <div className="text-[10px] font-mono text-slate-500">
+                                Custom / Uploaded Column
+                              </div>
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-1.5 flex-1 min-w-[200px] max-w-sm">
+                          <div className="flex items-center gap-1.5 flex-1 min-w-[190px] max-w-sm">
                             <input
                               type="text"
                               maxLength={50}
@@ -4371,7 +4605,7 @@ export const StudentDatabaseView: React.FC<StudentDatabaseViewProps> = ({
 
             <div className="px-6 py-3 border-t border-slate-200 bg-slate-50 flex items-center justify-between rounded-b-2xl">
               <span className="text-[11px] text-slate-500">
-                All heading edits & shared columns sync live across centres.
+                All heading edits, column deletions & restorations sync live across centres.
               </span>
               <button
                 type="button"

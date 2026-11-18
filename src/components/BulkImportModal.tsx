@@ -9,7 +9,11 @@ import {
 } from 'lucide-react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { CANONICAL_CENTRES, CENTRE_MAP } from '../constants/centres';
-import { maskMobileNumber } from '../lib/analyticsMath';
+import { isFeeFullyPaid, maskMobileNumber } from '../lib/analyticsMath';
+import {
+  buildImportPreviewRows,
+  type PreviewImportRow,
+} from '../lib/importMatching';
 import {
   alignHeaderToCommonSchema,
   cleanMobileNumber,
@@ -17,15 +21,17 @@ import {
   exportToExcel,
   extractBlankAndSparseSheetHeadings,
   extractCommonBranchExtraHeaders,
+  extractJaunpurHeadingAndBlankColumns,
   fuzzyDetectColumnMapping,
   getReadableTextColor,
+  isMockSubjectValue,
   loadStoredCommonBranchHeaders,
-  normalizeImportedStudentRow,
+  mergeExtraColumnsWithConfig,
+  mergeImportedExtraColumns,
   parseSpreadsheetFile,
   saveCommonBranchHeaders,
   type ExcelColumnMapping,
   type ExcludedSummaryRow,
-  type NormalizedImportStudent,
 } from '../lib/csvUtils';
 import { verifyOperationLocation } from '../lib/securityClient';
 import {
@@ -35,13 +41,18 @@ import {
   mergeCustomColumnsIntoSharedConfig,
   type BulkImportRowPayload,
 } from '../services/firestoreService';
-import type { CentreId, Student, UserAccount } from '../types/domain';
+import type { CentreId, ExcelSheetConfig, FeeRecoveryRecord, Student, UserAccount } from '../types/domain';
 
 interface BulkImportModalProps {
   open: boolean;
   currentUser: UserAccount;
   defaultCentreId: CentreId;
+  isCentreLocked?: boolean;
   existingStudents: Student[];
+  sheetConfigs?: ExcelSheetConfig[];
+  mode?: 'full' | 'fee_sync' | 'academic_sync';
+  defaultAcademicType?: 'tma' | 'practical';
+  feeRecords?: FeeRecoveryRecord[];
   onClose: () => void;
   onSuccess: (msg: string) => void;
   onError: (title: string, desc: string) => void;
@@ -49,15 +60,16 @@ interface BulkImportModalProps {
 
 const ALL_SHEETS_KEY = '__ALL_SHEETS__';
 
-function getFirstNameToken(name: string): string {
-  return name.trim().toLowerCase().split(/\s+/)[0] || '';
-}
-
 export const BulkImportModal: React.FC<BulkImportModalProps> = ({
   open,
   currentUser,
   defaultCentreId,
+  isCentreLocked = false,
   existingStudents,
+  sheetConfigs = [],
+  mode = 'full',
+  defaultAcademicType = 'tma',
+  feeRecords = [],
   onClose,
   onSuccess,
   onError,
@@ -66,11 +78,18 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
   const [selectedCentre, setSelectedCentre] = useState<CentreId>(
     isSuperAdmin ? defaultCentreId : currentUser.centreId,
   );
-  const [autoDetectCentre, setAutoDetectCentre] = useState<boolean>(isSuperAdmin);
+  const [autoDetectCentre, setAutoDetectCentre] = useState<boolean>(
+    isSuperAdmin && !isCentreLocked,
+  );
   const [allowMissingMobile, setAllowMissingMobile] = useState<boolean>(true);
   const [importMode, setImportMode] = useState<'upsert' | 'skip_duplicates' | 'replace_all'>('upsert');
-  const [defaultTotalFee, setDefaultTotalFee] = useState<number>(12000);
-  const [showColumnMapper, setShowColumnMapper] = useState<boolean>(false);
+  const [feeSyncOnlyMode, setFeeSyncOnlyMode] = useState<boolean>(mode === 'fee_sync');
+  const [academicSyncOnlyMode, setAcademicSyncOnlyMode] = useState<boolean>(mode === 'academic_sync');
+  const [skipUnmatchedNewInFeeSync, setSkipUnmatchedNewInFeeSync] = useState<boolean>(false);
+  const defaultTotalFee = 0;
+  const [showColumnMapper, setShowColumnMapper] = useState<boolean>(
+    mode === 'fee_sync' || mode === 'academic_sync',
+  );
 
   const [sheetNames, setSheetNames] = useState<string[]>([]);
   const [activeSheet, setActiveSheet] = useState<string>('');
@@ -100,18 +119,46 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
   useEffect(() => {
     if (open) {
       setSelectedCentre(isSuperAdmin ? defaultCentreId : currentUser.centreId);
+      setAutoDetectCentre(isSuperAdmin && !isCentreLocked);
       setImportMode('upsert');
+      setFeeSyncOnlyMode(mode === 'fee_sync');
+      setAcademicSyncOnlyMode(mode === 'academic_sync');
+      setSkipUnmatchedNewInFeeSync(false);
+      setShowColumnMapper(mode === 'fee_sync' || mode === 'academic_sync');
       setImportStatusText('');
       setImportError(null);
       setParseError(null);
       setPreviewFilter('all');
     }
-  }, [open, defaultCentreId, isSuperAdmin, currentUser.centreId]);
+  }, [open, defaultCentreId, isCentreLocked, isSuperAdmin, currentUser.centreId, mode]);
 
-  const commonExtraHeadings = useMemo(
-    () => extractCommonBranchExtraHeaders(existingStudents),
-    [existingStudents],
-  );
+  const fallbackCentre = isSuperAdmin ? selectedCentre : currentUser.centreId;
+
+  const commonExtraHeadings = useMemo(() => {
+    const globalCfg = sheetConfigs.find((c) => c.configId === 'global');
+    const jaunpurCfg = sheetConfigs.find((c) => c.configId === 'xis_jaunpur');
+    const centreCfg = sheetConfigs.find((c) => c.configId === fallbackCentre);
+    const mergedCfg = {
+      customColumns: [
+        ...(centreCfg?.customColumns || []),
+        ...(globalCfg?.customColumns || []),
+        ...(jaunpurCfg?.customColumns || []),
+      ],
+      deletedExtraColumns: [
+        ...(globalCfg?.deletedExtraColumns || []),
+        ...(centreCfg?.deletedExtraColumns || []),
+      ],
+    };
+    const jaunpurAndShared = mergeExtraColumnsWithConfig(
+      extractJaunpurHeadingAndBlankColumns(existingStudents, sheetConfigs),
+      mergedCfg,
+    );
+    const branchExtras = extractCommonBranchExtraHeaders(existingStudents);
+    return mergeExtraColumnsWithConfig([...jaunpurAndShared, ...branchExtras], {
+      customColumns: jaunpurAndShared,
+      deletedExtraColumns: mergedCfg.deletedExtraColumns,
+    });
+  }, [existingStudents, sheetConfigs, fallbackCentre]);
 
   useEffect(() => {
     const lkgKeys: string[] = [];
@@ -133,7 +180,6 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
     }
   }, [existingStudents]);
 
-  const fallbackCentre = isSuperAdmin ? selectedCentre : currentUser.centreId;
   const activeHeaders = useMemo(
     () => headersBySheet[activeSheet] || [],
     [headersBySheet, activeSheet],
@@ -156,257 +202,47 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
     ? 0
     : summaryRowsFilteredBySheet[activeSheet] || activeExcludedRows.length || 0;
 
-  const existingById = useMemo(() => {
-    const map = new Map<string, Student>();
-    existingStudents.forEach((s) => map.set(s.studentId.trim().toLowerCase(), s));
-    return map;
-  }, [existingStudents]);
+  const effectiveBranchLocked = isCentreLocked || !autoDetectCentre;
 
-  const existingByCentreNameMobile = useMemo(() => {
-    const map = new Map<string, Student>();
-    existingStudents.forEach((s) => {
-      const m = cleanMobileNumber(s.mobileNumber);
-      const name = s.studentName.trim().toLowerCase();
-      if (name && m.length >= 7 && m.toLowerCase() !== 'not provided') {
-        map.set(`${s.centreId}::${name}::${m}`, s);
-      }
-    });
-    return map;
-  }, [existingStudents]);
-
-  const existingMobileListByCentre = useMemo(() => {
-    const map = new Map<string, Student[]>();
-    existingStudents.forEach((s) => {
-      const m = cleanMobileNumber(s.mobileNumber);
-      if (m.length >= 7 && m.toLowerCase() !== 'not provided') {
-        const key = `${s.centreId}::${m}`;
-        const list = map.get(key) || [];
-        list.push(s);
-        map.set(key, list);
-      }
-    });
-    return map;
-  }, [existingStudents]);
-
-  const existingUniqueByCentreName = useMemo(() => {
-    const counts = new Map<string, number>();
-    const map = new Map<string, Student>();
-    existingStudents.forEach((s) => {
-      const key = `${s.centreId}::${s.studentName.trim().toLowerCase()}`;
-      counts.set(key, (counts.get(key) || 0) + 1);
-      map.set(key, s);
-    });
-    for (const [k, count] of counts.entries()) {
-      if (count > 1) map.delete(k);
-    }
-    return map;
-  }, [existingStudents]);
-
-  const previewRows = useMemo<
-    Array<
-      NormalizedImportStudent & {
-        origIndex: number;
-        duplicateReason: string | null;
-        matchedExisting: Student | null;
-        operation: 'create' | 'update';
-        raw: Record<string, string>;
-      }
-    >
-  >(() => {
-    // Pass 1: normalize rows and detect non-unique Student ID columns (e.g. shared batch codes / "Pending" / ref nos)
-    const preliminary = activeRawRows.map((raw, idx) => {
-      const normalized = normalizeImportedStudentRow(
-        raw,
-        idx + 1,
+  const previewRows = useMemo<PreviewImportRow[]>(
+    () =>
+      buildImportPreviewRows({
+        rawRows: activeRawRows,
+        rowColors: activeRowColors,
         fallbackCentre,
-        isSuperAdmin && autoDetectCentre,
+        allowCentreOverride: isSuperAdmin && autoDetectCentre,
+        isCentreLocked: effectiveBranchLocked,
         columnMapping,
         allowMissingMobile,
+        allowDuplicateRowsInSheet,
         defaultTotalFee,
-        activeRowColors[idx],
+        importMode,
+        mode,
+        isSuperAdmin,
+        currentUserCentreId: currentUser.centreId,
+        editedOverrides,
+        existingStudents,
         commonExtraHeadings,
-      );
-
-      const override = editedOverrides[idx];
-      if (override?.studentName !== undefined) {
-        const trimmedName = override.studentName.trim().slice(0, 120);
-        normalized.studentName =
-          trimmedName.length === 1 && /\p{L}/u.test(trimmedName) ? `${trimmedName}.` : trimmedName;
-      }
-      if (override?.mobileNumber !== undefined) {
-        const cleaned = cleanMobileNumber(override.mobileNumber);
-        normalized.mobileNumber =
-          cleaned.length >= 7 && cleaned.length <= 20
-            ? cleaned
-            : allowMissingMobile
-              ? 'Not Provided'
-              : cleaned;
-      }
-
-      if (normalized.studentName.length < 2) {
-        normalized.validationError = 'Student Name (min 2 chars) required.';
-      } else if (normalized.mobileNumber.length < 7 || normalized.mobileNumber.length > 20) {
-        normalized.validationError = 'Mobile Number (7–15 digits) required.';
-      } else {
-        normalized.validationError = null;
-      }
-
-      return { normalized, raw, origIndex: idx };
-    });
-
-    // If the same Student ID appears across rows with DIFFERENT student names, it is a batch/session/placeholder
-    // code rather than a unique primary key — ignore it as ID (keep raw value inside extraColumns) so no students are skipped.
-    const idToDistinctNames = new Map<string, Set<string>>();
-    preliminary.forEach(({ normalized }) => {
-      const idKey = normalized.studentId.trim().toLowerCase();
-      const nameKey = normalized.studentName.trim().toLowerCase();
-      if (!idKey) return;
-      const set = idToDistinctNames.get(idKey) || new Set<string>();
-      if (nameKey) set.add(nameKey);
-      idToDistinctNames.set(idKey, set);
-    });
-
-    const nonUniqueIds = new Set<string>();
-    for (const [idKey, names] of idToDistinctNames.entries()) {
-      if (names.size > 1) nonUniqueIds.add(idKey);
-    }
-
-    const seenIds = new Set<string>();
-    const seenExactSignatures = new Set<string>();
-    const seenMatchedExistingIds = new Set<string>();
-
-    return preliminary.map(({ normalized, raw, origIndex }) => {
-      const idColHeader = columnMapping.studentId;
-      if (normalized.studentId && nonUniqueIds.has(normalized.studentId.trim().toLowerCase())) {
-        if (idColHeader && raw[idColHeader]) {
-          const cleanKey = idColHeader.trim().slice(0, 50);
-          if (cleanKey && normalized.extraColumns[cleanKey] === undefined && Object.keys(normalized.extraColumns).length < 35) {
-            normalized.extraColumns[cleanKey] = String(raw[idColHeader]).trim().slice(0, 300);
-          }
-        }
-        normalized.studentId = '';
-      }
-
-      let matchedExisting: Student | null = null;
-      if (importMode !== 'replace_all') {
-        if (normalized.studentId) {
-          matchedExisting = existingById.get(normalized.studentId.toLowerCase()) || null;
-        }
-        const normNameLower = normalized.studentName.trim().toLowerCase();
-        const hasValidPhone =
-          normalized.mobileNumber.length >= 7 &&
-          normalized.mobileNumber.toLowerCase() !== 'not provided';
-
-        if (!matchedExisting && hasValidPhone && normNameLower.length >= 2) {
-          matchedExisting =
-            existingByCentreNameMobile.get(
-              `${normalized.centreId}::${normNameLower}::${normalized.mobileNumber}`,
-            ) || null;
-        }
-
-        if (!matchedExisting && hasValidPhone && normNameLower.length >= 2) {
-          const candidates =
-            existingMobileListByCentre.get(`${normalized.centreId}::${normalized.mobileNumber}`) || [];
-          if (candidates.length === 1) {
-            const cand = candidates[0];
-            const candNameLower = cand.studentName.trim().toLowerCase();
-            const firstA = getFirstNameToken(normNameLower);
-            const firstB = getFirstNameToken(candNameLower);
-            if (
-              (firstA.length >= 3 && firstA === firstB) ||
-              normNameLower.includes(candNameLower) ||
-              candNameLower.includes(normNameLower)
-            ) {
-              matchedExisting = cand;
-            }
-          }
-        }
-
-        if (!matchedExisting && normNameLower.length >= 2) {
-          const nameMatch =
-            existingUniqueByCentreName.get(`${normalized.centreId}::${normNameLower}`) || null;
-          if (
-            nameMatch &&
-            (normalized.mobileNumber === 'Not Provided' ||
-              nameMatch.mobileNumber === 'Not Provided' ||
-              nameMatch.mobileNumber === normalized.mobileNumber)
-          ) {
-            matchedExisting = nameMatch;
-          }
-        }
-      }
-
-      // If another row in the sheet already claimed this existing DB student, treat subsequent row as new instead of double-updating
-      if (matchedExisting && allowDuplicateRowsInSheet && seenMatchedExistingIds.has(matchedExisting.studentId)) {
-        matchedExisting = null;
-        normalized.studentId = '';
-      }
-      if (matchedExisting) {
-        seenMatchedExistingIds.add(matchedExisting.studentId);
-      }
-
-      let duplicateReason: string | null = null;
-      const sheetIdKey = (matchedExisting?.studentId || normalized.studentId).toLowerCase();
-      if (!allowDuplicateRowsInSheet && sheetIdKey) {
-        if (seenIds.has(sheetIdKey)) {
-          duplicateReason = `Duplicate Student ID "${matchedExisting?.studentId || normalized.studentId}" in sheet.`;
-        }
-        seenIds.add(sheetIdKey);
-      }
-
-      // Check identical twin rows in sheet (only treat as duplicate if Name + Mobile + Subject + Fees all match)
-      if (
-        !allowDuplicateRowsInSheet &&
-        !duplicateReason &&
-        normalized.studentName.trim().length >= 2 &&
-        normalized.mobileNumber.length >= 7 &&
-        normalized.mobileNumber.toLowerCase() !== 'not provided'
-      ) {
-        const sig = `${normalized.centreId}::${normalized.studentName.trim().toLowerCase()}::${normalized.mobileNumber}::${normalized.totalFee}::${normalized.paidAmount}::${normalized.subject.trim().toLowerCase()}`;
-        if (seenExactSignatures.has(sig)) {
-          duplicateReason = `Duplicate row "${normalized.studentName}" (${maskMobileNumber(normalized.mobileNumber)}) in sheet.`;
-        }
-        seenExactSignatures.add(sig);
-      }
-
-      if (!duplicateReason && matchedExisting && importMode === 'skip_duplicates') {
-        duplicateReason = `Already exists (#${matchedExisting.serialNumber} ${matchedExisting.studentName}).`;
-      }
-
-      if (
-        !duplicateReason &&
-        matchedExisting &&
-        importMode === 'upsert' &&
-        !isSuperAdmin &&
-        matchedExisting.centreId !== currentUser.centreId
-      ) {
-        duplicateReason = 'Matches student in another centre (read-only).';
-      }
-
-      const operation: 'create' | 'update' =
-        matchedExisting && importMode === 'upsert' ? 'update' : 'create';
-
-      return { ...normalized, origIndex, duplicateReason, matchedExisting, operation, raw };
-    });
-  }, [
-    activeRawRows,
-    activeRowColors,
-    fallbackCentre,
-    isSuperAdmin,
-    autoDetectCentre,
-    columnMapping,
-    allowMissingMobile,
-    allowDuplicateRowsInSheet,
-    defaultTotalFee,
-    importMode,
-    editedOverrides,
-    existingById,
-    existingByCentreNameMobile,
-    existingMobileListByCentre,
-    existingUniqueByCentreName,
-    currentUser.centreId,
-    commonExtraHeadings,
-  ]);
+      }),
+    [
+      activeRawRows,
+      activeRowColors,
+      fallbackCentre,
+      isSuperAdmin,
+      autoDetectCentre,
+      effectiveBranchLocked,
+      columnMapping,
+      allowMissingMobile,
+      allowDuplicateRowsInSheet,
+      defaultTotalFee,
+      importMode,
+      mode,
+      currentUser.centreId,
+      editedOverrides,
+      existingStudents,
+      commonExtraHeadings,
+    ],
+  );
 
   const readyRows = useMemo(
     () => previewRows.filter((r) => !r.validationError && !r.duplicateReason),
@@ -452,6 +288,76 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
     const pct = total > 0 ? Math.round((paid / total) * 100) : 0;
     return { total, paid, pending, tmaFee, examFee, pct };
   }, [readyRows]);
+
+  const existingFeeMap = useMemo(() => {
+    const map = new Map<string, FeeRecoveryRecord>();
+    feeRecords.forEach((f) => map.set(f.studentId, f));
+    return map;
+  }, [feeRecords]);
+
+  const rowsWithAnyFeeCount = useMemo(
+    () =>
+      readyRows.filter(
+        (r) =>
+          r.totalFee > 0 ||
+          r.paidAmount > 0 ||
+          r.pendingAmount > 0 ||
+          r.tmaFee > 0 ||
+          r.examFee > 0 ||
+          r.explicitFeeDetected,
+      ).length,
+    [readyRows],
+  );
+
+  const rowsWithPendingDueCount = useMemo(
+    () => readyRows.filter((r) => r.pendingAmount > 0 || r.recoveryStatus === 'Overdue').length,
+    [readyRows],
+  );
+
+  const paidReadyCount = useMemo(
+    () => readyRows.filter((r) => isFeeFullyPaid(r)).length,
+    [readyRows],
+  );
+
+  const unpaidReadyCount = readyRows.length - paidReadyCount;
+
+  const readyCentreCounts = useMemo(() => {
+    const counts = new Map<CentreId, number>();
+    for (const r of readyRows) {
+      counts.set(r.centreId, (counts.get(r.centreId) || 0) + 1);
+    }
+    return CANONICAL_CENTRES
+      .map((c) => ({ centre: c, count: counts.get(c.id) || 0 }))
+      .filter((item) => item.count > 0);
+  }, [readyRows]);
+
+  const rowsOutsideSelectedCentreCount = useMemo(
+    () => readyRows.filter((r) => r.centreId !== fallbackCentre).length,
+    [readyRows, fallbackCentre],
+  );
+
+  const studentsToReplace = useMemo(
+    () =>
+      effectiveBranchLocked
+        ? existingStudents.filter((s) => s.centreId === fallbackCentre)
+        : existingStudents,
+    [effectiveBranchLocked, existingStudents, fallbackCentre],
+  );
+
+  const hasAnyMappedFeeColumn = Boolean(
+    columnMapping.totalFee ||
+      columnMapping.paidAmount ||
+      columnMapping.pendingAmount ||
+      columnMapping.tmaFee ||
+      columnMapping.examFee,
+  );
+
+  const feeMissingWarning =
+    mode !== 'academic_sync' &&
+    activeRawRows.length > 0 &&
+    readyRows.length > 0 &&
+    rowsWithAnyFeeCount === 0 &&
+    defaultTotalFee === 0;
 
   const extraPreviewHeaders = useMemo(
     () =>
@@ -522,11 +428,11 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
           'Received',
           'Not Completed',
           new Date().toISOString().slice(0, 10),
-          12000,
-          6000,
-          500,
-          1500,
-          'Sample Student Row',
+          0,
+          0,
+          0,
+          0,
+          '',
           ...Array.from({ length: commonTemplateHeaders.extraCount }, () => ''),
         ],
       ],
@@ -550,11 +456,11 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
           'Received',
           'Not Completed',
           new Date().toISOString().slice(0, 10),
-          12000,
-          6000,
-          500,
-          1500,
-          'Sample Student Row',
+          0,
+          0,
+          0,
+          0,
+          '',
           ...Array.from({ length: commonTemplateHeaders.extraCount }, () => ''),
         ],
       ],
@@ -572,7 +478,11 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
     const rows = sheetsMap[nextSheet] || [];
     const detected = fuzzyDetectColumnMapping(hdrs, rows);
     setColumnMapping(detected);
-    if (!detected.studentName) {
+    if (
+      mode === 'fee_sync' ||
+      !detected.studentName ||
+      (rows.length > 0 && !detected.totalFee && !detected.paidAmount && !detected.pendingAmount)
+    ) {
       setShowColumnMapper(true);
     }
   };
@@ -650,7 +560,7 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
           nextFiltered[ALL_SHEETS_KEY] = totalSummaryFiltered;
           nextExcluded[ALL_SHEETS_KEY] = allExcluded;
           selectableNames = [ALL_SHEETS_KEY, ...result.sheetNames];
-          if (overlapSum / result.sheetNames.length >= 0.6) {
+          if (overlapSum / result.sheetNames.length >= 0.85) {
             initialSheet = ALL_SHEETS_KEY;
           }
         }
@@ -698,24 +608,55 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
         return;
       }
 
-      const shouldReplace = isSuperAdmin && importMode === 'replace_all' && existingStudents.length > 0;
+      const shouldReplace = isSuperAdmin && importMode === 'replace_all' && studentsToReplace.length > 0;
       if (shouldReplace) {
-        setImportStatusText(`Clearing existing ${existingStudents.length} records...`);
-        await deleteStudentsBatch(existingStudents, currentUser, {
+        setImportStatusText(`Clearing existing ${studentsToReplace.length} records...`);
+        await deleteStudentsBatch(studentsToReplace, currentUser, {
           onProgress: (done, total) => setImportStatusText(`Clearing old records (${done}/${total})...`),
         });
       }
 
-      setImportStatusText(`Syncing 0/${readyRows.length} students & fees...`);
-      let nextSerial = shouldReplace ? 1 : await getNextSerialNumber(existingStudents);
+      const effectiveRowsToSync =
+        (mode === 'fee_sync' || mode === 'academic_sync') && skipUnmatchedNewInFeeSync
+          ? readyRows.filter((r) => r.operation === 'update')
+          : readyRows;
+      if (effectiveRowsToSync.length === 0) {
+        setImportError('No matched existing students to update. Uncheck "Matched Students Only" or fix Student Name mapping.');
+        setImporting(false);
+        return;
+      }
+
+      setImportStatusText(
+        academicSyncOnlyMode
+          ? `Syncing 0/${effectiveRowsToSync.length} subjects & statuses...`
+          : `Syncing 0/${effectiveRowsToSync.length} students & fees...`,
+      );
+      const replacedIdSet = new Set(studentsToReplace.map((s) => s.studentId.toLowerCase()));
+      const remainingAfterReplace = shouldReplace
+        ? existingStudents.filter((s) => !replacedIdSet.has(s.studentId.toLowerCase()))
+        : existingStudents;
+      let nextSerial =
+        remainingAfterReplace.length === 0 ? 1 : await getNextSerialNumber(remainingAfterReplace);
       const year = new Date().getFullYear();
       const usedPayloadIds = new Set<string>(
-        shouldReplace ? [] : existingStudents.map((s) => s.studentId.toLowerCase()),
+        remainingAfterReplace.map((s) => s.studentId.toLowerCase()),
       );
 
-      const payloads: BulkImportRowPayload[] = readyRows.map((row) => {
+      const payloads: BulkImportRowPayload[] = effectiveRowsToSync.map((row) => {
         if (row.operation === 'update' && row.matchedExisting) {
           usedPayloadIds.add(row.matchedExisting.studentId.toLowerCase());
+          const existingSubject = (row.matchedExisting.subject || '').trim();
+          const hasCustomExistingSubject =
+            existingSubject.length > 0 && !isMockSubjectValue(existingSubject);
+          const resolvedSubject = row.explicitSubjectDetected
+            ? row.subject
+            : hasCustomExistingSubject
+              ? existingSubject
+              : '';
+          const mergedExtraColumns = mergeImportedExtraColumns(
+            row.extraColumns,
+            row.matchedExisting.extraColumns,
+          );
           return {
             operation: 'update',
             serialNumber: row.matchedExisting.serialNumber,
@@ -725,7 +666,7 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
               row.mobileNumber === 'Not Provided' && row.matchedExisting.mobileNumber
                 ? row.matchedExisting.mobileNumber
                 : row.mobileNumber,
-            subject: row.subject,
+            subject: resolvedSubject,
             tcStatus: row.tcStatus,
             bookStatus: row.bookStatus,
             classAttendanceStatus: row.classAttendanceStatus,
@@ -749,7 +690,10 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
             explicitFeeDetected: row.explicitFeeDetected,
             explicitTmaFeeDetected: row.explicitTmaFeeDetected,
             explicitExamFeeDetected: row.explicitExamFeeDetected,
-            extraColumns: row.extraColumns,
+            explicitSubjectDetected: row.explicitSubjectDetected,
+            explicitTmaDetected: row.explicitTmaDetected,
+            explicitPracticalDetected: row.explicitPracticalDetected,
+            extraColumns: mergedExtraColumns,
             rowColor: row.rowColor,
             cellColors: row.cellColors,
           };
@@ -804,6 +748,9 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
           explicitFeeDetected: row.explicitFeeDetected,
           explicitTmaFeeDetected: row.explicitTmaFeeDetected,
           explicitExamFeeDetected: row.explicitExamFeeDetected,
+          explicitSubjectDetected: row.explicitSubjectDetected,
+          explicitTmaDetected: row.explicitTmaDetected,
+          explicitPracticalDetected: row.explicitPracticalDetected,
           extraColumns: row.extraColumns,
           rowColor: row.rowColor,
           cellColors: row.cellColors,
@@ -811,59 +758,82 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
       });
 
       const result = await bulkImportStudentsBatch(payloads, currentUser, true, {
-        onProgress: (done, total) => setImportStatusText(`Syncing ${done}/${total} students & fees...`),
+        onProgress: (done, total) =>
+          setImportStatusText(
+            academicSyncOnlyMode
+              ? `Syncing ${done}/${total} subjects & statuses...`
+              : `Syncing ${done}/${total} students & fees...`,
+          ),
+        feeSyncOnly: feeSyncOnlyMode,
+        academicSyncOnly: academicSyncOnlyMode,
+        forceSyncFees: mode === 'fee_sync',
       });
       const totalSkipped = issueRows.length + result.failedRows.length;
 
-      if (result.importedCount === 0 && result.updatedCount === 0 && result.failedRows.length > 0) {
-        const errMsg = result.failedRows[0]?.error || 'Firestore denied or rejected the imported rows.';
+      if (result.failedRows.length > 0) {
+        const errMsg = `${result.failedRows.length} student row(s) could not be saved (e.g. ${result.failedRows[0]?.studentName || 'Row'}: ${result.failedRows[0]?.error || 'Firestore rejected write'}). ${result.importedCount + result.updatedCount} succeeded.`;
         setImportError(errMsg);
-        onError('Import Rejected', errMsg);
+        onError('Some Rows Failed to Upload', errMsg);
+        if (result.importedCount > 0 || result.updatedCount > 0 || result.feeSyncedCount > 0) {
+          onSuccess(
+            `Partial sync: ${result.importedCount} new added, ${result.updatedCount} updated, ${result.failedRows.length} failed.`,
+          );
+        }
       } else {
-        const blankAndHeadingOnlyCols = extractBlankAndSparseSheetHeadings(
-          activeHeaders,
-          columnMapping,
-          activeRawRows,
-          fallbackCentre,
-        );
-        if (
-          blankAndHeadingOnlyCols.length > 0 &&
-          (currentUser.role === 'super_admin' || currentUser.role === 'centre_head')
-        ) {
-          await mergeCustomColumnsIntoSharedConfig(
-            blankAndHeadingOnlyCols,
-            currentUser,
-            `Preserved heading-only/blank columns from ${fileName || 'Excel import'}`,
-          ).catch(() => {});
-        }
+        if (!feeSyncOnlyMode && !academicSyncOnlyMode) {
+          const blankAndHeadingOnlyCols = extractBlankAndSparseSheetHeadings(
+            activeHeaders,
+            columnMapping,
+            activeRawRows,
+            fallbackCentre,
+          );
+          if (
+            blankAndHeadingOnlyCols.length > 0 &&
+            (currentUser.role === 'super_admin' || currentUser.role === 'centre_head')
+          ) {
+            await mergeCustomColumnsIntoSharedConfig(
+              blankAndHeadingOnlyCols,
+              currentUser,
+              `Preserved heading-only/blank columns from ${fileName || 'Excel import'}`,
+            ).catch(() => {});
+          }
 
-        const lkgImportedKeys: string[] = [];
-        const lkgSeen = new Set<string>();
-        for (const row of readyRows) {
-          if (row.centreId !== 'vp_lookerganj') continue;
-          for (const k of Object.keys(row.extraColumns)) {
-            if (!lkgSeen.has(k)) {
-              lkgSeen.add(k);
-              lkgImportedKeys.push(k);
+          const lkgImportedKeys: string[] = [];
+          const lkgSeen = new Set<string>();
+          for (const row of readyRows) {
+            if (row.centreId !== 'vp_lookerganj') continue;
+            for (const k of Object.keys(row.extraColumns)) {
+              if (!lkgSeen.has(k)) {
+                lkgSeen.add(k);
+                lkgImportedKeys.push(k);
+              }
             }
           }
-        }
-        if (lkgImportedKeys.length > 0) {
-          const merged = [...lkgImportedKeys];
-          for (const oldKey of loadStoredCommonBranchHeaders()) {
-            if (!lkgSeen.has(oldKey)) {
-              lkgSeen.add(oldKey);
-              merged.push(oldKey);
+          if (lkgImportedKeys.length > 0) {
+            const merged = [...lkgImportedKeys];
+            for (const oldKey of loadStoredCommonBranchHeaders()) {
+              if (!lkgSeen.has(oldKey)) {
+                lkgSeen.add(oldKey);
+                merged.push(oldKey);
+              }
             }
+            saveCommonBranchHeaders(merged);
           }
-          saveCommonBranchHeaders(merged);
         }
 
-        onSuccess(
-          `Excel sync complete: ${result.importedCount} new added, ${result.updatedCount} existing updated (colors, fees & graphs synced)${
-            totalSkipped > 0 ? `, ${totalSkipped} skipped` : ''
-          }.`,
-        );
+        const summaryMsg = feeSyncOnlyMode
+          ? `Fee sync complete: ${result.feeSyncedCount} student fee records updated, ${result.importedCount} new added${
+              totalSkipped > 0 ? `, ${totalSkipped} skipped` : ''
+            }.`
+          : academicSyncOnlyMode
+            ? `Subjects & status sync complete: ${result.updatedCount} existing updated, ${result.importedCount} new added${
+                totalSkipped > 0 ? `, ${totalSkipped} skipped` : ''
+              }.`
+            : `Excel sync complete: ${result.importedCount} new added, ${result.updatedCount} existing updated, ${result.feeSyncedCount} fee records synced${
+                totalSkipped > 0 ? `, ${totalSkipped} skipped` : ''
+              }.`;
+
+        onSuccess(summaryMsg);
         setRawSheets({});
         setHeadersBySheet({});
         setRowColorsBySheet({});
@@ -897,10 +867,21 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
           <div>
             <h3 className="text-lg font-bold text-white flex items-center gap-2">
               <FileSpreadsheet className="w-5 h-5 text-[#FBBF24]" />
-              Bulk Excel &amp; CSV Student Import
+              {mode === 'fee_sync'
+                ? 'Update Student Fees from Excel'
+                : mode === 'academic_sync'
+                  ? defaultAcademicType === 'practical'
+                    ? 'Update Subjects & Practical Status from Excel'
+                    : 'Update Subjects & TMA Status from Excel'
+                  : 'Bulk Excel & CSV Student Import'}
             </h3>
             <p className="text-xs text-slate-200/85 mt-0.5">
-              Supports <strong className="text-white">.xlsx, .xls, .ods, .csv</strong> (all Excel columns &amp; cell colours preserved!) ·{' '}
+              {mode === 'fee_sync'
+                ? 'Matches students by Name/Mobile across branches and updates Total, Paid (Jama) & Pending (Baki) safely.'
+                : mode === 'academic_sync'
+                  ? 'Matches students by Name/Mobile and updates real Subjects (single or Sub 1–5) & TMA/Practical status without touching fees or custom columns.'
+                  : 'Supports .xlsx, .xls, .ods, .csv (all Excel columns & cell colours preserved!)'}{' '}
+              ·{' '}
               {isSuperAdmin ? (
                 <span>Super Admin Mode: Multi-centre Excel supported</span>
               ) : (
@@ -992,25 +973,13 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
               >
                 <option value="upsert">Add New &amp; Update Existing Rows (Sync Fees)</option>
                 <option value="skip_duplicates">Add New Rows Only (Skip Existing)</option>
-                {isSuperAdmin && existingStudents.length > 0 && (
+                {isSuperAdmin && studentsToReplace.length > 0 && (
                   <option value="replace_all">
-                    Fresh Re-Upload (Delete All {existingStudents.length} Existing)
+                    Fresh Re-Upload (Delete All {studentsToReplace.length}{' '}
+                    {effectiveBranchLocked ? CENTRE_MAP[fallbackCentre].code : 'Existing'})
                   </option>
                 )}
               </select>
-            </div>
-
-            <div>
-              <label className="block text-[11px] font-bold uppercase tracking-wider text-[#0B2454] mb-1">
-                Default Total Fee (If Column Missing)
-              </label>
-              <input
-                type="number"
-                min={0}
-                value={defaultTotalFee}
-                onChange={(e) => setDefaultTotalFee(Math.max(0, Number(e.target.value) || 0))}
-                className="w-full px-3 py-2 text-xs font-mono font-bold bg-white text-[#08152E] border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#0F2F6B]"
-              />
             </div>
           </div>
 
@@ -1026,7 +995,9 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
             </span>
             <span className="text-xs text-slate-600 mt-0.5">
               {previewRows.length > 0
-                ? `${previewRows.length} student rows · ${activeHeaders.length} columns · ${newReadyCount} new + ${updateReadyCount} updates`
+                ? `${readyRows.length} ready of ${previewRows.length} student rows · ${activeHeaders.length} columns · ${newReadyCount} new + ${updateReadyCount} updates${
+                    issueRows.length > 0 ? ` · ${issueRows.length} skipped` : ''
+                  }`
                 : 'Auto-detects Paid (Jama), Pending (Baki), Total Fee, Excel Colours & custom columns'}
             </span>
             <input
@@ -1043,6 +1014,24 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
               <div className="space-y-0.5">
                 <p className="font-bold">{importError ? 'Import Error' : 'File Read Error'}</p>
                 <p>{importError || parseError}</p>
+              </div>
+            </div>
+          )}
+
+          {feeMissingWarning && (
+            <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-amber-50 border-2 border-amber-400 text-xs text-amber-950">
+              <AlertCircle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <p className="font-bold">
+                  {hasAnyMappedFeeColumn
+                    ? 'Selected fee columns appear empty (₹0 across all rows)'
+                    : 'Fee columns were not auto-detected from this Excel sheet'}
+                </p>
+                <p>
+                  {mode === 'fee_sync'
+                    ? 'Please pick your sheet’s Total Fee, Paid (Jama), or Pending (Baki) column in the Column Mapping dropdowns below so real pending fees calculate properly.'
+                    : 'Your file does not have a recognized Total Fee / Paid / Pending column mapped yet. Select them below or leave ₹0 if fees will be updated separately.'}
+                </p>
               </div>
             </div>
           )}
@@ -1091,6 +1080,79 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                   <p className="font-mono font-bold text-sm text-[#FBBF24] mt-0.5">{feeSummary.pct}%</p>
                 </div>
               </div>
+
+              {/* Fee Sync Mapping & Match Diagnostics */}
+              <div className="px-3.5 py-2.5 rounded-xl bg-slate-100 border border-slate-300 text-[11px] text-slate-800 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span>
+                    <strong>Detected Columns:</strong> Name=
+                    <span className="font-mono text-[#0F2F6B]">
+                      {columnMapping.studentName || 'Not Selected'}
+                    </span>
+                  </span>
+                  <span>
+                    Total=
+                    <span className="font-mono text-[#0F2F6B]">{columnMapping.totalFee || 'None'}</span>
+                  </span>
+                  <span>
+                    Paid=
+                    <span className="font-mono text-emerald-700">{columnMapping.paidAmount || 'None'}</span>
+                  </span>
+                  <span>
+                    Pending=
+                    <span className="font-mono text-rose-700">{columnMapping.pendingAmount || 'None'}</span>
+                  </span>
+                  {readyCentreCounts.length > 0 && (
+                    <span>
+                      Target Branch=
+                      <span className="font-mono font-bold text-[#0F2F6B]">
+                        {readyCentreCounts.map((c) => `${c.centre.code}: ${c.count}`).join(' · ')}
+                      </span>
+                    </span>
+                  )}
+                </div>
+                <div className="font-mono font-semibold text-slate-900">
+                  Matched DB: <span className="text-blue-700">{updateReadyCount}</span> · Paid:{' '}
+                  <span className="text-emerald-700">{paidReadyCount}</span> · Unpaid:{' '}
+                  <span className="text-rose-700">
+                    {unpaidReadyCount}
+                    {rowsWithPendingDueCount > 0 ? ` (${rowsWithPendingDueCount} with Baki)` : ''}
+                  </span>
+                </div>
+              </div>
+
+              {isSuperAdmin && rowsOutsideSelectedCentreCount > 0 && (
+                <div className="flex flex-wrap items-center justify-between gap-2.5 p-3 rounded-xl bg-amber-50 border border-amber-400 text-xs text-amber-950">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                    <p>
+                      <strong>{rowsOutsideSelectedCentreCount} ready row(s)</strong> are currently routed to other branches instead of{' '}
+                      <strong>{CENTRE_MAP[fallbackCentre].name}</strong>.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setAutoDetectCentre(false)}
+                    className="px-3 py-1.5 text-xs font-bold bg-[#0F2F6B] text-white rounded-lg hover:bg-[#172554]"
+                  >
+                    Send All {readyRows.length} Rows to {CENTRE_MAP[fallbackCentre].code}
+                  </button>
+                </div>
+              )}
+
+              {(mode === 'fee_sync' || mode === 'academic_sync') && readyRows.length > 0 && updateReadyCount === 0 && (
+                <div className="flex items-start gap-2.5 p-3 rounded-xl bg-amber-50 border border-amber-400 text-xs text-amber-950">
+                  <AlertCircle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-bold">0 existing students matched in database!</p>
+                    <p>
+                      Check <strong>Fallback / Default Centre</strong> above or verify the{' '}
+                      <strong>Student Name</strong> &amp; <strong>Mobile No</strong> column mapping below — otherwise{' '}
+                      {newReadyCount} new student entries will be created instead of updating existing students.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {/* Toolbar */}
               <div className="flex flex-wrap items-center justify-between gap-2.5">
@@ -1174,6 +1236,48 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                     />
                     Auto-fill missing Mobile No
                   </label>
+                  {(mode === 'fee_sync' || (mode === 'full' && updateReadyCount > 0)) && (
+                    <label
+                      title="Recommended when updating fees: preserves existing subjects, TMA, practical, attendance, colors and custom columns."
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-950 border border-emerald-300 font-bold cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={feeSyncOnlyMode}
+                        onChange={(e) => setFeeSyncOnlyMode(e.target.checked)}
+                        className="rounded border-emerald-400 text-emerald-700"
+                      />
+                      Keep Subjects, Attendance &amp; Custom Cols Untouched (Update Fees Only)
+                    </label>
+                  )}
+                  {mode === 'academic_sync' && (
+                    <label
+                      title="Preserves fees, colors, and other Student Database custom columns while updating Subjects & TMA/Practical status."
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 text-indigo-950 border border-indigo-300 font-bold cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={academicSyncOnlyMode}
+                        onChange={(e) => setAcademicSyncOnlyMode(e.target.checked)}
+                        className="rounded border-indigo-400 text-indigo-700"
+                      />
+                      Update Subjects &amp; Status Only (Preserve Fees &amp; Custom Cols)
+                    </label>
+                  )}
+                  {(mode === 'fee_sync' || mode === 'academic_sync') && updateReadyCount > 0 && newReadyCount > 0 && (
+                    <label
+                      title="If checked, only updates matched existing students and skips unmatched new rows."
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-sky-50 text-sky-950 border border-sky-300 font-bold cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={skipUnmatchedNewInFeeSync}
+                        onChange={(e) => setSkipUnmatchedNewInFeeSync(e.target.checked)}
+                        className="rounded border-sky-400 text-sky-700"
+                      />
+                      Update Matched Only (Skip {newReadyCount} Unmatched)
+                    </label>
+                  )}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
@@ -1234,7 +1338,7 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                         { key: 'classAttendanceStatus', label: 'Attendance' },
                         { key: 'totalFee', label: 'Total Fee' },
                         { key: 'paidAmount', label: 'Paid (Jama)' },
-                        { key: 'pendingAmount', label: 'Pending (Baki)' },
+                        { key: 'pendingAmount', label: 'Pending / Left Fees (Unpaid)' },
                         { key: 'tmaFee', label: 'TMA Fee' },
                         { key: 'examFee', label: 'Exam Fee' },
                         { key: 'feeStatus', label: 'Fee Status' },
@@ -1282,18 +1386,56 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                         Why {issueRows.length + (!includeExcludedRows ? activeExcludedRows.length : 0)} row(s) are not yet in Ready ({readyRows.length}):
                       </span>
                     </div>
-                    {!includeExcludedRows && activeExcludedRows.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => setIncludeExcludedRows(true)}
-                        className="px-2.5 py-1 text-[11px] font-bold bg-emerald-700 text-white rounded-lg hover:bg-emerald-800"
-                      >
-                        Include {activeExcludedRows.length} Footer Row
-                      </button>
-                    )}
+                    <div className="flex flex-wrap items-center gap-2">
+                      {issueRows.some((r) => r.validationError?.includes('Student Name')) && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setEditedOverrides((prev) => {
+                              const next = { ...prev };
+                              for (const row of issueRows) {
+                                if (!row.validationError?.includes('Student Name')) continue;
+                                const filled = Object.entries(row.raw)
+                                  .map(([k, v]) => [k, String(v ?? '').trim()] as const)
+                                  .filter(([, v]) => v.length > 0);
+                                const suggestion =
+                                  filled.find(([k, v]) => /father|guardian|candidate|name|remark/i.test(k) && v.length >= 2)?.[1] ||
+                                  `Student #${row.rowIndex}`;
+                                next[row.origIndex] = {
+                                  ...next[row.origIndex],
+                                  studentName: suggestion.slice(0, 120),
+                                };
+                              }
+                              return next;
+                            })
+                          }
+                          className="px-2.5 py-1 text-[11px] font-bold bg-[#0F2F6B] text-white rounded-lg hover:bg-[#172554]"
+                        >
+                          Auto-Fix All Blank Names
+                        </button>
+                      )}
+                      {duplicateIssueCount > 0 && !allowDuplicateRowsInSheet && (
+                        <button
+                          type="button"
+                          onClick={() => setAllowDuplicateRowsInSheet(true)}
+                          className="px-2.5 py-1 text-[11px] font-bold bg-rose-700 text-white rounded-lg hover:bg-rose-800"
+                        >
+                          Include All {duplicateIssueCount} Duplicate Rows
+                        </button>
+                      )}
+                      {!includeExcludedRows && activeExcludedRows.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setIncludeExcludedRows(true)}
+                          className="px-2.5 py-1 text-[11px] font-bold bg-emerald-700 text-white rounded-lg hover:bg-emerald-800"
+                        >
+                          Include {activeExcludedRows.length} Footer Row
+                        </button>
+                      )}
+                    </div>
                   </div>
 
-                  {issueRows.slice(0, 10).map((row) => {
+                  {issueRows.slice(0, 25).map((row) => {
                     const rowOrigIdx = row.origIndex;
                     const errReason = row.validationError || row.duplicateReason || 'Needs attention';
                     const filledCells = Object.entries(row.raw)
@@ -1549,24 +1691,33 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                               style={getCellPreviewStyle('feeStatus')}
                               className="px-2.5 py-1.5 whitespace-nowrap border-r border-slate-200"
                             >
-                              <span
-                                style={
-                                  row.cellColors?.feeStatus || row.rowColor
-                                    ? { color: getReadableTextColor(row.cellColors?.feeStatus || row.rowColor) }
-                                    : undefined
-                                }
-                                className={`font-bold ${
-                                  row.cellColors?.feeStatus || row.rowColor
-                                    ? ''
-                                    : row.recoveryStatus === 'Paid'
-                                      ? 'text-emerald-700'
-                                      : row.recoveryStatus === 'Partial'
-                                        ? 'text-amber-700'
-                                        : 'text-rose-700'
-                                }`}
-                              >
-                                {row.recoveryStatus}
-                              </span>
+                              {(() => {
+                                const rowPaid = isFeeFullyPaid(row);
+                                return (
+                                  <span
+                                    style={
+                                      row.cellColors?.feeStatus || row.rowColor
+                                        ? { color: getReadableTextColor(row.cellColors?.feeStatus || row.rowColor) }
+                                        : undefined
+                                    }
+                                    className={`font-bold ${
+                                      row.cellColors?.feeStatus || row.rowColor
+                                        ? ''
+                                        : rowPaid
+                                          ? 'text-emerald-700'
+                                          : row.paidAmount > 0 && row.pendingAmount > 0
+                                            ? 'text-amber-700'
+                                            : 'text-rose-700'
+                                    }`}
+                                  >
+                                    {rowPaid
+                                      ? 'Paid'
+                                      : row.paidAmount > 0 && row.pendingAmount > 0
+                                        ? 'Unpaid (Half Paid)'
+                                        : 'Unpaid'}
+                                  </span>
+                                );
+                              })()}
                             </td>
                             {extraPreviewHeaders.map((h) => {
                               const cleanKey = alignHeaderToCommonSchema(h, commonExtraHeadings).trim().slice(0, 50);
@@ -1584,10 +1735,18 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
                             <td className="px-2.5 py-1.5 whitespace-nowrap bg-white/85">
                               {errMsg ? (
                                 <span className="text-[11px] font-semibold text-amber-900">{errMsg}</span>
-                              ) : row.operation === 'update' ? (
-                                <span className="text-[11px] font-bold text-blue-700">
-                                  Update #{row.matchedExisting?.serialNumber}
-                                </span>
+                              ) : row.operation === 'update' && row.matchedExisting ? (
+                                (() => {
+                                  const prevFee = existingFeeMap.get(row.matchedExisting.studentId);
+                                  return (
+                                    <span className="text-[11px] font-bold text-blue-700">
+                                      Update #{row.matchedExisting.serialNumber}
+                                      {mode === 'fee_sync' && prevFee
+                                        ? ` (Was ₹${prevFee.pendingAmount.toLocaleString('en-IN')} baki)`
+                                        : ''}
+                                    </span>
+                                  );
+                                })()
                               ) : (
                                 <span className="text-[11px] font-bold text-emerald-700">New Row</span>
                               )}
@@ -1619,11 +1778,32 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
 
         {/* Footer */}
         <div className="px-6 py-3.5 border-t border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-3 shrink-0">
-          <p className="text-[11px] text-slate-600">
-            Edit Rights: <strong>Super Admin</strong> edits all centres ·{' '}
-            <strong>Centre Head</strong> edits own centre · <strong>Workers</strong> edit own department only.
-          </p>
+          <div className="flex flex-wrap items-center gap-2.5 text-[11px] text-slate-600">
+            <span>
+              Edit Rights: <strong>Super Admin</strong> edits all centres ·{' '}
+              <strong>Centre Head</strong> edits own centre · <strong>Workers</strong> edit own department only.
+            </span>
+            {issueRows.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setPreviewFilter('issues')}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-100 text-amber-950 border border-amber-300 font-bold hover:bg-amber-200"
+              >
+                <AlertCircle className="w-3 h-3 text-amber-700" />
+                {issueRows.length} row(s) skipped ({readyRows.length}/{previewRows.length} uploading) — View
+              </button>
+            )}
+          </div>
           <div className="flex items-center gap-2.5">
+            {duplicateIssueCount > 0 && !allowDuplicateRowsInSheet && (
+              <button
+                type="button"
+                onClick={() => setAllowDuplicateRowsInSheet(true)}
+                className="px-3 py-2 text-xs font-bold text-rose-900 bg-rose-50 border border-rose-300 rounded-lg hover:bg-rose-100"
+              >
+                Include +{duplicateIssueCount} Repeat Rows
+              </button>
+            )}
             <button
               type="button"
               onClick={onClose}
@@ -1634,15 +1814,26 @@ export const BulkImportModal: React.FC<BulkImportModalProps> = ({
             </button>
             <button
               type="button"
-              disabled={importing || readyRows.length === 0}
+              disabled={
+                importing ||
+                readyRows.length === 0 ||
+                ((mode === 'fee_sync' || mode === 'academic_sync') &&
+                  skipUnmatchedNewInFeeSync &&
+                  updateReadyCount === 0) ||
+                (mode === 'fee_sync' && rowsWithAnyFeeCount === 0 && defaultTotalFee === 0)
+              }
               onClick={handleImport}
               className="px-5 py-2 text-xs font-bold text-white btn-crimson-gloss rounded-lg disabled:opacity-50"
             >
               {importing
                 ? importStatusText || `Syncing ${readyRows.length} Students...`
-                : updateReadyCount > 0
-                  ? `Sync ${newReadyCount} New + ${updateReadyCount} Updates`
-                  : `Import ${readyRows.length} Students & Open Full Sheet`}
+                : feeSyncOnlyMode
+                  ? `Update Fees for ${updateReadyCount} Matched${!skipUnmatchedNewInFeeSync && newReadyCount > 0 ? ` + ${newReadyCount} New` : ''}`
+                  : academicSyncOnlyMode
+                    ? `Update Subjects for ${updateReadyCount} Matched${!skipUnmatchedNewInFeeSync && newReadyCount > 0 ? ` + ${newReadyCount} New` : ''}`
+                    : updateReadyCount > 0
+                      ? `Sync ${newReadyCount} New + ${updateReadyCount} Updates`
+                      : `Import ${readyRows.length} Students & Open Full Sheet`}
             </button>
           </div>
         </div>

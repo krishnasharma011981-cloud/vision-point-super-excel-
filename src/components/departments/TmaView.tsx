@@ -1,11 +1,26 @@
-import { ClipboardCheck, Download, MessageCircle, Phone, Search, X } from 'lucide-react';
+import { ClipboardCheck, Download, FileSpreadsheet, MessageCircle, Phone, Search, Trash2, X } from 'lucide-react';
 import React, { useMemo, useState } from 'react';
 import { CENTRE_MAP } from '../../constants/centres';
 import { buildTelHref, buildWhatsAppHref, maskMobileNumber } from '../../lib/analyticsMath';
-import { buildContextualSerialMap, exportToCsv } from '../../lib/csvUtils';
+import {
+  buildContextualSerialMap,
+  countStudentSubjects,
+  exportToCsv,
+  isMockSubjectValue,
+  sanitizeRealSubject,
+} from '../../lib/csvUtils';
 import { verifyOperationLocation } from '../../lib/securityClient';
-import { upsertTmaRecord } from '../../services/firestoreService';
-import type { CentreId, EditRequest, Student, TmaRecord, TmaStatus, UserAccount } from '../../types/domain';
+import { clearMockSubjectsFromStudents, upsertTmaRecord } from '../../services/firestoreService';
+import type {
+  CentreId,
+  EditRequest,
+  ExcelSheetConfig,
+  Student,
+  TmaRecord,
+  TmaStatus,
+  UserAccount,
+} from '../../types/domain';
+import { BulkImportModal } from '../BulkImportModal';
 import {
   AskEditPermissionModal,
   DepartmentPendingRequestsPanel,
@@ -17,6 +32,7 @@ interface TmaViewProps {
   tmaRecords: TmaRecord[];
   employees: UserAccount[];
   editRequests?: EditRequest[];
+  sheetConfigs?: ExcelSheetConfig[];
   currentUser: UserAccount;
   selectedCentreFilter: CentreId | 'all';
   globalSearch: string;
@@ -28,6 +44,7 @@ export const TmaView: React.FC<TmaViewProps> = ({
   tmaRecords,
   employees,
   editRequests = [],
+  sheetConfigs = [],
   currentUser,
   selectedCentreFilter,
   globalSearch,
@@ -37,10 +54,12 @@ export const TmaView: React.FC<TmaViewProps> = ({
   const [statusFilter, setStatusFilter] = useState('all');
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
   const [permissionStudent, setPermissionStudent] = useState<Student | null>(null);
+  const [showBulkImport, setShowBulkImport] = useState(false);
+  const [clearingMocks, setClearingMocks] = useState(false);
 
   const [tmaStatus, setTmaStatus] = useState<TmaStatus>('Pending');
   const [subjectsSubmittedCount, setSubjectsSubmittedCount] = useState('0');
-  const [totalSubjectsCount, setTotalSubjectsCount] = useState('5');
+  const [totalSubjectsCount, setTotalSubjectsCount] = useState('0');
   const [submissionDate, setSubmissionDate] = useState('');
   const [assignedEmployeeUid, setAssignedEmployeeUid] = useState('');
   const [remarks, setRemarks] = useState('');
@@ -55,6 +74,23 @@ export const TmaView: React.FC<TmaViewProps> = ({
   const effectiveCentre =
     currentUser.role === 'super_admin' ? selectedCentreFilter : currentUser.centreId;
   const combinedSearch = (search || globalSearch).trim().toLowerCase();
+  const canBatchSync = currentUser.role === 'super_admin' || currentUser.role === 'centre_head';
+  const cleanupDone = sheetConfigs.some((c) => c.configId === 'subject_mock_cleanup_v1');
+
+  const getDisplaySubject = (subject?: string): string => {
+    if (!cleanupDone && isMockSubjectValue(subject)) return '';
+    return sanitizeRealSubject(subject, { stripLegacyDefaultList: false });
+  };
+
+  const scopedStudents = useMemo(
+    () => students.filter((s) => (effectiveCentre === 'all' ? true : s.centreId === effectiveCentre)),
+    [students, effectiveCentre],
+  );
+
+  const mockSubjectStudentsCount = useMemo(
+    () => scopedStudents.filter((s) => isMockSubjectValue(s.subject)).length,
+    [scopedStudents],
+  );
 
   const displaySerialMap = useMemo(
     () => buildContextualSerialMap(students, effectiveCentre),
@@ -62,18 +98,38 @@ export const TmaView: React.FC<TmaViewProps> = ({
   );
 
   const rows = useMemo(() => {
-    return students
-      .filter((s) => (effectiveCentre === 'all' ? true : s.centreId === effectiveCentre))
+    return scopedStudents
       .map((s) => {
         const rec = recMap.get(s.studentId);
         const lockedForEmployee =
           currentUser.role === 'employee' && (Boolean(s.tmaLocked) || Boolean(rec?.employeeLocked));
+        const displaySubject = getDisplaySubject(s.subject);
+        const realSubCount = countStudentSubjects(displaySubject);
+        const rawRecTotal = rec?.totalSubjectsCount ?? 0;
+        const effectiveTotalSubjects =
+          realSubCount > 0
+            ? rawRecTotal > 0 && rawRecTotal !== 5
+              ? rawRecTotal
+              : realSubCount
+            : cleanupDone && rawRecTotal > 0 && rawRecTotal !== 5
+              ? rawRecTotal
+              : 0;
+        const resolvedTmaStatus = rec?.tmaStatus || s.tmaStatus;
+        const effectiveSubmittedCount =
+          effectiveTotalSubjects === 0
+            ? 0
+            : rec?.subjectsSubmittedCount !== undefined
+              ? Math.min(effectiveTotalSubjects, rec.subjectsSubmittedCount)
+              : resolvedTmaStatus === 'Submitted'
+                ? effectiveTotalSubjects
+                : 0;
         return {
           student: s,
           displaySerial: displaySerialMap.get(s.studentId) ?? s.serialNumber,
-          tmaStatus: rec?.tmaStatus || s.tmaStatus,
-          subjectsSubmittedCount: rec?.subjectsSubmittedCount ?? (s.tmaStatus === 'Submitted' ? 5 : 0),
-          totalSubjectsCount: rec?.totalSubjectsCount ?? 5,
+          displaySubject,
+          tmaStatus: resolvedTmaStatus,
+          subjectsSubmittedCount: effectiveSubmittedCount,
+          totalSubjectsCount: effectiveTotalSubjects,
           submissionDate: rec?.submissionDate || '—',
           assignedEmployeeName: rec?.assignedEmployeeName || s.assignedEmployeeName || 'Unassigned',
           remarks: rec?.remarks || '',
@@ -86,11 +142,12 @@ export const TmaView: React.FC<TmaViewProps> = ({
         return (
           r.student.studentName.toLowerCase().includes(combinedSearch) ||
           r.student.studentId.toLowerCase().includes(combinedSearch) ||
-          r.student.mobileNumber.toLowerCase().includes(combinedSearch)
+          r.student.mobileNumber.toLowerCase().includes(combinedSearch) ||
+          r.displaySubject.toLowerCase().includes(combinedSearch)
         );
       })
       .sort((a, b) => a.displaySerial - b.displaySerial);
-  }, [students, recMap, effectiveCentre, statusFilter, combinedSearch, displaySerialMap, currentUser.role]);
+  }, [scopedStudents, recMap, statusFilter, combinedSearch, displaySerialMap, currentUser.role, cleanupDone]);
 
   const submittedCount = rows.filter((r) => r.tmaStatus === 'Submitted').length;
   const pendingCount = rows.filter((r) => r.tmaStatus !== 'Submitted').length;
@@ -101,10 +158,24 @@ export const TmaView: React.FC<TmaViewProps> = ({
       setPermissionStudent(student);
       return;
     }
+    const displaySubj = getDisplaySubject(student.subject);
+    const realCount = countStudentSubjects(displaySubj);
+    const rawRecTotal = rec?.totalSubjectsCount ?? 0;
+    const effectiveTotal =
+      realCount > 0 ? (rawRecTotal > 0 && rawRecTotal !== 5 ? rawRecTotal : realCount) : 0;
+    const effectiveSubmitted =
+      effectiveTotal === 0
+        ? 0
+        : rec?.subjectsSubmittedCount !== undefined
+          ? Math.min(effectiveTotal, rec.subjectsSubmittedCount)
+          : student.tmaStatus === 'Submitted'
+            ? effectiveTotal
+            : 0;
+
     setEditingStudent(student);
     setTmaStatus(rec?.tmaStatus || student.tmaStatus);
-    setSubjectsSubmittedCount(String(rec?.subjectsSubmittedCount ?? (student.tmaStatus === 'Submitted' ? 5 : 0)));
-    setTotalSubjectsCount(String(rec?.totalSubjectsCount ?? 5));
+    setSubjectsSubmittedCount(String(effectiveSubmitted));
+    setTotalSubjectsCount(String(effectiveTotal));
     setSubmissionDate(rec?.submissionDate || new Date().toISOString().slice(0, 10));
     setAssignedEmployeeUid(rec?.assignedEmployeeUid || student.assignedEmployeeUid || currentUser.uid);
     setRemarks(rec?.remarks || '');
@@ -136,7 +207,7 @@ export const TmaView: React.FC<TmaViewProps> = ({
       }
 
       const emp = employees.find((u) => u.uid === assignedEmployeeUid);
-      const totalSub = Math.min(20, Math.max(1, Number(totalSubjectsCount) || 5));
+      const totalSub = Math.min(20, Math.max(0, Number(totalSubjectsCount) || 0));
       const subCount = Math.min(totalSub, Math.max(0, Number(subjectsSubmittedCount) || 0));
 
       await upsertTmaRecord(
@@ -164,17 +235,44 @@ export const TmaView: React.FC<TmaViewProps> = ({
     }
   };
 
+  const handleClearMockSubjects = async () => {
+    if (!canBatchSync || mockSubjectStudentsCount === 0) return;
+    setClearingMocks(true);
+    try {
+      const targetCentre = effectiveCentre === 'all' ? currentUser.centreId : effectiveCentre;
+      const loc = await verifyOperationLocation(currentUser, 'CLEAR_MOCK_SUBJECTS_TMA', targetCentre);
+      if (!loc.allowed) {
+        onNotify('Access Denied', loc.error || 'Physical presence required at assigned centre.', 'error');
+        setClearingMocks(false);
+        return;
+      }
+      const res = await clearMockSubjectsFromStudents(scopedStudents, currentUser, {
+        locationVerified: true,
+      });
+      onNotify(
+        'Mock Subjects Cleared',
+        `Removed hardcoded mock subjects from ${res.clearedCount} student record(s). Upload Excel to populate real subjects.`,
+        'success',
+      );
+    } catch (err) {
+      onNotify('Clear Failed', err instanceof Error ? err.message : 'Unable to clear mock subjects.', 'error');
+    } finally {
+      setClearingMocks(false);
+    }
+  };
+
   const handleExport = () => {
     exportToCsv(
       `tma-report-${effectiveCentre}.csv`,
-      ['Student ID', 'Student Name', 'Mobile', 'Centre', 'TMA Status', 'Subjects Submitted', 'Total Subjects', 'Submission Date', 'Assigned', 'Remarks'],
+      ['Student ID', 'Student Name', 'Subjects', 'Mobile', 'Centre', 'TMA Status', 'Subjects Submitted', 'Total Subjects', 'Submission Date', 'Assigned', 'Remarks'],
       rows.map((r) => [
         r.student.studentId,
         r.student.studentName,
+        r.displaySubject || '—',
         maskMobileNumber(r.student.mobileNumber),
         CENTRE_MAP[r.student.centreId].name,
         r.tmaStatus,
-        r.subjectsSubmittedCount,
+        r.totalSubjectsCount > 0 ? r.subjectsSubmittedCount : 0,
         r.totalSubjectsCount,
         r.submissionDate,
         r.assignedEmployeeName,
@@ -209,7 +307,7 @@ export const TmaView: React.FC<TmaViewProps> = ({
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search student ID, name, or mobile..."
+              placeholder="Search student ID, name, mobile, or subject..."
               className="w-full pl-9 pr-3.5 py-2 text-sm bg-white text-black placeholder:text-zinc-500 border border-zinc-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-black"
             />
           </div>
@@ -224,14 +322,37 @@ export const TmaView: React.FC<TmaViewProps> = ({
             <option value="Not Submitted">Not Submitted</option>
           </select>
         </div>
-        <button
-          type="button"
-          onClick={handleExport}
-          className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-black bg-white border border-zinc-300 rounded-lg hover:bg-zinc-100 whitespace-nowrap"
-        >
-          <Download className="w-3.5 h-3.5" />
-          Export TMA Report
-        </button>
+        <div className="flex flex-wrap items-center gap-2.5">
+          {canBatchSync && mockSubjectStudentsCount > 0 && (
+            <button
+              type="button"
+              disabled={clearingMocks}
+              onClick={handleClearMockSubjects}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-amber-950 bg-amber-50 border border-amber-300 rounded-lg hover:bg-amber-100 whitespace-nowrap disabled:opacity-50"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              {clearingMocks ? 'Clearing...' : `Clear Mock Subjects (${mockSubjectStudentsCount})`}
+            </button>
+          )}
+          {canBatchSync && (
+            <button
+              type="button"
+              onClick={() => setShowBulkImport(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white btn-crimson-gloss rounded-lg whitespace-nowrap"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5" />
+              Update TMA &amp; Subjects from Excel
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={handleExport}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-black bg-white border border-zinc-300 rounded-lg hover:bg-zinc-100 whitespace-nowrap"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Export TMA Report
+          </button>
+        </div>
       </div>
 
       <DepartmentPendingRequestsPanel
@@ -254,6 +375,7 @@ export const TmaView: React.FC<TmaViewProps> = ({
               <thead>
                 <tr className="border-b border-zinc-200 bg-zinc-50 text-[11px] font-bold text-zinc-700 uppercase tracking-wider">
                   <th className="py-3 px-4">Student</th>
+                  <th className="py-3 px-4">Subjects</th>
                   <th className="py-3 px-4">Contact</th>
                   <th className="py-3 px-4">TMA Status</th>
                   <th className="py-3 px-4 text-right">Files Submitted</th>
@@ -271,6 +393,9 @@ export const TmaView: React.FC<TmaViewProps> = ({
                       <p className="text-[11px] font-mono text-slate-600">
                         S.No #{String(r.displaySerial || 1).padStart(4, '0')} · {CENTRE_MAP[r.student.centreId].code}
                       </p>
+                    </td>
+                    <td className="py-3 px-4 text-slate-800 font-medium max-w-[240px] whitespace-normal leading-snug">
+                      {r.displaySubject || '—'}
                     </td>
                     <td className="py-3 px-4 font-mono text-zinc-800 whitespace-nowrap">
                       <div className="inline-flex items-center gap-2">
@@ -325,7 +450,7 @@ export const TmaView: React.FC<TmaViewProps> = ({
                       </span>
                     </td>
                     <td className="py-3 px-4 text-right font-mono tabular-nums font-semibold text-black">
-                      {r.subjectsSubmittedCount} / {r.totalSubjectsCount}
+                      {r.totalSubjectsCount > 0 ? `${r.subjectsSubmittedCount} / ${r.totalSubjectsCount}` : '—'}
                     </td>
                     <td className="py-3 px-4 font-mono text-zinc-700">{r.submissionDate}</td>
                     <td className="py-3 px-4 text-zinc-800">{r.assignedEmployeeName}</td>
@@ -360,6 +485,10 @@ export const TmaView: React.FC<TmaViewProps> = ({
                 <h3 className="text-base font-bold text-slate-900">Update TMA Submission</h3>
                 <p className="text-xs text-slate-600 font-mono mt-0.5">
                   {editingStudent.studentName} · S.No #{String(displaySerialMap.get(editingStudent.studentId) ?? (editingStudent.serialNumber || 1)).padStart(4, '0')} · {CENTRE_MAP[editingStudent.centreId]?.code}
+                </p>
+                <p className="text-xs text-slate-800 mt-1">
+                  <span className="font-semibold text-slate-600">Subjects:</span>{' '}
+                  {getDisplaySubject(editingStudent.subject) || '—'}
                 </p>
                 <div className="mt-1.5 inline-flex items-center gap-2 text-xs font-mono text-slate-700">
                   <span>{maskMobileNumber(editingStudent.mobileNumber)}</span>
@@ -441,7 +570,7 @@ export const TmaView: React.FC<TmaViewProps> = ({
                   <label className="block text-xs font-semibold text-black mb-1">Total Subjects</label>
                   <input
                     type="number"
-                    min={1}
+                    min={0}
                     max={20}
                     value={totalSubjectsCount}
                     onChange={(e) => setTotalSubjectsCount(e.target.value)}
@@ -503,6 +632,25 @@ export const TmaView: React.FC<TmaViewProps> = ({
         onClose={() => setPermissionStudent(null)}
         onNotify={onNotify}
       />
+
+      {showBulkImport && (
+        <BulkImportModal
+          open={showBulkImport}
+          currentUser={currentUser}
+          defaultCentreId={effectiveCentre === 'all' ? currentUser.centreId : effectiveCentre}
+          isCentreLocked={effectiveCentre !== 'all'}
+          existingStudents={students}
+          sheetConfigs={sheetConfigs}
+          mode="academic_sync"
+          defaultAcademicType="tma"
+          onClose={() => setShowBulkImport(false)}
+          onSuccess={(msg) => {
+            setShowBulkImport(false);
+            onNotify('Excel TMA & Subjects Synced', msg, 'success');
+          }}
+          onError={(title, desc) => onNotify(title, desc, 'error')}
+        />
+      )}
     </div>
   );
 };

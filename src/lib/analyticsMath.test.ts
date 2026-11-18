@@ -5,7 +5,11 @@ import {
   allocateExactPercentages,
   buildTelHref,
   buildWhatsAppHref,
+  computeFeeSyncPlanFromStudents,
   computeInstitutionalAnalytics,
+  extractFeeSignalsFromExtraColumns,
+  isAutoClearedZeroFee,
+  isFeeFullyPaid,
   maskMobileNumber,
   parseFeeNumberNullable,
   reconcileFeeNumbers,
@@ -268,3 +272,352 @@ test('computeInstitutionalAnalytics returns 0% attendance when all students are 
   assert.equal(halfUpdated.regularAttendanceCount, 1);
 });
 
+test('reconcileFeeNumbers never invents fake 12000 pending on blank rows and treats Nil/Clear pending as 0', () => {
+  const blank = reconcileFeeNumbers({});
+  assert.equal(blank.totalFee, 0);
+  assert.equal(blank.paidAmount, 0);
+  assert.equal(blank.pendingAmount, 0);
+  assert.equal(blank.explicitFeeDetected, false);
+
+  const nilPending = reconcileFeeNumbers({ totalFeeRaw: '12000', pendingAmountRaw: 'Nil' });
+  assert.equal(nilPending.totalFee, 12000);
+  assert.equal(nilPending.paidAmount, 12000);
+  assert.equal(nilPending.pendingAmount, 0);
+  assert.equal(nilPending.recoveryStatus, 'Paid');
+
+  const paidOnly = reconcileFeeNumbers({ paidAmountRaw: '8000' });
+  assert.equal(paidOnly.totalFee, 8000);
+  assert.equal(paidOnly.paidAmount, 8000);
+  assert.equal(paidOnly.pendingAmount, 0);
+  assert.equal(paidOnly.recoveryStatus, 'Paid');
+});
+
+test('resolveStudentFeeSummary & computeFeeSyncPlanFromStudents repair untouched 12000 placeholders from Excel columns without touching manual edits', () => {
+  const base = (id: string, extraColumns?: Record<string, string>): Student => ({
+    serialNumber: 1,
+    studentId: id,
+    studentName: `Student ${id}`,
+    mobileNumber: '9876543210',
+    subject: 'Hindi, English',
+    tcStatus: 'Not Received',
+    bookStatus: 'Pending',
+    classAttendanceStatus: 'Not Attending',
+    whyNios: '',
+    currentEducationStatus: '',
+    futurePlanning: '',
+    tmaStatus: 'Pending',
+    practicalStatus: 'Pending',
+    examinationStatus: 'Not Completed',
+    centreId: 'vp_lookerganj',
+    centreName: 'Vision Point Lookerganj',
+    admissionDate: '2026-11-16',
+    assignedEmployeeUid: 'u1',
+    assignedEmployeeName: 'Staff',
+    additionalRemarks: '',
+    createdBy: 'u1',
+    createdAt: '',
+    updatedBy: 'u1',
+    updatedAt: '',
+    ...(extraColumns ? { extraColumns } : {}),
+  });
+
+  const makeRec = (id: string, note: string): FeeRecoveryRecord => ({
+    studentId: id,
+    studentName: `Student ${id}`,
+    mobileNumber: '9876543210',
+    centreId: 'vp_lookerganj',
+    recoveryStatus: 'Pending',
+    followUpStatus: 'Scheduled',
+    totalFee: 12000,
+    paidAmount: 0,
+    pendingAmount: 12000,
+    assignedEmployeeUid: 'u1',
+    assignedEmployeeName: 'Staff',
+    followUpNotes: note,
+    lastContactDate: '2026-11-16',
+    nextFollowUpDate: '2026-11-16',
+    createdBy: 'u1',
+    createdAt: '',
+    updatedBy: 'u1',
+    updatedAt: '',
+  });
+
+  // S1: Untouched auto-import 12000 placeholder, but Excel extraColumns has installments + Decided Fee
+  const s1 = base('S1', {
+    'Decided Fee': '15000',
+    '1st Installment': '6000',
+    '2nd Installment': '4000',
+    'TMA Fees (Rs)': '500',
+    'Exam Fees (Rs)': '1500',
+  });
+  const r1 = makeRec('S1', 'Imported via Excel Bulk Import.');
+
+  // S2: Untouched auto-import 12000 placeholder, NO fees anywhere in Excel
+  const s2 = base('S2', { Batch: 'Morning', 'Fees Remark': 'fees low' });
+  const r2 = makeRec('S2', 'Imported via Excel Bulk Import.');
+
+  // S3: Manually verified 12000 fee with custom call note (must NOT be flagged untouched default)
+  const s3 = base('S3');
+  const r3 = makeRec('S3', 'Called parent, promised to pay 12000 next Monday.');
+
+  // S4: Missing fee_recovery doc and no fees -> 0 (not 12000)
+  const s4 = base('S4');
+
+  const resolved1 = resolveStudentFeeSummary(s1, r1);
+  assert.equal(resolved1.totalFee, 15000);
+  assert.equal(resolved1.paidAmount, 10000);
+  assert.equal(resolved1.pendingAmount, 5000);
+  assert.equal(resolved1.tmaFee, 500);
+  assert.equal(resolved1.examFee, 1500);
+  assert.equal(resolved1.recoveryStatus, 'Partial');
+
+  const resolved4 = resolveStudentFeeSummary(s4, undefined);
+  assert.equal(resolved4.totalFee, 0);
+  assert.equal(resolved4.pendingAmount, 0);
+  assert.equal(resolved4.hasFeeData, false);
+
+  const planKeep12k = computeFeeSyncPlanFromStudents([s1, s2, s3, s4], [r1, r2, r3]);
+  assert.equal(planKeep12k.excelSyncCount, 1);
+  assert.equal(planKeep12k.missingRecordCount, 1);
+  assert.equal(planKeep12k.untouched12kCount, 1); // Only S2 (S3 has manual note, S1 matched Excel columns)
+
+  const planReset12k = computeFeeSyncPlanFromStudents([s1, s2, s3, s4], [r1, r2, r3], {
+    resetUntouched12000Defaults: true,
+  });
+  const s2Item = planReset12k.items.find((i) => i.student.studentId === 'S2');
+  const s3Item = planReset12k.items.find((i) => i.student.studentId === 'S3');
+  assert.equal(s2Item?.totalFee, 0);
+  assert.equal(s2Item?.pendingAmount, 0);
+  assert.equal(s2Item?.reason, 'reset_12k_default');
+  assert.equal(s3Item, undefined);
+});
+
+test('computeFeeSyncPlanFromStudents cleans all historical auto-generated 12000 notes when resetUntouched12000Defaults is enabled', () => {
+  const historicalNotes = [
+    'Synced with updated Excel sheet (no fee due)',
+    'Initialized fee record from student sheet',
+    'Fees synced from student Excel columns',
+    'Fees updated from uploaded Excel',
+    '',
+  ];
+  const stuList: Student[] = historicalNotes.map((_, idx) => ({
+    serialNumber: idx + 1,
+    studentId: `H${idx}`,
+    studentName: `Historical ${idx}`,
+    mobileNumber: '9876543210',
+    subject: 'Hindi',
+    tcStatus: 'Not Received',
+    bookStatus: 'Pending',
+    classAttendanceStatus: 'Not Attending',
+    whyNios: '',
+    currentEducationStatus: '',
+    futurePlanning: '',
+    tmaStatus: 'Pending',
+    practicalStatus: 'Pending',
+    examinationStatus: 'Not Completed',
+    centreId: 'vp_lookerganj',
+    centreName: 'Vision Point Lookerganj',
+    admissionDate: '2026-11-16',
+    assignedEmployeeUid: 'u1',
+    assignedEmployeeName: 'Staff',
+    additionalRemarks: '',
+    createdBy: 'u1',
+    createdAt: '',
+    updatedBy: 'u1',
+    updatedAt: '',
+  }));
+
+  const recs: FeeRecoveryRecord[] = historicalNotes.map((note, idx) => ({
+    studentId: `H${idx}`,
+    studentName: `Historical ${idx}`,
+    mobileNumber: '9876543210',
+    centreId: 'vp_lookerganj',
+    recoveryStatus: 'Pending',
+    followUpStatus: 'Scheduled',
+    totalFee: 12000,
+    paidAmount: 0,
+    pendingAmount: 12000,
+    assignedEmployeeUid: 'u1',
+    assignedEmployeeName: 'Staff',
+    followUpNotes: note,
+    lastContactDate: '2026-11-16',
+    nextFollowUpDate: '2026-11-16',
+    createdBy: 'u1',
+    createdAt: '',
+    updatedBy: 'u1',
+    updatedAt: '',
+  }));
+
+  const plan = computeFeeSyncPlanFromStudents(stuList, recs, {
+    resetUntouched12000Defaults: true,
+  });
+  assert.equal(plan.untouched12kCount, historicalNotes.length);
+  assert.equal(plan.items.length, historicalNotes.length);
+  assert.ok(plan.items.every((i) => i.totalFee === 0 && i.pendingAmount === 0));
+});
+
+test('isAutoClearedZeroFee rescues fee signals from extraColumns including Kist installments without overriding manual scholarship zero records', () => {
+  const autoClearedRec: FeeRecoveryRecord = {
+    studentId: 'Z1',
+    studentName: 'Ayush Shukla',
+    mobileNumber: '8412345678',
+    centreId: 'vp_lookerganj',
+    recoveryStatus: 'Pending',
+    followUpStatus: 'Scheduled',
+    totalFee: 0,
+    paidAmount: 0,
+    pendingAmount: 0,
+    assignedEmployeeUid: 'u1',
+    assignedEmployeeName: 'Staff',
+    followUpNotes: 'Cleared untouched default ₹12,000 placeholder to ₹0.',
+    lastContactDate: '2026-11-16',
+    nextFollowUpDate: '2026-11-16',
+    createdBy: 'u1',
+    createdAt: '',
+    updatedBy: 'u1',
+    updatedAt: '',
+  };
+
+  const manualZeroRec: FeeRecoveryRecord = {
+    ...autoClearedRec,
+    studentId: 'Z2',
+    studentName: 'Manual Scholarship',
+    followUpNotes: 'Full scholarship approved by principal',
+  };
+
+  assert.equal(isAutoClearedZeroFee(autoClearedRec), true);
+  assert.equal(isAutoClearedZeroFee(manualZeroRec), false);
+
+  const studentWithKist: Student = {
+    serialNumber: 63,
+    studentId: 'Z1',
+    studentName: 'Ayush Shukla',
+    mobileNumber: '8412345678',
+    subject: 'Hindi, English',
+    tcStatus: 'Not Received',
+    bookStatus: 'Pending',
+    classAttendanceStatus: 'Not Attending',
+    whyNios: '',
+    currentEducationStatus: '',
+    futurePlanning: '',
+    tmaStatus: 'Pending',
+    practicalStatus: 'Pending',
+    examinationStatus: 'Not Completed',
+    centreId: 'vp_lookerganj',
+    centreName: 'Vision Point Lookerganj',
+    admissionDate: '2026-11-16',
+    assignedEmployeeUid: 'u1',
+    assignedEmployeeName: 'Staff',
+    additionalRemarks: '',
+    createdBy: 'u1',
+    createdAt: '',
+    updatedBy: 'u1',
+    updatedAt: '',
+    extraColumns: {
+      'Total Fee': '15000',
+      '1st Kist': '5000',
+      '2nd Kist': '3000',
+    },
+  };
+
+  const studentManualZero: Student = {
+    ...studentWithKist,
+    studentId: 'Z2',
+    studentName: 'Manual Scholarship',
+  };
+
+  const signals = extractFeeSignalsFromExtraColumns(studentWithKist.extraColumns);
+  assert.equal(signals.totalFeeRaw, '15000');
+  assert.equal(signals.paidAmountRaw, '8000');
+  assert.equal(signals.hasMainFeeSignals, true);
+
+  const resolvedAutoZero = resolveStudentFeeSummary(studentWithKist, autoClearedRec);
+  assert.equal(resolvedAutoZero.totalFee, 15000);
+  assert.equal(resolvedAutoZero.paidAmount, 8000);
+  assert.equal(resolvedAutoZero.pendingAmount, 7000);
+  assert.equal(resolvedAutoZero.recoveryStatus, 'Partial');
+
+  const resolvedManualZero = resolveStudentFeeSummary(studentManualZero, manualZeroRec);
+  assert.equal(resolvedManualZero.totalFee, 0);
+  assert.equal(resolvedManualZero.paidAmount, 0);
+  assert.equal(resolvedManualZero.pendingAmount, 0);
+
+  const syncPlan = computeFeeSyncPlanFromStudents(
+    [studentWithKist, studentManualZero],
+    [autoClearedRec, manualZeroRec],
+  );
+  assert.equal(syncPlan.excelSyncCount, 1);
+  assert.equal(syncPlan.items.length, 1);
+  assert.equal(syncPlan.items[0].student.studentId, 'Z1');
+  assert.equal(syncPlan.items[0].operation, 'update');
+  assert.equal(syncPlan.items[0].pendingAmount, 7000);
+});
+
+test('isFeeFullyPaid & reconcileFeeNumbers classify Paid vs Unpaid cleanly across numbers, text words, and ₹0 resets', () => {
+  // Total=15000, Paid="Paid" text -> Paid
+  const textPaid = reconcileFeeNumbers({ totalFeeRaw: '15000', paidAmountRaw: 'Paid' });
+  assert.equal(textPaid.totalFee, 15000);
+  assert.equal(textPaid.paidAmount, 15000);
+  assert.equal(textPaid.pendingAmount, 0);
+  assert.equal(isFeeFullyPaid(textPaid), true);
+
+  // Only Pending="Nil" -> Paid
+  const nilPendingOnly = reconcileFeeNumbers({ pendingAmountRaw: 'Nil' });
+  assert.equal(nilPendingOnly.recoveryStatus, 'Paid');
+  assert.equal(isFeeFullyPaid(nilPendingOnly), true);
+
+  // Partial payment (Total=15000, Paid=8000, Pending=7000) -> Unpaid
+  const halfPaid = reconcileFeeNumbers({ totalFeeRaw: '15000', paidAmountRaw: '8000' });
+  assert.equal(halfPaid.recoveryStatus, 'Partial');
+  assert.equal(halfPaid.pendingAmount, 7000);
+  assert.equal(isFeeFullyPaid(halfPaid), false);
+
+  // Explicit reset to ₹0 must stay ₹0 and classify as Unpaid even if old extraColumns existed
+  const resetRec: FeeRecoveryRecord = {
+    studentId: 'R0',
+    studentName: 'Reset Student',
+    mobileNumber: '9876543210',
+    centreId: 'vp_lookerganj',
+    recoveryStatus: 'Pending',
+    followUpStatus: 'Scheduled',
+    totalFee: 0,
+    paidAmount: 0,
+    pendingAmount: 0,
+    tmaFee: 0,
+    examFee: 0,
+    assignedEmployeeUid: 'u1',
+    assignedEmployeeName: 'Staff',
+    followUpNotes: 'Fees reset to ₹0 — ready for Excel upload.',
+    lastContactDate: '2026-11-17',
+    nextFollowUpDate: '2026-11-17',
+    createdBy: 'u1',
+    createdAt: '',
+    updatedBy: 'u1',
+    updatedAt: '',
+  };
+  assert.equal(isAutoClearedZeroFee(resetRec), false);
+  const resolvedReset = resolveStudentFeeSummary(
+    { tmaFee: 500, examFee: 1500, extraColumns: { 'Total Fee': '12000', 'Paid': '5000' } },
+    resetRec,
+  );
+  assert.equal(resolvedReset.totalFee, 0);
+  assert.equal(resolvedReset.paidAmount, 0);
+  assert.equal(resolvedReset.pendingAmount, 0);
+  assert.equal(isFeeFullyPaid(resolvedReset), false);
+});
+
+test('extractFeeSignalsFromExtraColumns treats Left Fees as pendingAmountRaw (unpaid) and never as totalFeeRaw', () => {
+  const leftSignals = extractFeeSignalsFromExtraColumns({
+    Paid: '7500',
+    'Left Fees': '4500',
+  });
+  assert.equal(leftSignals.totalFeeRaw, '');
+  assert.equal(leftSignals.paidAmountRaw, '7500');
+  assert.equal(leftSignals.pendingAmountRaw, '4500');
+
+  const resolved = resolveStudentFeeSummary({ extraColumns: { Paid: '7500', 'Left Fees': '4500' } }, undefined);
+  assert.equal(resolved.totalFee, 12000);
+  assert.equal(resolved.paidAmount, 7500);
+  assert.equal(resolved.pendingAmount, 4500);
+  assert.equal(isFeeFullyPaid(resolved), false);
+});

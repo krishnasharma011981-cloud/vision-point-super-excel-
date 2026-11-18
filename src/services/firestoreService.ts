@@ -20,6 +20,8 @@ import {
   DEPARTMENT_LABELS,
   isBootstrappedOwnerEmail,
 } from '../constants/centres';
+import { computeFeeSyncPlanFromStudents, isUntouchedAutoImportDefaultFee } from '../lib/analyticsMath';
+import { countStudentSubjects, isMockSubjectValue, sanitizeRealSubject } from '../lib/csvUtils';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import type {
   ActivityLog,
@@ -569,7 +571,9 @@ export async function createStudentRecord(
         studentName: studentInput.studentName,
         centreId: studentInput.centreId,
         admissionStatus: 'Confirmed',
-        stream: options?.stream || studentInput.subject.slice(0, 80),
+        stream: (
+          options?.stream || sanitizeRealSubject(studentInput.subject, { stripLegacyDefaultList: false })
+        ).slice(0, 80),
         niosPurpose: studentInput.whyNios,
         academicBackground: studentInput.currentEducationStatus,
         followUpStatus: 'Completed',
@@ -593,7 +597,7 @@ export async function createStudentRecord(
 
     if (options?.createDepartmentSkeletons && (actor.role === 'super_admin' || actor.role === 'centre_head')) {
       const paidAmount = Math.max(0, Math.round(Number(options.paidAmount ?? 0)));
-      const totalFee = Math.max(paidAmount, Math.round(Number(options.totalFee ?? 12000)));
+      const totalFee = Math.max(paidAmount, Math.round(Number(options.totalFee ?? 0)));
       const pendingAmount = Math.max(0, totalFee - paidAmount);
       const batch = writeBatch(db);
       batch.set(doc(db, 'fee_recovery', sid), {
@@ -601,8 +605,13 @@ export async function createStudentRecord(
         studentName: studentInput.studentName,
         mobileNumber: studentInput.mobileNumber,
         centreId: studentInput.centreId,
-        recoveryStatus: pendingAmount === 0 ? 'Paid' : paidAmount > 0 ? 'Partial' : 'Pending',
-        followUpStatus: pendingAmount === 0 ? 'Closed' : 'Scheduled',
+        recoveryStatus:
+          totalFee > 0 && pendingAmount === 0
+            ? 'Paid'
+            : paidAmount > 0 && pendingAmount > 0
+              ? 'Partial'
+              : 'Pending',
+        followUpStatus: totalFee > 0 && pendingAmount === 0 ? 'Closed' : 'Scheduled',
         totalFee,
         paidAmount,
         pendingAmount,
@@ -633,13 +642,14 @@ export async function createStudentRecord(
         updatedBy: actor.uid,
         updatedAt: serverTimestamp(),
       });
+      const realSubCount = countStudentSubjects(studentInput.subject);
       batch.set(doc(db, 'tma_records', sid), {
         studentId: sid,
         studentName: studentInput.studentName,
         centreId: studentInput.centreId,
         tmaStatus: studentInput.tmaStatus,
-        subjectsSubmittedCount: studentInput.tmaStatus === 'Submitted' ? 5 : 0,
-        totalSubjectsCount: 5,
+        subjectsSubmittedCount: studentInput.tmaStatus === 'Submitted' ? realSubCount : 0,
+        totalSubjectsCount: realSubCount,
         submissionDate: studentInput.tmaStatus === 'Submitted' ? studentInput.admissionDate : '',
         assignedEmployeeUid: studentInput.assignedEmployeeUid,
         assignedEmployeeName: studentInput.assignedEmployeeName,
@@ -726,6 +736,9 @@ export interface BulkImportRowPayload {
   explicitFeeDetected?: boolean;
   explicitTmaFeeDetected?: boolean;
   explicitExamFeeDetected?: boolean;
+  explicitSubjectDetected?: boolean;
+  explicitTmaDetected?: boolean;
+  explicitPracticalDetected?: boolean;
   extraColumns?: Record<string, string>;
   rowColor?: string;
   cellColors?: Record<string, string>;
@@ -734,6 +747,7 @@ export interface BulkImportRowPayload {
 export interface BulkImportExecutionResult {
   importedCount: number;
   updatedCount: number;
+  feeSyncedCount: number;
   failedRows: Array<{ studentName: string; studentId: string; error: string }>;
 }
 
@@ -772,9 +786,14 @@ export async function bulkImportStudentsBatch(
   rows: BulkImportRowPayload[],
   actor: UserAccount,
   locationVerified: boolean,
-  options?: { onProgress?: (done: number, total: number) => void },
+  options?: {
+    onProgress?: (done: number, total: number) => void;
+    feeSyncOnly?: boolean;
+    academicSyncOnly?: boolean;
+    forceSyncFees?: boolean;
+  },
 ): Promise<BulkImportExecutionResult> {
-  if (rows.length === 0) return { importedCount: 0, updatedCount: 0, failedRows: [] };
+  if (rows.length === 0) return { importedCount: 0, updatedCount: 0, feeSyncedCount: 0, failedRows: [] };
 
   // Guarantee canonical centres exist so Firestore rules `exists(/centres/{centreId})` never blocks Super Admin
   if (actor.role === 'super_admin') {
@@ -795,18 +814,108 @@ export async function bulkImportStudentsBatch(
     }
   }
 
-  const actorName = actor.fullName.slice(0, 100);
+  const actorName = (actor.fullName || 'Staff').trim().slice(0, 100) || 'Staff';
   const canCreateSkeletons = actor.role === 'super_admin' || actor.role === 'centre_head';
+  const feeSyncOnly = Boolean(options?.feeSyncOnly);
+  const academicSyncOnly = Boolean(options?.academicSyncOnly) && !feeSyncOnly;
   const failedRows: Array<{ studentName: string; studentId: string; error: string }> = [];
   let importedCount = 0;
   let updatedCount = 0;
+  let feeSyncedCount = 0;
+  const seenIdsInRun = new Set<string>();
+  const year = new Date().getFullYear();
+
+  const pauseMs = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  const isTransientFirestoreError = (err: unknown): boolean => {
+    const code = String((err as { code?: string })?.code ?? '').toLowerCase();
+    const msg = String((err as { message?: string })?.message ?? err ?? '').toLowerCase();
+    return (
+      code.includes('unavailable') ||
+      code.includes('aborted') ||
+      code.includes('deadline-exceeded') ||
+      code.includes('resource-exhausted') ||
+      code.includes('internal') ||
+      msg.includes('unavailable') ||
+      msg.includes('aborted') ||
+      msg.includes('deadline') ||
+      msg.includes('resource-exhausted') ||
+      msg.includes('network')
+    );
+  };
+
+  const commitWithRetry = async (commitFn: () => Promise<void>, maxRetries = 2): Promise<void> => {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        await commitFn();
+        return;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < maxRetries && isTransientFirestoreError(err)) {
+          await pauseMs(250 * (attempt + 1));
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastErr;
+  };
+
+  const getSafeMobile = (mobile?: string): string => {
+    const trimmed = String(mobile ?? '').trim().slice(0, 20);
+    return trimmed.length >= 7 ? trimmed : 'Not Provided';
+  };
+
+  const getSafeName = (name?: string): string => {
+    const trimmed = String(name ?? '').trim().slice(0, 120);
+    return trimmed.length >= 2 ? trimmed : 'Student';
+  };
+
+  const getSafeSubject = (subject?: string): string => {
+    return sanitizeRealSubject(subject, { stripLegacyDefaultList: false }).slice(0, 200);
+  };
+
+  const getSafeAdmissionDate = (dateStr?: string): string => {
+    const fallback = new Date().toISOString().slice(0, 10);
+    const trimmed = String(dateStr ?? '').trim().slice(0, 30);
+    return trimmed.length >= 4 ? trimmed : fallback;
+  };
+
+  const getSafeCentreName = (centreName: string | undefined, centreId: CentreId): string => {
+    const trimmed = String(centreName ?? CENTRE_MAP[centreId]?.name ?? 'Vision Point')
+      .trim()
+      .slice(0, 120);
+    return trimmed.length >= 2 ? trimmed : 'Vision Point';
+  };
+
+  const getSafeSerialNumber = (serial?: number): number => {
+    const n = Number(serial);
+    return Number.isFinite(n) && n >= 1 ? Math.round(n) : 1;
+  };
+
+  const makeUniqueCollisionFreeId = (r: BulkImportRowPayload): string => {
+    const code = CENTRE_MAP[r.centreId]?.code || 'VP';
+    const sn = String(getSafeSerialNumber(r.serialNumber)).padStart(4, '0');
+    let candidate = `${code}-${year}-${sn}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+    while (seenIdsInRun.has(candidate.toLowerCase())) {
+      candidate = `${code}-${year}-${sn}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+    }
+    return candidate.slice(0, 128);
+  };
+
+  const getSafeStudentId = (r: BulkImportRowPayload): string => {
+    const raw = String(r.studentId ?? '').trim().slice(0, 128);
+    if (/^[a-zA-Z0-9_-]{1,128}$/.test(raw)) return raw;
+    return makeUniqueCollisionFreeId(r);
+  };
 
   const computeFeeFields = (r: BulkImportRowPayload) => {
-    const paidAmount = Math.max(0, Math.round(Number(r.paidAmount ?? 0)));
-    const totalFee = Math.max(paidAmount, Math.round(Number(r.totalFee ?? 12000)));
+    const paidAmount = clampFeeValue(r.paidAmount ?? 0);
+    const totalFee = Math.max(paidAmount, clampFeeValue(r.totalFee ?? 0));
     const pendingAmount =
       r.pendingAmount !== undefined
-        ? Math.max(0, Math.round(Number(r.pendingAmount)))
+        ? clampFeeValue(r.pendingAmount)
         : Math.max(0, totalFee - paidAmount);
     const recoveryStatus: RecoveryStatus =
       r.recoveryStatus ||
@@ -824,12 +933,12 @@ export async function bulkImportStudentsBatch(
     const cleanExtras = sanitizeExtraColumns(r.extraColumns);
     const cleanRowColor = sanitizeRowColor(r.rowColor);
     const cleanCellColors = sanitizeCellColors(r.cellColors);
-    const safeSubject = (r.subject || '').trim().slice(0, 200) || 'General NIOS Stream';
+    const safeSubject = getSafeSubject(r.subject);
     return {
-      serialNumber: Math.max(1, Math.round(Number(r.serialNumber || 1))),
+      serialNumber: getSafeSerialNumber(r.serialNumber),
       studentId: r.studentId,
-      studentName: r.studentName.trim().slice(0, 120),
-      mobileNumber: r.mobileNumber.trim().slice(0, 20),
+      studentName: getSafeName(r.studentName),
+      mobileNumber: getSafeMobile(r.mobileNumber),
       subject: safeSubject,
       tcStatus: r.tcStatus,
       bookStatus: r.bookStatus,
@@ -841,8 +950,8 @@ export async function bulkImportStudentsBatch(
       practicalStatus: r.practicalStatus,
       examinationStatus: r.examinationStatus,
       centreId: r.centreId,
-      centreName: r.centreName.slice(0, 120),
-      admissionDate: r.admissionDate.slice(0, 30),
+      centreName: getSafeCentreName(r.centreName, r.centreId),
+      admissionDate: getSafeAdmissionDate(r.admissionDate),
       assignedEmployeeUid: actor.uid,
       assignedEmployeeName: actorName,
       additionalRemarks: (r.additionalRemarks || 'Excel Bulk Import').slice(0, 1000),
@@ -874,10 +983,10 @@ export async function bulkImportStudentsBatch(
     const cleanExtras = sanitizeExtraColumns(r.extraColumns);
     const cleanRowColor = sanitizeRowColor(r.rowColor);
     const cleanCellColors = sanitizeCellColors(r.cellColors);
-    const safeSubject = (r.subject || '').trim().slice(0, 200) || 'General NIOS Stream';
+    const safeSubject = getSafeSubject(r.subject);
     return {
-      studentName: r.studentName.trim().slice(0, 120),
-      mobileNumber: r.mobileNumber.trim().slice(0, 20),
+      studentName: getSafeName(r.studentName),
+      mobileNumber: getSafeMobile(r.mobileNumber),
       subject: safeSubject,
       tcStatus: r.tcStatus,
       bookStatus: r.bookStatus,
@@ -891,10 +1000,10 @@ export async function bulkImportStudentsBatch(
       ...(actor.role === 'super_admin'
         ? {
             centreId: r.centreId,
-            centreName: r.centreName.slice(0, 120),
+            centreName: getSafeCentreName(r.centreName, r.centreId),
           }
         : {}),
-      admissionDate: r.admissionDate.slice(0, 30),
+      admissionDate: getSafeAdmissionDate(r.admissionDate),
       additionalRemarks: (r.additionalRemarks || 'Excel Sheet Updated').slice(0, 1000),
       ...(r.explicitTmaFeeDetected ? { tmaFee: clampFeeValue(r.tmaFee) } : {}),
       ...(r.explicitExamFeeDetected ? { examFee: clampFeeValue(r.examFee) } : {}),
@@ -906,32 +1015,48 @@ export async function bulkImportStudentsBatch(
     };
   };
 
-  const addSkeletonCreates = (batch: ReturnType<typeof writeBatch>, r: BulkImportRowPayload) => {
+  const buildSkeletonPayloads = (r: BulkImportRowPayload) => {
     const sid = r.studentId;
+    const safeName = getSafeName(r.studentName);
+    const safeMobile = getSafeMobile(r.mobileNumber);
+    const safeDate = getSafeAdmissionDate(r.admissionDate);
+    const safeSubject = getSafeSubject(r.subject);
     const { totalFee, paidAmount, pendingAmount, recoveryStatus, followUpStatus } = computeFeeFields(r);
 
-    batch.set(doc(db, 'admission_records', sid), {
+    const admissionCreate = {
       studentId: sid,
-      studentName: r.studentName.slice(0, 120),
+      studentName: safeName,
       centreId: r.centreId,
-      admissionStatus: 'Confirmed',
-      stream: (r.subject || 'General NIOS Stream').slice(0, 80),
+      admissionStatus: 'Confirmed' as const,
+      stream: safeSubject.slice(0, 80),
       niosPurpose: (r.whyNios || '').slice(0, 1000),
       academicBackground: (r.currentEducationStatus || '').slice(0, 1000),
-      followUpStatus: 'Completed',
+      followUpStatus: 'Completed' as const,
       assignedEmployeeUid: actor.uid,
       assignedEmployeeName: actorName,
       remarks: (r.additionalRemarks || '').slice(0, 1000),
-      admissionDate: r.admissionDate.slice(0, 30),
+      admissionDate: safeDate,
       createdBy: actor.uid,
       createdAt: serverTimestamp(),
       updatedBy: actor.uid,
       updatedAt: serverTimestamp(),
-    });
-    batch.set(doc(db, 'fee_recovery', sid), {
+    };
+    const admissionUpdate = {
+      studentName: safeName,
+      ...(actor.role === 'super_admin' ? { centreId: r.centreId } : {}),
+      stream: admissionCreate.stream,
+      niosPurpose: admissionCreate.niosPurpose,
+      academicBackground: admissionCreate.academicBackground,
+      remarks: admissionCreate.remarks,
+      admissionDate: safeDate,
+      updatedBy: actor.uid,
+      updatedAt: serverTimestamp(),
+    };
+
+    const feeCreate = {
       studentId: sid,
-      studentName: r.studentName.slice(0, 120),
-      mobileNumber: r.mobileNumber.slice(0, 20),
+      studentName: safeName,
+      mobileNumber: safeMobile,
       centreId: r.centreId,
       recoveryStatus,
       followUpStatus,
@@ -947,16 +1072,35 @@ export async function bulkImportStudentsBatch(
       assignedEmployeeUid: actor.uid,
       assignedEmployeeName: actorName,
       followUpNotes: 'Imported via Excel Bulk Import.',
-      lastContactDate: r.admissionDate.slice(0, 30),
-      nextFollowUpDate: r.admissionDate.slice(0, 30),
+      lastContactDate: safeDate,
+      nextFollowUpDate: safeDate,
       createdBy: actor.uid,
       createdAt: serverTimestamp(),
       updatedBy: actor.uid,
       updatedAt: serverTimestamp(),
-    });
-    batch.set(doc(db, 'practical_records', sid), {
+    };
+    const feeUpdate = {
+      studentName: safeName,
+      mobileNumber: safeMobile,
+      ...(actor.role === 'super_admin' ? { centreId: r.centreId } : {}),
+      recoveryStatus,
+      followUpStatus,
+      totalFee,
+      paidAmount,
+      pendingAmount,
+      ...(r.explicitTmaFeeDetected || (r.tmaFee !== undefined && r.tmaFee > 0)
+        ? { tmaFee: clampFeeValue(r.tmaFee) }
+        : {}),
+      ...(r.explicitExamFeeDetected || (r.examFee !== undefined && r.examFee > 0)
+        ? { examFee: clampFeeValue(r.examFee) }
+        : {}),
+      updatedBy: actor.uid,
+      updatedAt: serverTimestamp(),
+    };
+
+    const practicalCreate = {
       studentId: sid,
-      studentName: r.studentName.slice(0, 120),
+      studentName: safeName,
       centreId: r.centreId,
       practicalStatus: r.practicalStatus,
       submissionStatus: r.practicalStatus === 'Completed' ? 'Submitted' : 'Not Submitted',
@@ -968,15 +1112,26 @@ export async function bulkImportStudentsBatch(
       createdAt: serverTimestamp(),
       updatedBy: actor.uid,
       updatedAt: serverTimestamp(),
-    });
-    batch.set(doc(db, 'tma_records', sid), {
+    };
+    const practicalUpdate = {
+      studentName: safeName,
+      ...(actor.role === 'super_admin' ? { centreId: r.centreId } : {}),
+      practicalStatus: r.practicalStatus,
+      submissionStatus: practicalCreate.submissionStatus,
+      completionPercentage: practicalCreate.completionPercentage,
+      updatedBy: actor.uid,
+      updatedAt: serverTimestamp(),
+    };
+
+    const realSubCount = countStudentSubjects(safeSubject);
+    const tmaCreate = {
       studentId: sid,
-      studentName: r.studentName.slice(0, 120),
+      studentName: safeName,
       centreId: r.centreId,
       tmaStatus: r.tmaStatus,
-      subjectsSubmittedCount: r.tmaStatus === 'Submitted' ? 5 : 0,
-      totalSubjectsCount: 5,
-      submissionDate: r.tmaStatus === 'Submitted' ? r.admissionDate.slice(0, 30) : '',
+      subjectsSubmittedCount: r.tmaStatus === 'Submitted' ? realSubCount : 0,
+      totalSubjectsCount: realSubCount,
+      submissionDate: r.tmaStatus === 'Submitted' ? safeDate : '',
       assignedEmployeeUid: actor.uid,
       assignedEmployeeName: actorName,
       remarks: '',
@@ -984,10 +1139,21 @@ export async function bulkImportStudentsBatch(
       createdAt: serverTimestamp(),
       updatedBy: actor.uid,
       updatedAt: serverTimestamp(),
-    });
-    batch.set(doc(db, 'online_class_records', sid), {
+    };
+    const tmaUpdate = {
+      studentName: safeName,
+      ...(actor.role === 'super_admin' ? { centreId: r.centreId } : {}),
+      tmaStatus: r.tmaStatus,
+      subjectsSubmittedCount: tmaCreate.subjectsSubmittedCount,
+      totalSubjectsCount: realSubCount,
+      submissionDate: tmaCreate.submissionDate,
+      updatedBy: actor.uid,
+      updatedAt: serverTimestamp(),
+    };
+
+    const onlineCreate = {
       studentId: sid,
-      studentName: r.studentName.slice(0, 120),
+      studentName: safeName,
       centreId: r.centreId,
       attendanceStatus: r.classAttendanceStatus,
       participationLevel:
@@ -998,7 +1164,7 @@ export async function bulkImportStudentsBatch(
             : 'Inactive',
       attendancePercentage:
         r.classAttendanceStatus === 'Regular' ? 90 : r.classAttendanceStatus === 'Irregular' ? 50 : 0,
-      lastAttendanceUpdate: r.admissionDate.slice(0, 30),
+      lastAttendanceUpdate: safeDate,
       followUpNotes: '',
       assignedEmployeeUid: actor.uid,
       assignedEmployeeName: actorName,
@@ -1006,201 +1172,624 @@ export async function bulkImportStudentsBatch(
       createdAt: serverTimestamp(),
       updatedBy: actor.uid,
       updatedAt: serverTimestamp(),
-    });
+    };
+    const onlineUpdate = {
+      studentName: safeName,
+      ...(actor.role === 'super_admin' ? { centreId: r.centreId } : {}),
+      attendanceStatus: r.classAttendanceStatus,
+      participationLevel: onlineCreate.participationLevel,
+      attendancePercentage: onlineCreate.attendancePercentage,
+      lastAttendanceUpdate: safeDate,
+      updatedBy: actor.uid,
+      updatedAt: serverTimestamp(),
+    };
+
+    return [
+      { col: 'admission_records', create: admissionCreate, update: admissionUpdate },
+      { col: 'fee_recovery', create: feeCreate, update: feeUpdate },
+      { col: 'practical_records', create: practicalCreate, update: practicalUpdate },
+      { col: 'tma_records', create: tmaCreate, update: tmaUpdate },
+      { col: 'online_class_records', create: onlineCreate, update: onlineUpdate },
+    ] as const;
   };
 
-  const syncUpdatedRowDepartments = async (r: BulkImportRowPayload) => {
-    const sid = r.studentId;
-    const { totalFee, paidAmount, pendingAmount, recoveryStatus, followUpStatus } = computeFeeFields(r);
+  const addSkeletonCreates = (batch: ReturnType<typeof writeBatch>, r: BulkImportRowPayload) => {
+    const specs = buildSkeletonPayloads(r);
+    for (const spec of specs) {
+      batch.set(doc(db, spec.col, r.studentId), spec.create);
+    }
+  };
 
-    // Sync fee_recovery (always update if fee detected, or create if missing)
-    const feeRef = doc(db, 'fee_recovery', sid);
-    const feeSnap = await getDoc(feeRef).catch(() => null);
-    if (feeSnap && feeSnap.exists()) {
-      await updateDoc(feeRef, {
-        studentName: r.studentName.slice(0, 120),
-        mobileNumber: r.mobileNumber.slice(0, 20),
-        ...(actor.role === 'super_admin' ? { centreId: r.centreId } : {}),
-        ...(r.explicitFeeDetected
-          ? {
-              recoveryStatus,
-              followUpStatus,
-              totalFee,
-              paidAmount,
-              pendingAmount,
-              followUpNotes: 'Fees synced from updated Excel sheet.',
+  const upsertSkeletonsIdempotentForRow = async (r: BulkImportRowPayload) => {
+    const specs = buildSkeletonPayloads(r);
+    for (const spec of specs) {
+      const ref = doc(db, spec.col, r.studentId);
+      try {
+        await setDoc(ref, spec.create);
+      } catch {
+        await updateDoc(ref, spec.update);
+      }
+    }
+  };
+
+  // Helper to fetch document snapshots with bounded concurrency so Firestore isn't overwhelmed
+  const fetchSnapsThrottled = async (colName: string, ids: string[]) => {
+    const snapMap = new Map<string, Record<string, unknown> | null>();
+    const readBatchSize = 15;
+    for (let j = 0; j < ids.length; j += readBatchSize) {
+      const slice = ids.slice(j, j + readBatchSize);
+      const snaps = await Promise.all(
+        slice.map(async (id) => {
+          try {
+            const s = await getDoc(doc(db, colName, id));
+            return [id, s.exists() ? (s.data() as Record<string, unknown>) : null] as const;
+          } catch {
+            return [id, null] as const;
+          }
+        }),
+      );
+      snaps.forEach(([id, data]) => snapMap.set(id, data));
+    }
+    return snapMap;
+  };
+
+  const syncFeeUpdatesChunkBatched = async (targetRows: BulkImportRowPayload[]) => {
+    if (targetRows.length === 0) return;
+    const ids = targetRows.map((r) => r.studentId);
+    const feeSnapMap = await fetchSnapsThrottled('fee_recovery', ids);
+
+    const feeWriteOps: Array<{
+      row: BulkImportRowPayload;
+      type: 'update' | 'set';
+      payload: Record<string, unknown>;
+      feeChanged: boolean;
+    }> = [];
+
+    for (const r of targetRows) {
+      const sid = r.studentId;
+      const safeName = getSafeName(r.studentName);
+      const safeMobile = getSafeMobile(r.mobileNumber);
+      const safeDate = getSafeAdmissionDate(r.admissionDate);
+      const { totalFee, paidAmount, pendingAmount, recoveryStatus, followUpStatus } = computeFeeFields(r);
+      const existingData = feeSnapMap.get(sid) as FeeRecoveryRecord | null | undefined;
+
+      if (existingData) {
+        const shouldSyncFees =
+          Boolean(r.explicitFeeDetected) ||
+          (Boolean(options?.forceSyncFees) && feeSyncOnly) ||
+          isUntouchedAutoImportDefaultFee(existingData);
+
+        const preservedMobile =
+          r.mobileNumber &&
+          r.mobileNumber.trim().length >= 7 &&
+          r.mobileNumber.trim().toLowerCase() !== 'not provided'
+            ? safeMobile
+            : existingData.mobileNumber && String(existingData.mobileNumber).trim().length >= 7
+              ? String(existingData.mobileNumber).trim().slice(0, 20)
+              : safeMobile;
+
+        feeWriteOps.push({
+          row: r,
+          type: 'update',
+          feeChanged: Boolean(shouldSyncFees || r.explicitTmaFeeDetected || r.explicitExamFeeDetected),
+          payload: {
+            studentName: safeName,
+            mobileNumber: preservedMobile,
+            ...(actor.role === 'super_admin' ? { centreId: r.centreId } : {}),
+            ...(typeof existingData.assignedEmployeeUid !== 'string'
+              ? { assignedEmployeeUid: actor.uid }
+              : {}),
+            ...(typeof existingData.assignedEmployeeName !== 'string'
+              ? { assignedEmployeeName: actorName }
+              : {}),
+            ...(typeof existingData.lastContactDate !== 'string' ? { lastContactDate: safeDate } : {}),
+            ...(typeof existingData.nextFollowUpDate !== 'string' ? { nextFollowUpDate: safeDate } : {}),
+            ...(typeof existingData.followUpNotes !== 'string' ? { followUpNotes: '' } : {}),
+            ...(shouldSyncFees
+              ? {
+                  recoveryStatus,
+                  followUpStatus,
+                  totalFee,
+                  paidAmount,
+                  pendingAmount,
+                  followUpNotes: r.explicitFeeDetected
+                    ? 'Fees synced from updated Excel sheet.'
+                    : 'Synced with updated Excel sheet (no fee due).',
+                }
+              : {}),
+            ...(r.explicitTmaFeeDetected ? { tmaFee: clampFeeValue(r.tmaFee) } : {}),
+            ...(r.explicitExamFeeDetected ? { examFee: clampFeeValue(r.examFee) } : {}),
+            updatedBy: actor.uid,
+            updatedAt: serverTimestamp(),
+          },
+        });
+      } else {
+        feeWriteOps.push({
+          row: r,
+          type: 'set',
+          feeChanged: true,
+          payload: {
+            studentId: sid,
+            studentName: safeName,
+            mobileNumber: safeMobile,
+            centreId: r.centreId,
+            recoveryStatus,
+            followUpStatus,
+            totalFee,
+            paidAmount,
+            pendingAmount,
+            ...(r.explicitTmaFeeDetected || (r.tmaFee !== undefined && r.tmaFee > 0)
+              ? { tmaFee: clampFeeValue(r.tmaFee) }
+              : {}),
+            ...(r.explicitExamFeeDetected || (r.examFee !== undefined && r.examFee > 0)
+              ? { examFee: clampFeeValue(r.examFee) }
+              : {}),
+            assignedEmployeeUid: actor.uid,
+            assignedEmployeeName: actorName,
+            followUpNotes: r.explicitFeeDetected ? 'Fees synced from updated Excel sheet.' : 'Created from updated Excel sheet.',
+            lastContactDate: safeDate,
+            nextFollowUpDate: safeDate,
+            createdBy: actor.uid,
+            createdAt: serverTimestamp(),
+            updatedBy: actor.uid,
+            updatedAt: serverTimestamp(),
+          },
+        });
+      }
+    }
+
+    try {
+      await commitWithRetry(async () => {
+        const feeBatch = writeBatch(db);
+        for (const op of feeWriteOps) {
+          const ref = doc(db, 'fee_recovery', op.row.studentId);
+          if (op.type === 'update') feeBatch.update(ref, op.payload);
+          else feeBatch.set(ref, op.payload);
+        }
+        await feeBatch.commit();
+      });
+      feeSyncedCount += feeWriteOps.filter((op) => op.feeChanged).length;
+    } catch {
+      for (const op of feeWriteOps) {
+        try {
+          const ref = doc(db, 'fee_recovery', op.row.studentId);
+          if (op.type === 'update') {
+            await updateDoc(ref, op.payload);
+          } else {
+            try {
+              await setDoc(ref, op.payload);
+            } catch {
+              const fallbackSpec = buildSkeletonPayloads(op.row).find((s) => s.col === 'fee_recovery');
+              if (fallbackSpec) {
+                await updateDoc(ref, fallbackSpec.update);
+              } else {
+                throw new Error('Fee update fallback unavailable');
+              }
             }
-          : {}),
-        ...(r.explicitTmaFeeDetected ? { tmaFee: clampFeeValue(r.tmaFee) } : {}),
-        ...(r.explicitExamFeeDetected ? { examFee: clampFeeValue(r.examFee) } : {}),
-        updatedBy: actor.uid,
-        updatedAt: serverTimestamp(),
-      }).catch(() => {});
-    } else {
-      await setDoc(feeRef, {
-        studentId: sid,
-        studentName: r.studentName.slice(0, 120),
-        mobileNumber: r.mobileNumber.slice(0, 20),
-        centreId: r.centreId,
-        recoveryStatus,
-        followUpStatus,
-        totalFee,
-        paidAmount,
-        pendingAmount,
-        ...(r.explicitTmaFeeDetected || (r.tmaFee !== undefined && r.tmaFee > 0)
-          ? { tmaFee: clampFeeValue(r.tmaFee) }
-          : {}),
-        ...(r.explicitExamFeeDetected || (r.examFee !== undefined && r.examFee > 0)
-          ? { examFee: clampFeeValue(r.examFee) }
-          : {}),
-        assignedEmployeeUid: actor.uid,
-        assignedEmployeeName: actorName,
-        followUpNotes: 'Created from updated Excel sheet.',
-        lastContactDate: r.admissionDate.slice(0, 30),
-        nextFollowUpDate: r.admissionDate.slice(0, 30),
-        createdBy: actor.uid,
-        createdAt: serverTimestamp(),
-        updatedBy: actor.uid,
-        updatedAt: serverTimestamp(),
-      }).catch(() => {});
-    }
-
-    // Sync existing academic department statuses (preserving createdAt/createdBy)
-    const tmaRef = doc(db, 'tma_records', sid);
-    const tmaSnap = await getDoc(tmaRef).catch(() => null);
-    if (tmaSnap && tmaSnap.exists()) {
-      await updateDoc(tmaRef, {
-        studentName: r.studentName.slice(0, 120),
-        tmaStatus: r.tmaStatus,
-        subjectsSubmittedCount: r.tmaStatus === 'Submitted' ? 5 : 0,
-        updatedBy: actor.uid,
-        updatedAt: serverTimestamp(),
-      }).catch(() => {});
-    }
-
-    const pracRef = doc(db, 'practical_records', sid);
-    const pracSnap = await getDoc(pracRef).catch(() => null);
-    if (pracSnap && pracSnap.exists()) {
-      await updateDoc(pracRef, {
-        studentName: r.studentName.slice(0, 120),
-        practicalStatus: r.practicalStatus,
-        submissionStatus: r.practicalStatus === 'Completed' ? 'Submitted' : 'Not Submitted',
-        completionPercentage: r.practicalStatus === 'Completed' ? 100 : 0,
-        updatedBy: actor.uid,
-        updatedAt: serverTimestamp(),
-      }).catch(() => {});
-    }
-
-    const clsRef = doc(db, 'online_class_records', sid);
-    const clsSnap = await getDoc(clsRef).catch(() => null);
-    if (clsSnap && clsSnap.exists()) {
-      await updateDoc(clsRef, {
-        studentName: r.studentName.slice(0, 120),
-        attendanceStatus: r.classAttendanceStatus,
-        participationLevel:
-          r.classAttendanceStatus === 'Regular'
-            ? 'High'
-            : r.classAttendanceStatus === 'Irregular'
-              ? 'Moderate'
-              : 'Inactive',
-        attendancePercentage:
-          r.classAttendanceStatus === 'Regular' ? 90 : r.classAttendanceStatus === 'Irregular' ? 50 : 0,
-        updatedBy: actor.uid,
-        updatedAt: serverTimestamp(),
-      }).catch(() => {});
+          }
+          if (op.feeChanged) feeSyncedCount += 1;
+        } catch (feeErr) {
+          failedRows.push({
+            studentName: op.row.studentName,
+            studentId: op.row.studentId,
+            error: `Fee sync rejected: ${feeErr instanceof Error ? feeErr.message : 'Firestore rules denied write.'}`,
+          });
+        }
+      }
     }
   };
 
-  // Chunk size 45 => Phase A = 45 student writes, Phase B = 45 * 5 = 225 dept writes (< 500 batch limit)
-  const chunkSize = 45;
+  const syncAcademicDeptsChunkBatched = async (targetRows: BulkImportRowPayload[]) => {
+    if (targetRows.length === 0) return;
+    const ids = targetRows.map((r) => r.studentId);
+    const [tmaMap, pracMap, clsMap] = await Promise.all([
+      fetchSnapsThrottled('tma_records', ids),
+      fetchSnapsThrottled('practical_records', ids),
+      fetchSnapsThrottled('online_class_records', ids),
+    ]);
+
+    const deptBatch = writeBatch(db);
+    let ops = 0;
+    for (const r of targetRows) {
+      const sid = r.studentId;
+      const safeName = getSafeName(r.studentName);
+      const safeSubject = getSafeSubject(r.subject);
+      const realSubCount = countStudentSubjects(safeSubject);
+      const safeDate = getSafeAdmissionDate(r.admissionDate);
+
+      const existingTma = tmaMap.get(sid) as Partial<TmaRecord> | null | undefined;
+      if (existingTma) {
+        const shouldUpdateTmaStatus = !academicSyncOnly || Boolean(r.explicitTmaDetected);
+        const resolvedTmaStatus = shouldUpdateTmaStatus
+          ? r.tmaStatus
+          : (existingTma.tmaStatus || r.tmaStatus);
+        const resolvedTotalSub =
+          r.explicitSubjectDetected || realSubCount > 0
+            ? realSubCount
+            : academicSyncOnly
+              ? Number(existingTma.totalSubjectsCount ?? 0)
+              : 0;
+        const resolvedSubSubmitted =
+          resolvedTmaStatus === 'Submitted'
+            ? resolvedTotalSub
+            : academicSyncOnly && !r.explicitTmaDetected
+              ? Math.min(resolvedTotalSub, Number(existingTma.subjectsSubmittedCount ?? 0))
+              : 0;
+        deptBatch.update(doc(db, 'tma_records', sid), {
+          studentName: safeName,
+          tmaStatus: resolvedTmaStatus,
+          totalSubjectsCount: resolvedTotalSub,
+          subjectsSubmittedCount: resolvedSubSubmitted,
+          ...(shouldUpdateTmaStatus && resolvedTmaStatus === 'Submitted' && !existingTma.submissionDate
+            ? { submissionDate: safeDate }
+            : {}),
+          updatedBy: actor.uid,
+          updatedAt: serverTimestamp(),
+        });
+        ops++;
+      } else if (academicSyncOnly) {
+        deptBatch.set(doc(db, 'tma_records', sid), {
+          studentId: sid,
+          studentName: safeName,
+          centreId: r.centreId,
+          tmaStatus: r.tmaStatus,
+          subjectsSubmittedCount: r.tmaStatus === 'Submitted' ? realSubCount : 0,
+          totalSubjectsCount: realSubCount,
+          submissionDate: r.tmaStatus === 'Submitted' ? safeDate : '',
+          assignedEmployeeUid: actor.uid,
+          assignedEmployeeName: actorName,
+          remarks: '',
+          createdBy: actor.uid,
+          createdAt: serverTimestamp(),
+          updatedBy: actor.uid,
+          updatedAt: serverTimestamp(),
+        });
+        ops++;
+      }
+
+      const existingPrac = pracMap.get(sid) as Partial<PracticalRecord> | null | undefined;
+      if (existingPrac) {
+        const shouldUpdatePracStatus = !academicSyncOnly || Boolean(r.explicitPracticalDetected);
+        if (shouldUpdatePracStatus) {
+          deptBatch.update(doc(db, 'practical_records', sid), {
+            studentName: safeName,
+            practicalStatus: r.practicalStatus,
+            submissionStatus: r.practicalStatus === 'Completed' ? 'Submitted' : 'Not Submitted',
+            completionPercentage: r.practicalStatus === 'Completed' ? 100 : 0,
+            updatedBy: actor.uid,
+            updatedAt: serverTimestamp(),
+          });
+          ops++;
+        }
+      } else if (academicSyncOnly) {
+        deptBatch.set(doc(db, 'practical_records', sid), {
+          studentId: sid,
+          studentName: safeName,
+          centreId: r.centreId,
+          practicalStatus: r.practicalStatus,
+          submissionStatus: r.practicalStatus === 'Completed' ? 'Submitted' : 'Not Submitted',
+          completionPercentage: r.practicalStatus === 'Completed' ? 100 : 0,
+          assignedEmployeeUid: actor.uid,
+          assignedEmployeeName: actorName,
+          remarks: '',
+          createdBy: actor.uid,
+          createdAt: serverTimestamp(),
+          updatedBy: actor.uid,
+          updatedAt: serverTimestamp(),
+        });
+        ops++;
+      }
+
+      if (!academicSyncOnly && clsMap.get(sid)) {
+        deptBatch.update(doc(db, 'online_class_records', sid), {
+          studentName: safeName,
+          attendanceStatus: r.classAttendanceStatus,
+          participationLevel:
+            r.classAttendanceStatus === 'Regular'
+              ? 'High'
+              : r.classAttendanceStatus === 'Irregular'
+                ? 'Moderate'
+                : 'Inactive',
+          attendancePercentage:
+            r.classAttendanceStatus === 'Regular' ? 90 : r.classAttendanceStatus === 'Irregular' ? 50 : 0,
+          updatedBy: actor.uid,
+          updatedAt: serverTimestamp(),
+        });
+        ops++;
+      }
+    }
+    if (ops > 0) {
+      await commitWithRetry(() => deptBatch.commit()).catch(() => {});
+    }
+  };
+
+  // Chunk size 15 => Phase A <= 15 student writes, Phase B <= 75 dept writes (stays fast, avoids Firestore contention on 446+ row uploads)
+  const chunkSize = 15;
   for (let i = 0; i < rows.length; i += chunkSize) {
-    const chunk = rows.slice(i, i + chunkSize);
+    // Normalize & deduplicate studentId within this import run before sending to Firestore
+    const rawChunk = rows.slice(i, i + chunkSize);
+    const chunk: BulkImportRowPayload[] = rawChunk.map((rawRow) => {
+      let sid = getSafeStudentId(rawRow);
+      if (rawRow.operation !== 'update' && seenIdsInRun.has(sid.toLowerCase())) {
+        sid = makeUniqueCollisionFreeId(rawRow);
+      }
+      seenIdsInRun.add(sid.toLowerCase());
+      return { ...rawRow, studentId: sid };
+    });
+
+    // For super_admin, pre-check create IDs against Firestore to avoid overwriting/failing on pre-existing student IDs
+    if (actor.role === 'super_admin') {
+      const createCandidateIds = chunk
+        .filter((r) => r.operation !== 'update')
+        .map((r) => r.studentId);
+      if (createCandidateIds.length > 0) {
+        const existingStudentMap = await fetchSnapsThrottled('students', createCandidateIds);
+        for (let idx = 0; idx < chunk.length; idx++) {
+          const r = chunk[idx];
+          if (r.operation === 'update') continue;
+          const existingSnap = existingStudentMap.get(r.studentId);
+          if (existingSnap) {
+            if (existingSnap.centreId === r.centreId) {
+              chunk[idx] = { ...r, operation: 'update' };
+            } else {
+              const freshId = makeUniqueCollisionFreeId(r);
+              seenIdsInRun.add(freshId.toLowerCase());
+              chunk[idx] = { ...r, studentId: freshId, operation: 'create' };
+            }
+          }
+        }
+      }
+    }
+
     const committedCreates: BulkImportRowPayload[] = [];
     const committedUpdates: BulkImportRowPayload[] = [];
 
-    try {
-      const studentBatch = writeBatch(db);
-      for (const r of chunk) {
-        const ref = doc(db, 'students', r.studentId);
-        if (r.operation === 'update') {
-          studentBatch.update(ref, buildStudentUpdateDoc(r));
-        } else {
-          studentBatch.set(ref, buildStudentCreateDoc(r));
+    if (feeSyncOnly) {
+      const createsInChunk = chunk.filter((r) => r.operation !== 'update');
+      const updatesInChunk = chunk.filter((r) => r.operation === 'update');
+
+      if (createsInChunk.length > 0) {
+        try {
+          await commitWithRetry(async () => {
+            const createBatch = writeBatch(db);
+            for (const r of createsInChunk) {
+              createBatch.set(doc(db, 'students', r.studentId), buildStudentCreateDoc(r));
+            }
+            await createBatch.commit();
+          });
+          committedCreates.push(...createsInChunk);
+        } catch {
+          for (const r of createsInChunk) {
+            try {
+              await setDoc(doc(db, 'students', r.studentId), buildStudentCreateDoc(r));
+              committedCreates.push(r);
+            } catch {
+              try {
+                await updateDoc(doc(db, 'students', r.studentId), buildStudentUpdateDoc(r));
+                committedUpdates.push({ ...r, operation: 'update' });
+              } catch {
+                const freshId = makeUniqueCollisionFreeId(r);
+                seenIdsInRun.add(freshId.toLowerCase());
+                const remapped = { ...r, studentId: freshId, operation: 'create' as const };
+                try {
+                  await setDoc(doc(db, 'students', freshId), buildStudentCreateDoc(remapped));
+                  committedCreates.push(remapped);
+                } catch (rowErr) {
+                  failedRows.push({
+                    studentName: r.studentName,
+                    studentId: r.studentId,
+                    error: rowErr instanceof Error ? rowErr.message : 'Write rejected by Firestore rules.',
+                  });
+                }
+              }
+            }
+          }
         }
       }
-      await studentBatch.commit();
-      for (const r of chunk) {
-        if (r.operation === 'update') committedUpdates.push(r);
-        else committedCreates.push(r);
+
+      // For existing students in feeSyncOnly mode: preserve academic & extraColumns fields; only patch tmaFee/examFee if explicitly present
+      const feeMetaUpdates = updatesInChunk.filter(
+        (r) => r.explicitTmaFeeDetected || r.explicitExamFeeDetected,
+      );
+      if (feeMetaUpdates.length > 0) {
+        const metaBatch = writeBatch(db);
+        for (const r of feeMetaUpdates) {
+          metaBatch.update(doc(db, 'students', r.studentId), {
+            ...(r.explicitTmaFeeDetected ? { tmaFee: clampFeeValue(r.tmaFee) } : {}),
+            ...(r.explicitExamFeeDetected ? { examFee: clampFeeValue(r.examFee) } : {}),
+            updatedBy: actor.uid,
+            updatedAt: serverTimestamp(),
+          });
+        }
+        await commitWithRetry(() => metaBatch.commit()).catch(() => {});
       }
-    } catch {
-      // Fall back to individual student writes so valid rows still succeed
-      for (const r of chunk) {
+      committedUpdates.push(...updatesInChunk);
+    } else if (academicSyncOnly) {
+      const createsInChunk = chunk.filter((r) => r.operation !== 'update');
+      const updatesInChunk = chunk.filter((r) => r.operation === 'update');
+
+      if (createsInChunk.length > 0) {
         try {
+          await commitWithRetry(async () => {
+            const createBatch = writeBatch(db);
+            for (const r of createsInChunk) {
+              createBatch.set(doc(db, 'students', r.studentId), buildStudentCreateDoc(r));
+            }
+            await createBatch.commit();
+          });
+          committedCreates.push(...createsInChunk);
+        } catch {
+          for (const r of createsInChunk) {
+            try {
+              await setDoc(doc(db, 'students', r.studentId), buildStudentCreateDoc(r));
+              committedCreates.push(r);
+            } catch (rowErr) {
+              failedRows.push({
+                studentName: r.studentName,
+                studentId: r.studentId,
+                error: rowErr instanceof Error ? rowErr.message : 'Write rejected by Firestore rules.',
+              });
+            }
+          }
+        }
+      }
+
+      if (updatesInChunk.length > 0) {
+        const buildAcademicStudentPatch = (r: BulkImportRowPayload) => ({
+          studentName: getSafeName(r.studentName),
+          ...(r.explicitSubjectDetected ? { subject: getSafeSubject(r.subject) } : {}),
+          ...(r.explicitTmaDetected ? { tmaStatus: r.tmaStatus } : {}),
+          ...(r.explicitPracticalDetected ? { practicalStatus: r.practicalStatus } : {}),
+          updatedBy: actor.uid,
+          updatedAt: serverTimestamp(),
+        });
+        try {
+          await commitWithRetry(async () => {
+            const updBatch = writeBatch(db);
+            for (const r of updatesInChunk) {
+              updBatch.update(doc(db, 'students', r.studentId), buildAcademicStudentPatch(r));
+            }
+            await updBatch.commit();
+          });
+          committedUpdates.push(...updatesInChunk);
+        } catch {
+          for (const r of updatesInChunk) {
+            try {
+              await updateDoc(doc(db, 'students', r.studentId), buildAcademicStudentPatch(r));
+              committedUpdates.push(r);
+            } catch (rowErr) {
+              failedRows.push({
+                studentName: r.studentName,
+                studentId: r.studentId,
+                error: rowErr instanceof Error ? rowErr.message : 'Write rejected by Firestore rules.',
+              });
+            }
+          }
+        }
+      }
+    } else {
+      try {
+        await commitWithRetry(async () => {
+          const studentBatch = writeBatch(db);
+          for (const r of chunk) {
+            const ref = doc(db, 'students', r.studentId);
+            if (r.operation === 'update') {
+              studentBatch.update(ref, buildStudentUpdateDoc(r));
+            } else {
+              studentBatch.set(ref, buildStudentCreateDoc(r));
+            }
+          }
+          await studentBatch.commit();
+        });
+        for (const r of chunk) {
+          if (r.operation === 'update') committedUpdates.push(r);
+          else committedCreates.push(r);
+        }
+      } catch {
+        // Fall back to individual student writes + collision recovery so every valid row succeeds
+        for (const r of chunk) {
           const ref = doc(db, 'students', r.studentId);
           if (r.operation === 'update') {
-            await updateDoc(ref, buildStudentUpdateDoc(r));
-            committedUpdates.push(r);
+            try {
+              await updateDoc(ref, buildStudentUpdateDoc(r));
+              committedUpdates.push(r);
+            } catch (rowErr) {
+              failedRows.push({
+                studentName: r.studentName,
+                studentId: r.studentId,
+                error: rowErr instanceof Error ? rowErr.message : 'Write rejected by Firestore rules.',
+              });
+            }
           } else {
-            await setDoc(ref, buildStudentCreateDoc(r));
-            committedCreates.push(r);
+            try {
+              await setDoc(ref, buildStudentCreateDoc(r));
+              committedCreates.push(r);
+            } catch {
+              try {
+                await updateDoc(ref, buildStudentUpdateDoc(r));
+                committedUpdates.push({ ...r, operation: 'update' });
+              } catch {
+                const freshId = makeUniqueCollisionFreeId(r);
+                seenIdsInRun.add(freshId.toLowerCase());
+                const remapped = { ...r, studentId: freshId, operation: 'create' as const };
+                try {
+                  await setDoc(doc(db, 'students', freshId), buildStudentCreateDoc(remapped));
+                  committedCreates.push(remapped);
+                } catch (rowErr) {
+                  failedRows.push({
+                    studentName: r.studentName,
+                    studentId: r.studentId,
+                    error: rowErr instanceof Error ? rowErr.message : 'Write rejected by Firestore rules.',
+                  });
+                }
+              }
+            }
           }
-        } catch (rowErr) {
-          failedRows.push({
-            studentName: r.studentName,
-            studentId: r.studentId,
-            error: rowErr instanceof Error ? rowErr.message : 'Write rejected by Firestore rules.',
-          });
         }
       }
     }
 
     if (canCreateSkeletons && committedCreates.length > 0) {
       try {
-        const deptBatch = writeBatch(db);
-        for (const r of committedCreates) {
-          addSkeletonCreates(deptBatch, r);
-        }
-        await deptBatch.commit();
+        await commitWithRetry(async () => {
+          const deptBatch = writeBatch(db);
+          for (const r of committedCreates) {
+            addSkeletonCreates(deptBatch, r);
+          }
+          await deptBatch.commit();
+        });
+        feeSyncedCount += committedCreates.length;
       } catch {
         for (const r of committedCreates) {
           try {
-            const singleDeptBatch = writeBatch(db);
-            addSkeletonCreates(singleDeptBatch, r);
-            await singleDeptBatch.commit();
-          } catch {
-            // Keep imported student even if secondary skeleton sync skipped
+            await upsertSkeletonsIdempotentForRow(r);
+            feeSyncedCount += 1;
+          } catch (skelErr) {
+            failedRows.push({
+              studentName: r.studentName,
+              studentId: r.studentId,
+              error: `Fee skeleton failed: ${skelErr instanceof Error ? skelErr.message : 'Write denied.'}`,
+            });
           }
         }
       }
     }
 
     if (canCreateSkeletons && committedUpdates.length > 0) {
-      await Promise.all(committedUpdates.map((r) => syncUpdatedRowDepartments(r)));
+      if (!academicSyncOnly) {
+        await syncFeeUpdatesChunkBatched(committedUpdates);
+      }
+      if (!feeSyncOnly) {
+        await syncAcademicDeptsChunkBatched(committedUpdates);
+      }
     }
 
     importedCount += committedCreates.length;
     updatedCount += committedUpdates.length;
     options?.onProgress?.(Math.min(i + chunk.length, rows.length), rows.length);
+
+    if (i + chunkSize < rows.length) {
+      await pauseMs(25);
+    }
   }
 
-  if (importedCount > 0 || updatedCount > 0) {
+  if (importedCount > 0 || updatedCount > 0 || feeSyncedCount > 0) {
     await logActivity({
       actorUid: actor.uid,
       actorName: actor.fullName,
       actorEmail: actor.email,
       actorRole: actor.role,
       centreId: actor.role === 'super_admin' ? 'all' : actor.centreId,
-      department: actor.department,
-      action: 'BULK_STUDENT_IMPORT',
-      targetCollection: 'students',
+      department: feeSyncOnly ? 'fee_recovery' : actor.department,
+      action: feeSyncOnly ? 'FEE_EXCEL_RECONCILED' : 'BULK_STUDENT_IMPORT',
+      targetCollection: feeSyncOnly ? 'fee_recovery' : 'students',
       targetId: actor.role === 'super_admin' ? 'multi_centre' : actor.centreId,
-      details: `Excel sync complete: ${importedCount} new added, ${updatedCount} existing updated (${failedRows.length} failed).`,
+      details: `${feeSyncOnly ? 'Fee Excel sync' : 'Excel sync'} complete: ${importedCount} new added, ${updatedCount} existing updated, ${feeSyncedCount} fee records synced (${failedRows.length} failed).`,
       locationVerified,
     });
   }
 
-  return { importedCount, updatedCount, failedRows };
+  return { importedCount, updatedCount, feeSyncedCount, failedRows };
 }
 
 export async function updateStudentRecord(
@@ -1864,6 +2453,404 @@ export async function upsertFeeRecoveryRecord(
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, path);
   }
+}
+
+export async function syncFeeRecordsBatchFromExcelData(
+  students: Student[],
+  feeRecords: FeeRecoveryRecord[],
+  actor: UserAccount,
+  options?: { resetUntouched12000Defaults?: boolean; locationVerified?: boolean },
+): Promise<{ updatedCount: number; createdCount: number; untouched12kRemaining: number }> {
+  if (actor.role !== 'super_admin' && actor.role !== 'centre_head') {
+    throw new Error('Only Super Admin or Centre Head can batch-sync fee records.');
+  }
+
+  const scopedStudents =
+    actor.role === 'super_admin'
+      ? students
+      : students.filter((s) => s.centreId === actor.centreId);
+  const scopedFees =
+    actor.role === 'super_admin'
+      ? feeRecords
+      : feeRecords.filter((f) => f.centreId === actor.centreId);
+
+  const plan = computeFeeSyncPlanFromStudents(scopedStudents, scopedFees, {
+    resetUntouched12000Defaults: options?.resetUntouched12000Defaults,
+  });
+
+  if (plan.items.length === 0) {
+    return {
+      updatedCount: 0,
+      createdCount: 0,
+      untouched12kRemaining: plan.untouched12kCount,
+    };
+  }
+
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const actorName = actor.fullName.slice(0, 100);
+  let createdCount = 0;
+  let updatedCount = 0;
+
+  try {
+    // Up to 2 writes per item => chunk size 180 <= 360 ops (< 500 batch limit)
+    const chunkSize = 180;
+    for (let i = 0; i < plan.items.length; i += chunkSize) {
+      const chunk = plan.items.slice(i, i + chunkSize);
+      const batch = writeBatch(db);
+      for (const item of chunk) {
+        const s = item.student;
+        const safeMobile =
+          s.mobileNumber && s.mobileNumber.trim().length >= 7
+            ? s.mobileNumber.trim().slice(0, 20)
+            : 'Not Provided';
+        const feeRef = doc(db, 'fee_recovery', s.studentId);
+
+        if (item.operation === 'create') {
+          batch.set(feeRef, {
+            studentId: s.studentId,
+            studentName: s.studentName.slice(0, 120),
+            mobileNumber: safeMobile,
+            centreId: s.centreId,
+            recoveryStatus: item.recoveryStatus,
+            followUpStatus: item.followUpStatus,
+            totalFee: clampFeeValue(item.totalFee),
+            paidAmount: clampFeeValue(item.paidAmount),
+            pendingAmount: clampFeeValue(item.pendingAmount),
+            ...(item.tmaFee > 0 ? { tmaFee: clampFeeValue(item.tmaFee) } : {}),
+            ...(item.examFee > 0 ? { examFee: clampFeeValue(item.examFee) } : {}),
+            assignedEmployeeUid: s.assignedEmployeeUid || actor.uid,
+            assignedEmployeeName: (s.assignedEmployeeName || actorName).slice(0, 100),
+            followUpNotes:
+              item.reason === 'excel_columns'
+                ? 'Synced from student Excel columns.'
+                : 'Initialized fee record from student sheet.',
+            lastContactDate: s.admissionDate.slice(0, 30) || todayIso,
+            nextFollowUpDate: s.admissionDate.slice(0, 30) || todayIso,
+            createdBy: actor.uid,
+            createdAt: serverTimestamp(),
+            updatedBy: actor.uid,
+            updatedAt: serverTimestamp(),
+          });
+          createdCount += 1;
+        } else {
+          batch.update(feeRef, {
+            recoveryStatus: item.recoveryStatus,
+            followUpStatus: item.followUpStatus,
+            totalFee: clampFeeValue(item.totalFee),
+            paidAmount: clampFeeValue(item.paidAmount),
+            pendingAmount: clampFeeValue(item.pendingAmount),
+            ...(item.tmaFee > 0 ? { tmaFee: clampFeeValue(item.tmaFee) } : {}),
+            ...(item.examFee > 0 ? { examFee: clampFeeValue(item.examFee) } : {}),
+            followUpNotes:
+              item.reason === 'reset_12k_default'
+                ? 'Cleared untouched default ₹12,000 placeholder to ₹0.'
+                : 'Fees synced from student Excel columns.',
+            updatedBy: actor.uid,
+            updatedAt: serverTimestamp(),
+          });
+          updatedCount += 1;
+        }
+
+        const curStuTma = clampFeeValue(s.tmaFee ?? 0);
+        const curStuExam = clampFeeValue(s.examFee ?? 0);
+        if (
+          (item.tmaFee > 0 && curStuTma !== item.tmaFee) ||
+          (item.examFee > 0 && curStuExam !== item.examFee)
+        ) {
+          batch.update(doc(db, 'students', s.studentId), {
+            ...(item.tmaFee > 0 ? { tmaFee: clampFeeValue(item.tmaFee) } : {}),
+            ...(item.examFee > 0 ? { examFee: clampFeeValue(item.examFee) } : {}),
+            updatedBy: actor.uid,
+            updatedAt: serverTimestamp(),
+          });
+        }
+      }
+      await batch.commit();
+    }
+
+    await logActivity({
+      actorUid: actor.uid,
+      actorName: actor.fullName,
+      actorEmail: actor.email,
+      actorRole: actor.role,
+      centreId: actor.role === 'super_admin' ? 'all' : actor.centreId,
+      department: 'fee_recovery',
+      action: 'FEE_EXCEL_RECONCILED',
+      targetCollection: 'fee_recovery',
+      targetId: actor.role === 'super_admin' ? 'multi_centre' : actor.centreId,
+      details: `Reconciled fees from Excel data: ${updatedCount} updated, ${createdCount} created.`,
+      locationVerified: Boolean(options?.locationVerified ?? true),
+    });
+
+    return {
+      updatedCount,
+      createdCount,
+      untouched12kRemaining: options?.resetUntouched12000Defaults ? 0 : plan.untouched12kCount,
+    };
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, 'fee_recovery');
+    return {
+      updatedCount,
+      createdCount,
+      untouched12kRemaining: plan.untouched12kCount,
+    };
+  }
+}
+
+export async function resetAllFeeRecordsToZero(
+  students: Student[],
+  feeRecords: FeeRecoveryRecord[],
+  actor: UserAccount,
+  options?: { locationVerified?: boolean; onProgress?: (done: number, total: number) => void },
+): Promise<{ resetCount: number; createdCount: number }> {
+  if (actor.role !== 'super_admin' && actor.role !== 'centre_head') {
+    throw new Error('Only Super Admin or Centre Head can reset all fees to ₹0.');
+  }
+
+  const scopedStudents =
+    actor.role === 'super_admin'
+      ? students
+      : students.filter((s) => s.centreId === actor.centreId);
+  const scopedFees =
+    actor.role === 'super_admin'
+      ? feeRecords
+      : feeRecords.filter((f) => f.centreId === actor.centreId);
+
+  const feeByStudent = new Map<string, FeeRecoveryRecord>();
+  scopedFees.forEach((f) => feeByStudent.set(f.studentId, f));
+
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const actorName = actor.fullName.slice(0, 100);
+  const RESET_NOTE = 'Fees reset to ₹0 — ready for Excel upload.';
+
+  type ResetOp =
+    | { kind: 'set_fee'; student: Student }
+    | { kind: 'update_fee'; studentId: string; rec: FeeRecoveryRecord }
+    | { kind: 'zero_student_fees'; studentId: string };
+
+  const ops: ResetOp[] = [];
+  let resetCount = 0;
+  let createdCount = 0;
+
+  for (const s of scopedStudents) {
+    const rec = feeByStudent.get(s.studentId);
+    if (!rec) {
+      ops.push({ kind: 'set_fee', student: s });
+      createdCount += 1;
+    } else if (
+      rec.totalFee !== 0 ||
+      rec.paidAmount !== 0 ||
+      rec.pendingAmount !== 0 ||
+      (rec.tmaFee ?? 0) !== 0 ||
+      (rec.examFee ?? 0) !== 0 ||
+      rec.recoveryStatus !== 'Pending' ||
+      rec.followUpStatus !== 'Scheduled' ||
+      rec.followUpNotes !== RESET_NOTE
+    ) {
+      ops.push({ kind: 'update_fee', studentId: s.studentId, rec });
+      resetCount += 1;
+    }
+
+    if ((s.tmaFee ?? 0) > 0 || (s.examFee ?? 0) > 0) {
+      ops.push({ kind: 'zero_student_fees', studentId: s.studentId });
+    }
+  }
+
+  // Also reset any orphan fee_recovery docs within scope
+  const studentIdSet = new Set(scopedStudents.map((s) => s.studentId));
+  for (const rec of scopedFees) {
+    if (studentIdSet.has(rec.studentId)) continue;
+    if (
+      rec.totalFee !== 0 ||
+      rec.paidAmount !== 0 ||
+      rec.pendingAmount !== 0 ||
+      (rec.tmaFee ?? 0) !== 0 ||
+      (rec.examFee ?? 0) !== 0 ||
+      rec.recoveryStatus !== 'Pending' ||
+      rec.followUpNotes !== RESET_NOTE
+    ) {
+      ops.push({ kind: 'update_fee', studentId: rec.studentId, rec });
+      resetCount += 1;
+    }
+  }
+
+  if (ops.length === 0) {
+    return { resetCount: 0, createdCount: 0 };
+  }
+
+  try {
+    const chunkSize = 200;
+    for (let i = 0; i < ops.length; i += chunkSize) {
+      const chunk = ops.slice(i, i + chunkSize);
+      const batch = writeBatch(db);
+      for (const op of chunk) {
+        if (op.kind === 'set_fee') {
+          const s = op.student;
+          const safeMobile =
+            s.mobileNumber && s.mobileNumber.trim().length >= 7
+              ? s.mobileNumber.trim().slice(0, 20)
+              : 'Not Provided';
+          batch.set(doc(db, 'fee_recovery', s.studentId), {
+            studentId: s.studentId,
+            studentName: s.studentName.slice(0, 120) || 'Student',
+            mobileNumber: safeMobile,
+            centreId: s.centreId,
+            recoveryStatus: 'Pending',
+            followUpStatus: 'Scheduled',
+            totalFee: 0,
+            paidAmount: 0,
+            pendingAmount: 0,
+            tmaFee: 0,
+            examFee: 0,
+            assignedEmployeeUid: s.assignedEmployeeUid || actor.uid,
+            assignedEmployeeName: (s.assignedEmployeeName || actorName).slice(0, 100),
+            followUpNotes: RESET_NOTE,
+            lastContactDate: s.admissionDate?.slice(0, 30) || todayIso,
+            nextFollowUpDate: s.admissionDate?.slice(0, 30) || todayIso,
+            createdBy: actor.uid,
+            createdAt: serverTimestamp(),
+            updatedBy: actor.uid,
+            updatedAt: serverTimestamp(),
+          });
+        } else if (op.kind === 'update_fee') {
+          const rec = op.rec;
+          batch.update(doc(db, 'fee_recovery', op.studentId), {
+            recoveryStatus: 'Pending',
+            followUpStatus: 'Scheduled',
+            totalFee: 0,
+            paidAmount: 0,
+            pendingAmount: 0,
+            tmaFee: 0,
+            examFee: 0,
+            followUpNotes: RESET_NOTE,
+            ...(typeof rec.assignedEmployeeUid !== 'string' ? { assignedEmployeeUid: actor.uid } : {}),
+            ...(typeof rec.assignedEmployeeName !== 'string' ? { assignedEmployeeName: actorName } : {}),
+            ...(typeof rec.lastContactDate !== 'string' ? { lastContactDate: todayIso } : {}),
+            ...(typeof rec.nextFollowUpDate !== 'string' ? { nextFollowUpDate: todayIso } : {}),
+            updatedBy: actor.uid,
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          batch.update(doc(db, 'students', op.studentId), {
+            tmaFee: 0,
+            examFee: 0,
+            updatedBy: actor.uid,
+            updatedAt: serverTimestamp(),
+          });
+        }
+      }
+      await batch.commit();
+      options?.onProgress?.(Math.min(i + chunk.length, ops.length), ops.length);
+    }
+
+    await logActivity({
+      actorUid: actor.uid,
+      actorName: actor.fullName,
+      actorEmail: actor.email,
+      actorRole: actor.role,
+      centreId: actor.role === 'super_admin' ? 'all' : actor.centreId,
+      department: 'fee_recovery',
+      action: 'FEE_RESET_TO_ZERO',
+      targetCollection: 'fee_recovery',
+      targetId: actor.role === 'super_admin' ? 'multi_centre' : actor.centreId,
+      details: `Reset all fee records to ₹0 (${resetCount} reset, ${createdCount} initialized) ready for real Excel upload.`,
+      locationVerified: Boolean(options?.locationVerified ?? true),
+    });
+
+    return { resetCount, createdCount };
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, 'fee_recovery');
+    return { resetCount, createdCount };
+  }
+}
+
+export async function deleteFeeRecoveryRecordsBatch(
+  targetFeeRecords: ReadonlyArray<Pick<FeeRecoveryRecord, 'studentId' | 'studentName' | 'centreId'>>,
+  scopedStudents: ReadonlyArray<Pick<Student, 'studentId' | 'tmaFee' | 'examFee'>>,
+  actor: UserAccount,
+  options?: {
+    onProgress?: (deleted: number, total: number) => void;
+    locationVerified?: boolean;
+  },
+): Promise<{ deletedCount: number; failedIds: string[] }> {
+  if (actor.role !== 'super_admin') {
+    throw new Error('Only Super Admin can bulk-delete fee recovery records.');
+  }
+
+  const feeIds = Array.from(new Set(targetFeeRecords.map((r) => r.studentId).filter(Boolean)));
+  const studentsWithExtras = scopedStudents.filter((s) => (s.tmaFee ?? 0) > 0 || (s.examFee ?? 0) > 0);
+
+  if (feeIds.length === 0 && studentsWithExtras.length === 0) {
+    return { deletedCount: 0, failedIds: [] };
+  }
+
+  const failedIds: string[] = [];
+  let deletedCount = 0;
+  const total = feeIds.length;
+
+  // Chunk <= 350 ops (< 500 Firestore batch limit)
+  const chunkSize = 350;
+  for (let i = 0; i < feeIds.length; i += chunkSize) {
+    const chunk = feeIds.slice(i, i + chunkSize);
+    try {
+      const batch = writeBatch(db);
+      for (const sid of chunk) {
+        batch.delete(doc(db, 'fee_recovery', sid));
+      }
+      await batch.commit();
+      deletedCount += chunk.length;
+      options?.onProgress?.(deletedCount, total);
+    } catch {
+      for (const sid of chunk) {
+        try {
+          await deleteDoc(doc(db, 'fee_recovery', sid));
+          deletedCount += 1;
+        } catch {
+          failedIds.push(sid);
+        }
+        options?.onProgress?.(deletedCount, total);
+      }
+    }
+  }
+
+  // Zero out student-level TMA/Exam fee fields in scope so Fee Recovery clears cleanly
+  for (let i = 0; i < studentsWithExtras.length; i += chunkSize) {
+    const chunk = studentsWithExtras.slice(i, i + chunkSize);
+    try {
+      const batch = writeBatch(db);
+      for (const s of chunk) {
+        batch.update(doc(db, 'students', s.studentId), {
+          tmaFee: 0,
+          examFee: 0,
+          updatedBy: actor.uid,
+          updatedAt: serverTimestamp(),
+        });
+      }
+      await batch.commit();
+    } catch {
+      // Non-blocking fallback
+    }
+  }
+
+  if (deletedCount > 0 || studentsWithExtras.length > 0) {
+    await logActivity({
+      actorUid: actor.uid,
+      actorName: actor.fullName,
+      actorEmail: actor.email,
+      actorRole: actor.role,
+      centreId: 'all',
+      department: 'fee_recovery',
+      action: 'BULK_FEE_RECOVERY_DELETED',
+      targetCollection: 'fee_recovery',
+      targetId: 'bulk_clear',
+      details: `Bulk-deleted ${deletedCount} fee recovery records${
+        studentsWithExtras.length > 0 ? ` and cleared TMA/Exam fees on ${studentsWithExtras.length} students` : ''
+      }${failedIds.length > 0 ? ` (${failedIds.length} failed)` : ''}.`,
+      locationVerified: Boolean(options?.locationVerified ?? true),
+    }).catch(() => {});
+  }
+
+  return { deletedCount, failedIds };
 }
 
 export async function upsertPracticalRecord(
@@ -2863,5 +3850,99 @@ export async function markDirectMessagesRead(
     handleFirestoreError(err, OperationType.UPDATE, 'direct_messages');
   }
 }
+
+export async function clearMockSubjectsFromStudents(
+  students: Student[],
+  actor: UserAccount,
+  options?: { locationVerified?: boolean; onProgress?: (done: number, total: number) => void },
+): Promise<{ clearedCount: number }> {
+  if (actor.role !== 'super_admin' && actor.role !== 'centre_head') {
+    throw new Error('Only Super Admin or Centre Head can clear mock subjects.');
+  }
+
+  const scopedStudents =
+    actor.role === 'super_admin'
+      ? students
+      : students.filter((s) => s.centreId === actor.centreId);
+  const targets = scopedStudents.filter((s) => isMockSubjectValue(s.subject));
+  if (targets.length === 0) {
+    return { clearedCount: 0 };
+  }
+
+  const readSnap = async (colName: string, id: string) => {
+    try {
+      const snap = await getDoc(doc(db, colName, id));
+      return snap.exists() ? (snap.data() as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  };
+
+  let clearedCount = 0;
+  try {
+    const chunkSize = 50;
+    for (let i = 0; i < targets.length; i += chunkSize) {
+      const chunk = targets.slice(i, i + chunkSize);
+      const [tmaSnaps, admSnaps] = await Promise.all([
+        Promise.all(chunk.map((s) => readSnap('tma_records', s.studentId))),
+        Promise.all(chunk.map((s) => readSnap('admission_records', s.studentId))),
+      ]);
+
+      const batch = writeBatch(db);
+      chunk.forEach((s, idx) => {
+        batch.update(doc(db, 'students', s.studentId), {
+          subject: '',
+          updatedBy: actor.uid,
+          updatedAt: serverTimestamp(),
+        });
+
+        const tmaDoc = tmaSnaps[idx];
+        if (tmaDoc && Number(tmaDoc.totalSubjectsCount ?? 0) === 5) {
+          batch.update(doc(db, 'tma_records', s.studentId), {
+            totalSubjectsCount: 0,
+            subjectsSubmittedCount: 0,
+            updatedBy: actor.uid,
+            updatedAt: serverTimestamp(),
+          });
+        }
+
+        const admDoc = admSnaps[idx];
+        if (admDoc && isMockSubjectValue(String(admDoc.stream ?? ''))) {
+          batch.update(doc(db, 'admission_records', s.studentId), {
+            stream: '',
+            updatedBy: actor.uid,
+            updatedAt: serverTimestamp(),
+          });
+        }
+      });
+
+      await batch.commit();
+      clearedCount += chunk.length;
+      options?.onProgress?.(clearedCount, targets.length);
+    }
+
+    if (clearedCount > 0) {
+      await logActivity({
+        actorUid: actor.uid,
+        actorName: actor.fullName,
+        actorEmail: actor.email,
+        actorRole: actor.role,
+        centreId: actor.role === 'super_admin' ? 'all' : actor.centreId,
+        department: 'tma',
+        action: 'MOCK_SUBJECTS_CLEARED',
+        targetCollection: 'students',
+        targetId: actor.role === 'super_admin' ? 'multi_centre' : actor.centreId,
+        details: `Cleared mock/default subjects on ${clearedCount} student record(s) — ready for Excel subject update.`,
+        locationVerified: Boolean(options?.locationVerified ?? true),
+      }).catch(() => {});
+    }
+
+    return { clearedCount };
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, 'students');
+    return { clearedCount };
+  }
+}
+
 
 

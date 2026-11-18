@@ -82,7 +82,7 @@ export const AdmissionView: React.FC<AdmissionViewProps> = ({
           student: s,
           displaySerial: displaySerialMap.get(s.studentId) ?? s.serialNumber,
           admissionStatus: rec?.admissionStatus || 'Confirmed',
-          stream: rec?.stream || s.subject,
+          stream: rec?.stream || s.subject || '—',
           niosPurpose: rec?.niosPurpose || s.whyNios,
           academicBackground: rec?.academicBackground || s.currentEducationStatus,
           followUpStatus: rec?.followUpStatus || 'Completed',

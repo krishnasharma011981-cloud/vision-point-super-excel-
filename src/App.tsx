@@ -34,10 +34,12 @@ import { auth, db, handleFirestoreError, OperationType } from './lib/firebase';
 import { speakWelcomeMessage, stopWelcomeMessage } from './lib/voiceWelcome';
 import {
   claimPendingStaffInvite,
+  clearMockSubjectsFromStudents,
   ensureInitialPlatformSetup,
   getUserProfile,
   logActivity,
   mergeCustomColumnsIntoSharedConfig,
+  resetAllFeeRecordsToZero,
   resetOnlineAttendanceToZeroBatch,
   saveExcelSheetConfig,
 } from './services/firestoreService';
@@ -111,8 +113,11 @@ export default function App() {
   const [sheetConfigs, setSheetConfigs] = useState<ExcelSheetConfig[]>([]);
   const [sheetConfigsLoaded, setSheetConfigsLoaded] = useState(false);
   const [onlineClassRecordsLoaded, setOnlineClassRecordsLoaded] = useState(false);
+  const [feeRecordsLoaded, setFeeRecordsLoaded] = useState(false);
   const attendanceZeroMigrationRanRef = useRef(false);
   const jaunpurColsSharedMigrationRef = useRef(false);
+  const fee12kCleanupMigrationRanRef = useRef(false);
+  const subjectMockCleanupRanRef = useRef(false);
 
   const notify = useCallback(
     (title: string, description: string, variant: ToastMessage['variant'] = 'info') => {
@@ -345,13 +350,17 @@ export default function App() {
     if (!currentUser) {
       setSheetConfigsLoaded(false);
       setOnlineClassRecordsLoaded(false);
+      setFeeRecordsLoaded(false);
       attendanceZeroMigrationRanRef.current = false;
       jaunpurColsSharedMigrationRef.current = false;
+      fee12kCleanupMigrationRanRef.current = false;
+      subjectMockCleanupRanRef.current = false;
       return;
     }
     setDataLoading(true);
     setSheetConfigsLoaded(false);
     setOnlineClassRecordsLoaded(false);
+    setFeeRecordsLoaded(false);
     const unsubs: Unsubscribe[] = [];
 
     const isSuper = currentUser.role === 'super_admin';
@@ -388,7 +397,7 @@ export default function App() {
 
     // 3. Central Students Database
     const studentsQuery = isSuper
-      ? query(collection(db, 'students'), orderBy('serialNumber', 'desc'))
+      ? query(collection(db, 'students'))
       : query(collection(db, 'students'), where('centreId', '==', cId));
     unsubs.push(
       onSnapshot(
@@ -437,7 +446,12 @@ export default function App() {
       );
     };
 
-    subscribeDept<FeeRecoveryRecord>('fee_recovery', 'fee_recovery', setFeeRecords);
+    subscribeDept<FeeRecoveryRecord>(
+      'fee_recovery',
+      'fee_recovery',
+      setFeeRecords,
+      () => setFeeRecordsLoaded(true),
+    );
     subscribeDept<PracticalRecord>('practical_records', 'practical', setPracticalRecords);
     subscribeDept<TmaRecord>('tma_records', 'tma', setTmaRecords);
     subscribeDept<OnlineClassRecord>(
@@ -719,6 +733,112 @@ export default function App() {
     })();
   }, [currentUser, dataLoading, sheetConfigsLoaded, sheetConfigs, students, notify]);
 
+  // One-time cleanup: clear all stale/mock fees to ₹0 so only real uploaded Excel fee data remains
+  useEffect(() => {
+    if (
+      !currentUser ||
+      currentUser.role !== 'super_admin' ||
+      dataLoading ||
+      !sheetConfigsLoaded ||
+      !feeRecordsLoaded ||
+      fee12kCleanupMigrationRanRef.current
+    ) {
+      return;
+    }
+
+    const alreadyReset = sheetConfigs.some((c) => c.configId === 'fee_reset_to_zero_v2');
+    if (alreadyReset) {
+      fee12kCleanupMigrationRanRef.current = true;
+      return;
+    }
+
+    fee12kCleanupMigrationRanRef.current = true;
+    (async () => {
+      try {
+        const res = await resetAllFeeRecordsToZero(students, feeRecords, currentUser, {
+          locationVerified: true,
+        });
+        await saveExcelSheetConfig(
+          'fee_reset_to_zero_v2',
+          {
+            headerLabels: {},
+            customColumns: [],
+            hiddenCoreColumns: [],
+            deletedExtraColumns: [],
+          },
+          currentUser,
+          'Reset all mock/stale fee records to ₹0 — ready for real Excel upload',
+        );
+        if (res.resetCount > 0 || res.createdCount > 0) {
+          notify(
+            'Fee Section Reset to ₹0',
+            `Cleared ${res.resetCount + res.createdCount} student fee records to ₹0. Upload your Excel sheet via "Update Fees from Excel" to populate real Paid & Unpaid fees.`,
+            'info',
+          );
+        }
+      } catch {
+        fee12kCleanupMigrationRanRef.current = false;
+      }
+    })();
+  }, [
+    currentUser,
+    dataLoading,
+    sheetConfigsLoaded,
+    feeRecordsLoaded,
+    sheetConfigs,
+    students,
+    feeRecords,
+    notify,
+  ]);
+
+  // One-time cleanup: clear legacy mock/placeholder subjects so TMA & Practical subjects stay blank until updated from Excel
+  useEffect(() => {
+    if (
+      !currentUser ||
+      currentUser.role !== 'super_admin' ||
+      dataLoading ||
+      !sheetConfigsLoaded ||
+      subjectMockCleanupRanRef.current
+    ) {
+      return;
+    }
+
+    const alreadyCleaned = sheetConfigs.some((c) => c.configId === 'subject_mock_cleanup_v1');
+    if (alreadyCleaned) {
+      subjectMockCleanupRanRef.current = true;
+      return;
+    }
+
+    subjectMockCleanupRanRef.current = true;
+    (async () => {
+      try {
+        const res = await clearMockSubjectsFromStudents(students, currentUser, {
+          locationVerified: true,
+        });
+        await saveExcelSheetConfig(
+          'subject_mock_cleanup_v1',
+          {
+            headerLabels: {},
+            customColumns: [],
+            hiddenCoreColumns: [],
+            deletedExtraColumns: [],
+          },
+          currentUser,
+          'Cleared legacy mock subjects from students, TMA, and admission records',
+        );
+        if (res.clearedCount > 0) {
+          notify(
+            'Mock Subjects Cleared',
+            `Removed mock subjects from ${res.clearedCount} student record${res.clearedCount === 1 ? '' : 's'}. Upload your Excel sheet in TMA or Practical to populate real subjects.`,
+            'info',
+          );
+        }
+      } catch {
+        subjectMockCleanupRanRef.current = false;
+      }
+    })();
+  }, [currentUser, dataLoading, sheetConfigsLoaded, sheetConfigs, students, notify]);
+
   const handleSelectSection = (section: NavSection) => {
     if (!currentUser) return;
     if (!canUserAccessSection(currentUser, section)) {
@@ -902,6 +1022,7 @@ export default function App() {
             practicalRecords={practicalRecords}
             employees={users}
             editRequests={editRequests}
+            sheetConfigs={sheetConfigs}
             currentUser={currentUser}
             selectedCentreFilter={selectedCentreFilter}
             globalSearch={globalSearch}
@@ -915,6 +1036,7 @@ export default function App() {
             tmaRecords={tmaRecords}
             employees={users}
             editRequests={editRequests}
+            sheetConfigs={sheetConfigs}
             currentUser={currentUser}
             selectedCentreFilter={selectedCentreFilter}
             globalSearch={globalSearch}

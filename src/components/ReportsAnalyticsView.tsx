@@ -27,7 +27,7 @@ import {
   formatCompactInr,
   resolveStudentFeeSummary,
 } from '../lib/analyticsMath';
-import { exportToCsv, exportToExcel, formatDateTime } from '../lib/csvUtils';
+import { countStudentSubjects, exportToCsv, exportToExcel, formatDateTime } from '../lib/csvUtils';
 import { reviewEmployeeReport, submitEmployeeReport } from '../services/firestoreService';
 import type {
   AdmissionRecord,
@@ -330,13 +330,15 @@ export const ReportsAnalyticsView: React.FC<ReportsAnalyticsViewProps> = ({
         headers: ['Student ID', 'Student Name', 'Centre', 'TMA Status', 'Submitted Files', 'Total Subjects', 'Assigned'],
         rows: filteredStudents.map((s) => {
           const rec = tMap.get(s.studentId);
+          const realCount = countStudentSubjects(s.subject);
+          const totalSub = rec?.totalSubjectsCount && realCount === 0 && rec.totalSubjectsCount === 5 ? 0 : (rec?.totalSubjectsCount ?? realCount);
           return [
             s.studentId,
             s.studentName,
             CENTRE_MAP[s.centreId].code,
             rec?.tmaStatus || s.tmaStatus,
-            rec?.subjectsSubmittedCount ?? 0,
-            rec?.totalSubjectsCount ?? 5,
+            totalSub === 0 ? 0 : (rec?.subjectsSubmittedCount ?? 0),
+            totalSub,
             rec?.assignedEmployeeName || s.assignedEmployeeName || 'Unassigned',
           ];
         }),

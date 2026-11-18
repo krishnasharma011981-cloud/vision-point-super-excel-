@@ -64,8 +64,8 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
   const [admissionDate, setAdmissionDate] = useState(new Date().toISOString().slice(0, 10));
   const [assignedEmployeeUid, setAssignedEmployeeUid] = useState('');
   const [additionalRemarks, setAdditionalRemarks] = useState('');
-  const [totalFee, setTotalFee] = useState('12000');
-  const [paidAmount, setPaidAmount] = useState('5000');
+  const [totalFee, setTotalFee] = useState('0');
+  const [paidAmount, setPaidAmount] = useState('0');
   const [tmaFee, setTmaFee] = useState('0');
   const [examFee, setExamFee] = useState('0');
 
@@ -103,7 +103,7 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
       setStudentId(`${code}-${new Date().getFullYear()}-${String(nextNum).padStart(4, '0')}`);
       setStudentName('');
       setMobileNumber('');
-      setSubject('Hindi, English, Mathematics, Science, Social Science');
+      setSubject('');
       setTcStatus('Not Received');
       setBookStatus('Pending');
       setClassAttendanceStatus('Not Attending');
@@ -116,8 +116,8 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
       setAdmissionDate(new Date().toISOString().slice(0, 10));
       setAssignedEmployeeUid(currentUser.role === 'employee' ? currentUser.uid : '');
       setAdditionalRemarks('');
-      setTotalFee('12000');
-      setPaidAmount('5000');
+      setTotalFee('0');
+      setPaidAmount('0');
       setTmaFee('0');
       setExamFee('0');
     }
@@ -312,7 +312,7 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
           currentUser,
           true,
           {
-            totalFee: Number(totalFee) || 12000,
+            totalFee: Math.max(Number(paidAmount) || 0, Number(totalFee) || 0),
             paidAmount: Number(paidAmount) || 0,
             tmaFee: cleanTmaFee,
             examFee: cleanExamFee,
@@ -459,14 +459,13 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-[#08152E] mb-1">Subjects</label>
+            <label className="block text-xs font-semibold text-[#08152E] mb-1">Subjects (Optional — updates from Excel)</label>
             <input
               type="text"
-              required
               disabled={!canEditAdmissionFields}
               value={subject}
               onChange={(e) => setSubject(e.target.value)}
-              placeholder="e.g. English, Physics, Chemistry, Mathematics, Computer Science"
+              placeholder="Leave blank or enter subjects (e.g. English, Physics, Chemistry)"
               className="w-full px-3 py-2 text-sm bg-white text-[#08152E] placeholder:text-slate-400 border border-slate-300 rounded-lg disabled:bg-slate-100 disabled:text-slate-600 focus:outline-none focus:ring-2 focus:ring-[#0F2F6B]"
             />
           </div>
