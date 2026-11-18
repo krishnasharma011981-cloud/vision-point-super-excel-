@@ -20,6 +20,7 @@ import {
   Mail,
   MapPin,
   Monitor,
+  RefreshCw,
   ShieldCheck,
   Users,
   X,
@@ -171,12 +172,52 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(externalError || null);
   const [providerDisabledHelp, setProviderDisabledHelp] = useState(false);
+  const [emailPasswordEnabled, setEmailPasswordEnabled] = useState<boolean | null>(null);
+  const [showEmailFormWhenDisabled, setShowEmailFormWhenDisabled] = useState(false);
+  const [checkingProviders, setCheckingProviders] = useState(false);
+  const [popupBlockedHelp, setPopupBlockedHelp] = useState(false);
 
   const [showResetModal, setShowResetModal] = useState(false);
   const [resetEmail, setResetEmail] = useState('');
   const [resetSending, setResetSending] = useState(false);
 
   const dropdownRef = useRef<HTMLDivElement>(null);
+
+  const checkProviderStatus = async (manual = false) => {
+    if (manual) setCheckingProviders(true);
+    try {
+      const res = await fetch('/api/auth/provider-status');
+      const data = (await res.json().catch(() => ({}))) as { emailPasswordEnabled?: boolean };
+      if (typeof data.emailPasswordEnabled === 'boolean') {
+        setEmailPasswordEnabled(data.emailPasswordEnabled);
+        if (data.emailPasswordEnabled) {
+          setProviderDisabledHelp(false);
+          setShowEmailFormWhenDisabled(true);
+          if (manual) {
+            onNotify(
+              'Email/Password Enabled',
+              'Email/Password Sign-In is now active in Firebase! You can log in directly.',
+              'success',
+            );
+          }
+        } else if (manual) {
+          onNotify(
+            'Still Disabled in Firebase',
+            'Enable Email/Password in Firebase Console -> Authentication -> Sign-in method, or click Sign in with Google above.',
+            'warning',
+          );
+        }
+      }
+    } catch {
+      // ignore probe failure
+    } finally {
+      if (manual) setCheckingProviders(false);
+    }
+  };
+
+  useEffect(() => {
+    void checkProviderStatus(false);
+  }, []);
 
   useEffect(() => {
     if (externalError) {
@@ -301,6 +342,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
         providerDisabled?: boolean;
       };
       if (prepData.providerDisabled) {
+        setEmailPasswordEnabled(false);
         setProviderDisabledHelp(true);
         return;
       }
@@ -310,6 +352,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code || '';
       if (code === 'auth/operation-not-allowed') {
+        setEmailPasswordEnabled(false);
         setProviderDisabledHelp(true);
       } else if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
         setErrorMsg('Invalid email address or password.');
@@ -327,6 +370,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   const handleGoogleLogin = async () => {
     setErrorMsg(null);
     setProviderDisabledHelp(false);
+    setPopupBlockedHelp(false);
     setLoading(true);
     onAuthFlowChange?.(true);
     try {
@@ -338,8 +382,9 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
         return;
       }
       if (code === 'auth/popup-blocked') {
+        setPopupBlockedHelp(true);
         setErrorMsg(
-          'Google Sign-In popup was blocked by your browser. Please allow popups for this site or open the app in a new browser tab and try again.',
+          'Google Sign-In popup was blocked by your browser inside this embedded frame. Click "Open App in New Tab" below or allow popups and try again.',
         );
       } else if (code === 'auth/unauthorized-domain') {
         const host = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
@@ -611,23 +656,179 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 </motion.div>
               </div>
 
-              {/* Account Access Warning Banner (Matches screenshot default state, updates on real auth response) */}
+              {/* Account Access Warning Banner */}
               {errorMsg && (
-                <div className="mb-3.5 px-3.5 py-2.5 rounded-2xl bg-[#9A001B]/45 backdrop-blur-md border border-[#FF1739]/85 shadow-[0_0_20px_rgba(255,23,57,0.28)] flex items-start gap-2.5 text-xs text-white leading-snug">
-                  <AlertTriangle className="w-4 h-4 text-white shrink-0 mt-0.5" />
-                  <span className="flex-1">{errorMsg}</span>
-                  <button
-                    type="button"
-                    onClick={() => setErrorMsg(null)}
-                    className="text-white/70 hover:text-white p-0.5 shrink-0"
-                    aria-label="Dismiss alert"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
+                <div className="mb-3.5 px-3.5 py-2.5 rounded-2xl bg-[#9A001B]/45 backdrop-blur-md border border-[#FF1739]/85 shadow-[0_0_20px_rgba(255,23,57,0.28)] space-y-2 text-xs text-white leading-snug">
+                  <div className="flex items-start gap-2.5">
+                    <AlertTriangle className="w-4 h-4 text-white shrink-0 mt-0.5" />
+                    <span className="flex-1">{errorMsg}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setErrorMsg(null);
+                        setPopupBlockedHelp(false);
+                      }}
+                      className="text-white/70 hover:text-white p-0.5 shrink-0"
+                      aria-label="Dismiss alert"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  {popupBlockedHelp && typeof window !== 'undefined' && (
+                    <div className="pt-1">
+                      <a
+                        href={window.location.href}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white text-[#071329] font-bold hover:bg-slate-100"
+                      >
+                        Open App in New Tab
+                        <ExternalLink className="w-3.5 h-3.5" />
+                      </a>
+                    </div>
+                  )}
                 </div>
               )}
 
-              {providerDisabledHelp && (
+              {/* Custom Animated Dark-Glass Select Centre Dropdown (Shared by Google & Email login) */}
+              <div ref={dropdownRef} className="relative mb-3">
+                <label
+                  htmlFor="centre-dropdown-trigger"
+                  className="flex items-center gap-1.5 text-xs font-bold text-white mb-1"
+                >
+                  <Building2 className="w-3.5 h-3.5 text-slate-300" />
+                  Select Centre
+                </label>
+                <button
+                  id="centre-dropdown-trigger"
+                  type="button"
+                  aria-haspopup="listbox"
+                  aria-expanded={dropdownOpen}
+                  onClick={() => setDropdownOpen((o) => !o)}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-[#0b1630]/65 backdrop-blur-md border border-white/25 hover:border-[#41A9FF]/70 focus:outline-none focus:ring-2 focus:ring-[#41A9FF]/60 focus:border-[#FF1739]/70 text-left flex items-center justify-between gap-2 transition-all shadow-inner"
+                >
+                  <span className="flex items-center gap-2.5 min-w-0">
+                    <Building2 className="w-4 h-4 text-[#FF9C45] shrink-0" />
+                    <span className="text-sm font-semibold text-white truncate">
+                      {CENTRE_MAP[selectedCentreId].name}
+                    </span>
+                  </span>
+                  <ChevronDown
+                    className={`w-4 h-4 text-slate-200 shrink-0 transition-transform duration-200 ${
+                      dropdownOpen ? 'rotate-180' : ''
+                    }`}
+                  />
+                </button>
+
+                <AnimatePresence>
+                  {dropdownOpen && (
+                    <motion.ul
+                      role="listbox"
+                      initial={prefersReducedMotion ? { opacity: 1 } : { opacity: 0, y: -6, scale: 0.98 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6, scale: 0.98 }}
+                      transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+                      className="absolute z-40 mt-1.5 w-full rounded-xl bg-[#071329]/95 backdrop-blur-xl border border-[#41A9FF]/45 shadow-[0_16px_38px_rgba(0,0,0,0.65)] py-1.5 overflow-hidden"
+                    >
+                      {CANONICAL_CENTRES.map((centre) => {
+                        const active = centre.id === selectedCentreId;
+                        return (
+                          <li key={centre.id}>
+                            <button
+                              type="button"
+                              role="option"
+                              aria-selected={active}
+                              onClick={() => {
+                                setSelectedCentreId(centre.id);
+                                setDropdownOpen(false);
+                              }}
+                              className={`w-full px-3.5 py-2 text-left text-xs sm:text-sm flex items-center justify-between gap-2 transition-colors ${
+                                active
+                                  ? 'bg-[#FF1739]/25 text-white font-bold'
+                                  : 'text-slate-200 hover:bg-white/10 font-medium'
+                              }`}
+                            >
+                              <span className="truncate">{centre.name}</span>
+                              {active && <Check className="w-4 h-4 text-[#FFC83D] shrink-0" />}
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </motion.ul>
+                  )}
+                </AnimatePresence>
+              </div>
+
+              {/* When Email/Password is disabled in Firebase Console, promote 1-Click Google Sign-In directly */}
+              {emailPasswordEnabled === false && (
+                <div className="space-y-3 mb-3">
+                  <button
+                    type="button"
+                    onClick={handleGoogleLogin}
+                    disabled={loading}
+                    className="group relative overflow-hidden w-full py-3 px-5 btn-crimson-gloss text-white text-sm font-extrabold rounded-full transition-all duration-200 hover:-translate-y-0.5 disabled:opacity-50 inline-flex items-center justify-center gap-2.5 tracking-wide"
+                  >
+                    <svg className="w-4 h-4 shrink-0 bg-white rounded-full p-0.5" viewBox="0 0 24 24" aria-hidden="true">
+                      <path
+                        fill="#4285F4"
+                        d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z"
+                      />
+                      <path
+                        fill="#34A853"
+                        d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24Z"
+                      />
+                      <path
+                        fill="#FBBC05"
+                        d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14Z"
+                      />
+                      <path
+                        fill="#EA4335"
+                        d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z"
+                      />
+                    </svg>
+                    <span>{loading ? 'Signing in with Google...' : 'Sign in with Google (Instant Login)'}</span>
+                  </button>
+
+                  <div className="p-3.5 rounded-2xl bg-[#0b1630]/80 border border-[#FFC83D]/55 text-xs text-slate-100 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="font-bold text-[#FFC83D]">Email/Password Login Is Off in Firebase</p>
+                      <button
+                        type="button"
+                        onClick={() => void checkProviderStatus(true)}
+                        disabled={checkingProviders}
+                        className="inline-flex items-center gap-1 text-[11px] font-bold text-sky-300 hover:text-white disabled:opacity-50"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${checkingProviders ? 'animate-spin' : ''}`} />
+                        {checkingProviders ? 'Checking...' : 'Re-check'}
+                      </button>
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-slate-200">
+                      Use <strong>Sign in with Google</strong> above for immediate login. If you also want Email &amp; Password login:
+                      open <strong>Firebase Console → Authentication → Sign-in method → Email/Password → Enable → Save</strong>.
+                    </p>
+                    <div className="flex flex-wrap gap-2 pt-0.5">
+                      <a
+                        href={`https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/providers`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-amber-300/45 bg-amber-900/50 text-white hover:bg-amber-800/60 font-semibold text-[11px]"
+                      >
+                        Open Firebase Console
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => setShowEmailFormWhenDisabled((v) => !v)}
+                        className="px-2.5 py-1.5 rounded-lg border border-white/20 bg-white/10 text-slate-200 hover:bg-white/20 font-semibold text-[11px]"
+                      >
+                        {showEmailFormWhenDisabled ? 'Hide Email Form' : 'Use Email/Password Anyway'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {providerDisabledHelp && emailPasswordEnabled !== false && (
                 <div className="mb-3.5 p-3.5 rounded-2xl bg-amber-950/70 border border-[#FFC83D]/70 text-xs text-amber-50 space-y-2">
                   <p className="font-bold text-[#FFC83D]">Email/Password Sign-In Is Disabled in Firebase Console</p>
                   <p className="leading-relaxed text-amber-100/90">
@@ -655,76 +856,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 </div>
               )}
 
-              <form onSubmit={handleEmailLogin} className="space-y-3">
-                  {/* Custom Animated Dark-Glass Select Centre Dropdown */}
-                  <div ref={dropdownRef} className="relative">
-                    <label
-                      htmlFor="centre-dropdown-trigger"
-                      className="flex items-center gap-1.5 text-xs font-bold text-white mb-1"
-                    >
-                      <Building2 className="w-3.5 h-3.5 text-slate-300" />
-                      Select Centre
-                    </label>
-                    <button
-                      id="centre-dropdown-trigger"
-                      type="button"
-                      aria-haspopup="listbox"
-                      aria-expanded={dropdownOpen}
-                      onClick={() => setDropdownOpen((o) => !o)}
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-[#0b1630]/65 backdrop-blur-md border border-white/25 hover:border-[#41A9FF]/70 focus:outline-none focus:ring-2 focus:ring-[#41A9FF]/60 focus:border-[#FF1739]/70 text-left flex items-center justify-between gap-2 transition-all shadow-inner"
-                    >
-                      <span className="flex items-center gap-2.5 min-w-0">
-                        <Building2 className="w-4 h-4 text-[#FF9C45] shrink-0" />
-                        <span className="text-sm font-semibold text-white truncate">
-                          {CENTRE_MAP[selectedCentreId].name}
-                        </span>
-                      </span>
-                      <ChevronDown
-                        className={`w-4 h-4 text-slate-200 shrink-0 transition-transform duration-200 ${
-                          dropdownOpen ? 'rotate-180' : ''
-                        }`}
-                      />
-                    </button>
-
-                    <AnimatePresence>
-                      {dropdownOpen && (
-                        <motion.ul
-                          role="listbox"
-                          initial={prefersReducedMotion ? { opacity: 1 } : { opacity: 0, y: -6, scale: 0.98 }}
-                          animate={{ opacity: 1, y: 0, scale: 1 }}
-                          exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6, scale: 0.98 }}
-                          transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
-                          className="absolute z-40 mt-1.5 w-full rounded-xl bg-[#071329]/95 backdrop-blur-xl border border-[#41A9FF]/45 shadow-[0_16px_38px_rgba(0,0,0,0.65)] py-1.5 overflow-hidden"
-                        >
-                          {CANONICAL_CENTRES.map((centre) => {
-                            const active = centre.id === selectedCentreId;
-                            return (
-                              <li key={centre.id}>
-                                <button
-                                  type="button"
-                                  role="option"
-                                  aria-selected={active}
-                                  onClick={() => {
-                                    setSelectedCentreId(centre.id);
-                                    setDropdownOpen(false);
-                                  }}
-                                  className={`w-full px-3.5 py-2 text-left text-xs sm:text-sm flex items-center justify-between gap-2 transition-colors ${
-                                    active
-                                      ? 'bg-[#FF1739]/25 text-white font-bold'
-                                      : 'text-slate-200 hover:bg-white/10 font-medium'
-                                  }`}
-                                >
-                                  <span className="truncate">{centre.name}</span>
-                                  {active && <Check className="w-4 h-4 text-[#FFC83D] shrink-0" />}
-                                </button>
-                              </li>
-                            );
-                          })}
-                        </motion.ul>
-                      )}
-                    </AnimatePresence>
-                  </div>
-
+              {(emailPasswordEnabled !== false || showEmailFormWhenDisabled) && (
+                <form onSubmit={handleEmailLogin} className="space-y-3">
                   {/* Email Address Field */}
                   <div>
                     <label htmlFor="login-email" className="flex items-center gap-1.5 text-xs font-bold text-white mb-1">
@@ -803,46 +936,58 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                     </span>
                   </button>
                 </form>
+              )}
 
-              {/* OR Divider */}
-              <div className="my-3.5 flex items-center gap-3">
-                <div className="h-px flex-1 bg-white/30" />
-                <span className="text-[11px] text-white font-bold tracking-widest">OR</span>
-                <div className="h-px flex-1 bg-white/30" />
-              </div>
+              {emailPasswordEnabled !== false && (
+                <>
+                  {/* OR Divider */}
+                  <div className="my-3.5 flex items-center gap-3">
+                    <div className="h-px flex-1 bg-white/30" />
+                    <span className="text-[11px] text-white font-bold tracking-widest">OR</span>
+                    <div className="h-px flex-1 bg-white/30" />
+                  </div>
 
-              {/* Rounded-Pill Google Sign-In Button */}
-              <button
-                type="button"
-                onClick={handleGoogleLogin}
-                disabled={loading}
-                className="w-full py-2.5 px-5 bg-gradient-to-b from-white to-slate-100 hover:to-white text-[#071329] text-sm font-bold rounded-full border border-white transition-all duration-200 hover:-translate-y-0.5 flex items-center justify-center gap-2.5 disabled:opacity-50 shadow-[0_8px_24px_rgba(0,0,0,0.35)]"
-              >
-                <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
-                  <path
-                    fill="#4285F4"
-                    d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z"
-                  />
-                  <path
-                    fill="#34A853"
-                    d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24Z"
-                  />
-                  <path
-                    fill="#FBBC05"
-                    d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14Z"
-                  />
-                  <path
-                    fill="#EA4335"
-                    d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z"
-                  />
-                </svg>
-                <span>Sign in with Google</span>
-              </button>
+                  {/* Rounded-Pill Google Sign-In Button */}
+                  <button
+                    type="button"
+                    onClick={handleGoogleLogin}
+                    disabled={loading}
+                    className="w-full py-2.5 px-5 bg-gradient-to-b from-white to-slate-100 hover:to-white text-[#071329] text-sm font-bold rounded-full border border-white transition-all duration-200 hover:-translate-y-0.5 flex items-center justify-center gap-2.5 disabled:opacity-50 shadow-[0_8px_24px_rgba(0,0,0,0.35)]"
+                  >
+                    <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
+                      <path
+                        fill="#4285F4"
+                        d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z"
+                      />
+                      <path
+                        fill="#34A853"
+                        d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24Z"
+                      />
+                      <path
+                        fill="#FBBC05"
+                        d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14Z"
+                      />
+                      <path
+                        fill="#EA4335"
+                        d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z"
+                      />
+                    </svg>
+                    <span>Sign in with Google</span>
+                  </button>
+                </>
+              )}
 
               <p className="mt-3 text-[11px] text-center text-slate-200/95 leading-relaxed">
-                For authorized Centre Heads and Staff members: select your assigned branch above and log in directly with{' '}
-                <strong className="text-white">Email &amp; Password</strong> or{' '}
-                <strong className="text-[#FFC83D]">Sign in with Google</strong>.
+                For Super Admin, Centre Heads, and Staff members: select your assigned branch above and log in directly with{' '}
+                {emailPasswordEnabled === false ? (
+                  <strong className="text-[#FFC83D]">Sign in with Google</strong>
+                ) : (
+                  <>
+                    <strong className="text-white">Email &amp; Password</strong> or{' '}
+                    <strong className="text-[#FFC83D]">Sign in with Google</strong>
+                  </>
+                )}
+                .
               </p>
             </div>
           </motion.section>

@@ -231,6 +231,37 @@ async function startServer() {
     res.json({ status: 'ok', service: 'database-security', projectId: PROJECT_ID });
   });
 
+  // Live check whether Email/Password Sign-In provider is enabled in Firebase Authentication
+  app.get('/api/auth/provider-status', async (_req, res) => {
+    try {
+      const probeRes = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(API_KEY)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: '__provider_probe__@example.invalid',
+            password: 'probe-check-only',
+            returnSecureToken: true,
+          }),
+        },
+      );
+      const probeData = (await probeRes.json().catch(() => ({}))) as {
+        error?: { message?: string };
+      };
+      const errMsg = probeData.error?.message || '';
+      const emailPasswordDisabled =
+        errMsg === 'PASSWORD_LOGIN_DISABLED' || errMsg === 'OPERATION_NOT_ALLOWED';
+      res.json({
+        emailPasswordEnabled: !emailPasswordDisabled,
+        googleEnabled: true,
+        projectId: PROJECT_ID,
+      });
+    } catch {
+      res.json({ emailPasswordEnabled: true, googleEnabled: true, projectId: PROJECT_ID });
+    }
+  });
+
   // Server-side bootstrap check for initial Super Admin login
   app.post('/api/auth/prepare-super-admin', async (req, res) => {
     const email = String(req.body?.email || '').trim().toLowerCase();
@@ -272,7 +303,8 @@ async function startServer() {
         return;
       }
 
-      if (data.error?.message === 'OPERATION_NOT_ALLOWED') {
+      const errMsg = data.error?.message || '';
+      if (errMsg === 'OPERATION_NOT_ALLOWED' || errMsg === 'PASSWORD_LOGIN_DISABLED') {
         res.json({ ready: false, providerDisabled: true });
         return;
       }
@@ -598,7 +630,7 @@ async function startServer() {
 
     if (!signUpRes.ok || !signUpData.localId) {
       const msg = signUpData.error?.message || 'Failed to provision authentication user.';
-      if (msg === 'OPERATION_NOT_ALLOWED') {
+      if (msg === 'OPERATION_NOT_ALLOWED' || msg === 'PASSWORD_LOGIN_DISABLED') {
         res.status(409).json({
           providerDisabled: true,
           code: 'OPERATION_NOT_ALLOWED',
