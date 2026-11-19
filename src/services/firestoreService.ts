@@ -60,9 +60,24 @@ import {
   extractStudentCallingNumber,
   extractStudentFatherName,
   formatLocalDateIso,
+  formatStoredFollowUpDateTime,
+  mapCallStatusToFeeFollowUp,
   sanitizeFirestoreDocId,
   WORK_ASSIGNMENT_DEPARTMENT_LABELS,
 } from '../lib/workAssignment';
+import {
+  type FullDatabaseBackupPayload,
+  sanitizeAdmissionForRestore,
+  sanitizeCentreForRestore,
+  sanitizeExcelSheetConfigForRestore,
+  sanitizeFeeRecoveryForRestore,
+  sanitizeOnlineClassForRestore,
+  sanitizePracticalForRestore,
+  sanitizeStudentForRestore,
+  sanitizeTmaForRestore,
+  sanitizeWorkAssignmentForRestore,
+  sanitizeWorkAssignmentTaskForRestore,
+} from '../lib/databaseBackup';
 
 export function getStudentDeptLockField(
   department: DepartmentId | UserDepartment,
@@ -4231,6 +4246,81 @@ export async function updateWorkAssignmentTask(
       updatedBy: actor.uid,
       updatedAt: serverTimestamp(),
     });
+
+    // Live-sync calling remark & next follow-up schedule into the student's department table document
+    const formattedNextFollowUp = formatStoredFollowUpDateTime(cleanDate, cleanTime);
+    const todayIso = formatLocalDateIso(new Date());
+
+    if (task.department === 'fee_recovery') {
+      const feeRef = doc(db, 'fee_recovery', task.studentId);
+      try {
+        const feeSnap = await getDoc(feeRef);
+        const mappedFollowUp = mapCallStatusToFeeFollowUp(
+          updates.callStatus,
+          feeSnap.exists() ? (feeSnap.data().followUpStatus as FeeFollowUpStatus | undefined) : undefined,
+        );
+        if (feeSnap.exists()) {
+          await updateDoc(feeRef, {
+            followUpNotes: cleanRemark,
+            nextFollowUpDate: formattedNextFollowUp || String(feeSnap.data().nextFollowUpDate || ''),
+            lastContactDate: todayIso,
+            followUpStatus: mappedFollowUp,
+            updatedBy: actor.uid,
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          const totalFee = clampFeeValue(task.totalFee);
+          const pendingAmount = clampFeeValue(task.pendingFee);
+          const paidAmount = Math.max(0, totalFee - pendingAmount);
+          const safeMobile = (task.mobileNumber || task.callingNumber || '0000000000').slice(0, 20);
+          await setDoc(feeRef, {
+            studentId: task.studentId,
+            studentName: (task.studentName || 'Student').slice(0, 120),
+            mobileNumber: safeMobile.length >= 7 ? safeMobile : '0000000000',
+            centreId: task.centreId,
+            recoveryStatus: pendingAmount === 0 && totalFee > 0 ? 'Paid' : paidAmount > 0 ? 'Partial' : 'Pending',
+            followUpStatus: mappedFollowUp,
+            totalFee,
+            paidAmount,
+            pendingAmount,
+            assignedEmployeeUid: actor.uid,
+            assignedEmployeeName: (actor.fullName || task.staffName || 'Staff').slice(0, 100),
+            followUpNotes: cleanRemark,
+            lastContactDate: todayIso,
+            nextFollowUpDate: formattedNextFollowUp || todayIso,
+            ...(actor.role === 'employee'
+              ? { employeeLocked: true, lockedByUid: actor.uid, lockedByName: actor.fullName }
+              : {}),
+            createdBy: actor.uid,
+            createdAt: serverTimestamp(),
+            updatedBy: actor.uid,
+            updatedAt: serverTimestamp(),
+          });
+        }
+      } catch {
+        // Non-blocking: task update already succeeded and UI also reads live from work_assignment_tasks
+      }
+    } else if (task.department === 'practical' || task.department === 'tma') {
+      const colName = task.department === 'practical' ? 'practical_records' : 'tma_records';
+      const combinedRemark = formattedNextFollowUp
+        ? `[Next Call: ${formattedNextFollowUp}] ${cleanRemark}`.trim().slice(0, 1000)
+        : cleanRemark;
+      if (combinedRemark) {
+        try {
+          const deptRef = doc(db, colName, task.studentId);
+          const deptSnap = await getDoc(deptRef);
+          if (deptSnap.exists()) {
+            await updateDoc(deptRef, {
+              remarks: combinedRemark,
+              updatedBy: actor.uid,
+              updatedAt: serverTimestamp(),
+            });
+          }
+        } catch {
+          // Non-blocking fallback
+        }
+      }
+    }
   } catch (err) {
     handleFirestoreError(err, OperationType.UPDATE, path);
   }
@@ -4294,6 +4384,250 @@ export async function deleteWorkAssignmentBatch(
     handleFirestoreError(err, OperationType.DELETE, path);
   }
 }
+
+export interface RestoreProgressState {
+  stage: string;
+  processed: number;
+  total: number;
+}
+
+export interface RestoreDatabaseResult {
+  restoredCounts: Record<string, number>;
+  skippedCount: number;
+  failedCount: number;
+  totalRestored: number;
+}
+
+export async function restoreFullDatabaseBackup(
+  backup: FullDatabaseBackupPayload,
+  actor: UserAccount,
+  onProgress?: (progress: RestoreProgressState) => void,
+): Promise<RestoreDatabaseResult> {
+  if (actor.role !== 'super_admin') {
+    throw new Error('Only Super Admin can restore a full institutional database backup.');
+  }
+
+  const totalDocs = Math.max(
+    1,
+    backup.centres.length +
+      backup.excel_sheet_configs.length +
+      backup.students.length +
+      backup.fee_recovery.length +
+      backup.practical_records.length +
+      backup.tma_records.length +
+      backup.online_class_records.length +
+      backup.admission_records.length +
+      backup.work_assignments.length +
+      backup.work_assignment_tasks.length +
+      (backup.settings ? 1 : 0),
+  );
+
+  let processed = 0;
+  let skippedCount = 0;
+  let failedCount = 0;
+  const restoredCounts: Record<string, number> = {};
+
+  const emitProgress = (stage: string) => {
+    onProgress?.({ stage, processed, total: totalDocs });
+  };
+
+  const writeCollectionChunked = async (
+    colName: string,
+    label: string,
+    items: Array<{ id: string; data: Record<string, unknown> }>,
+    options: { hasCreatedAt: boolean; hasCreatedBy: boolean },
+  ): Promise<Set<string>> => {
+    const writtenIds = new Set<string>();
+    if (items.length === 0) {
+      restoredCounts[colName] = 0;
+      return writtenIds;
+    }
+
+    emitProgress(`Checking existing ${label}...`);
+    const existingMap = new Map<string, { createdAt?: unknown; createdBy?: unknown }>();
+    try {
+      const existingSnap = await getDocs(collection(db, colName));
+      existingSnap.forEach((d) => {
+        const raw = d.data();
+        existingMap.set(d.id, { createdAt: raw.createdAt, createdBy: raw.createdBy });
+        writtenIds.add(d.id);
+      });
+    } catch {
+      // Proceed with create payloads if target collection is empty/unreadable
+    }
+
+    const chunkSize = 180;
+    let restoredInCol = 0;
+    for (let i = 0; i < items.length; i += chunkSize) {
+      const chunk = items.slice(i, i + chunkSize);
+      emitProgress(`Restoring ${label} (${Math.min(i + chunk.length, items.length)} / ${items.length})...`);
+
+      const prepared = chunk.map((item) => {
+        const existing = existingMap.get(item.id);
+        const payload: Record<string, unknown> = { ...item.data, updatedAt: serverTimestamp() };
+        if (options.hasCreatedAt) {
+          payload.createdAt = existing?.createdAt ?? serverTimestamp();
+        }
+        if (options.hasCreatedBy && existing?.createdBy && typeof existing.createdBy === 'string') {
+          payload.createdBy = existing.createdBy;
+        }
+        return { id: item.id, payload };
+      });
+
+      try {
+        const batch = writeBatch(db);
+        for (const row of prepared) {
+          batch.set(doc(db, colName, row.id), row.payload);
+        }
+        await batch.commit();
+        for (const row of prepared) {
+          writtenIds.add(row.id);
+        }
+        restoredInCol += prepared.length;
+      } catch {
+        // Fallback per-document so one bad legacy doc never blocks the remaining records
+        for (const row of prepared) {
+          try {
+            await setDoc(doc(db, colName, row.id), row.payload);
+            writtenIds.add(row.id);
+            restoredInCol += 1;
+          } catch {
+            failedCount += 1;
+          }
+        }
+      }
+
+      processed += chunk.length;
+      emitProgress(`Restored ${label}...`);
+    }
+
+    restoredCounts[colName] = restoredInCol;
+    return writtenIds;
+  };
+
+  // 1. Centres (prerequisite for students)
+  const centreItems = backup.centres.map((raw) => sanitizeCentreForRestore(raw, actor.uid));
+  await writeCollectionChunked('centres', 'Centres', centreItems, { hasCreatedAt: true, hasCreatedBy: false });
+
+  // 2. Excel Sheet Configs (column headings, custom columns, deleted columns)
+  const configItems = backup.excel_sheet_configs.map((raw) => sanitizeExcelSheetConfigForRestore(raw, actor.uid));
+  await writeCollectionChunked('excel_sheet_configs', 'Excel Sheet Configs', configItems, {
+    hasCreatedAt: false,
+    hasCreatedBy: false,
+  });
+
+  // 3. Students (prerequisite for all 5 department collections)
+  const studentItems = backup.students.map((raw, idx) => sanitizeStudentForRestore(raw, actor.uid, idx + 1));
+  const validStudentIds = await writeCollectionChunked('students', 'Students', studentItems, {
+    hasCreatedAt: true,
+    hasCreatedBy: true,
+  });
+
+  const filterByExistingStudent = (items: Array<{ id: string; data: Record<string, unknown> }>) => {
+    const valid: Array<{ id: string; data: Record<string, unknown> }> = [];
+    for (const item of items) {
+      if (validStudentIds.has(item.id)) {
+        valid.push(item);
+      } else {
+        skippedCount += 1;
+        processed += 1;
+      }
+    }
+    return valid;
+  };
+
+  // 4. Department Records (requires studentId existence per firestore.rules)
+  await writeCollectionChunked(
+    'fee_recovery',
+    'Fee Recovery Records',
+    filterByExistingStudent(backup.fee_recovery.map((raw) => sanitizeFeeRecoveryForRestore(raw, actor.uid))),
+    { hasCreatedAt: true, hasCreatedBy: true },
+  );
+
+  await writeCollectionChunked(
+    'practical_records',
+    'Practical Records',
+    filterByExistingStudent(backup.practical_records.map((raw) => sanitizePracticalForRestore(raw, actor.uid))),
+    { hasCreatedAt: true, hasCreatedBy: true },
+  );
+
+  await writeCollectionChunked(
+    'tma_records',
+    'TMA Records',
+    filterByExistingStudent(backup.tma_records.map((raw) => sanitizeTmaForRestore(raw, actor.uid))),
+    { hasCreatedAt: true, hasCreatedBy: true },
+  );
+
+  await writeCollectionChunked(
+    'online_class_records',
+    'Online Classes Records',
+    filterByExistingStudent(backup.online_class_records.map((raw) => sanitizeOnlineClassForRestore(raw, actor.uid))),
+    { hasCreatedAt: true, hasCreatedBy: true },
+  );
+
+  await writeCollectionChunked(
+    'admission_records',
+    'Admission Records',
+    filterByExistingStudent(backup.admission_records.map((raw) => sanitizeAdmissionForRestore(raw, actor.uid))),
+    { hasCreatedAt: true, hasCreatedBy: true },
+  );
+
+  // 5. Work Assignments & Tasks
+  await writeCollectionChunked(
+    'work_assignments',
+    'Staff Work Assignments',
+    backup.work_assignments.map((raw) => sanitizeWorkAssignmentForRestore(raw, actor.uid, actor.fullName)),
+    { hasCreatedAt: true, hasCreatedBy: false },
+  );
+
+  await writeCollectionChunked(
+    'work_assignment_tasks',
+    'Staff Calling Tasks',
+    backup.work_assignment_tasks.map((raw) => sanitizeWorkAssignmentTaskForRestore(raw, actor.uid)),
+    { hasCreatedAt: true, hasCreatedBy: false },
+  );
+
+  // 6. Global System Settings
+  if (backup.settings) {
+    emitProgress('Restoring System Settings...');
+    try {
+      await setDoc(doc(db, 'system_settings', 'global'), {
+        superAdminEmail: actor.email,
+        superAdminUid: actor.uid,
+        geofenceEnabled: backup.settings.geofenceEnabled !== false,
+        emergencyOverrideActive: backup.settings.emergencyOverrideActive === true,
+        sessionTimeoutMinutes: Math.min(1440, Math.max(5, Number(backup.settings.sessionTimeoutMinutes) || 60)),
+        maxGpsAccuracyMeters: Math.min(5000, Math.max(20, Number(backup.settings.maxGpsAccuracyMeters) || 500)),
+        updatedAt: serverTimestamp(),
+        updatedBy: actor.uid,
+      });
+      restoredCounts.system_settings = 1;
+    } catch {
+      failedCount += 1;
+    }
+    processed += 1;
+  }
+
+  const totalRestored = Object.values(restoredCounts).reduce((sum, n) => sum + n, 0);
+  emitProgress('Restore complete!');
+
+  await logActivity({
+    actorUid: actor.uid,
+    actorName: actor.fullName,
+    actorEmail: actor.email,
+    actorRole: actor.role,
+    centreId: actor.centreId,
+    department: actor.department,
+    action: 'DATABASE_BACKUP_RESTORED',
+    targetCollection: 'system_settings',
+    targetId: 'global',
+    details: `Restored ${totalRestored} records from backup JSON (students: ${restoredCounts.students || 0}, fees: ${restoredCounts.fee_recovery || 0}, skipped: ${skippedCount}, failed: ${failedCount}).`,
+    locationVerified: true,
+  }).catch(() => {});
+
+  return { restoredCounts, skippedCount, failedCount, totalRestored };
+}
+
 
 
 

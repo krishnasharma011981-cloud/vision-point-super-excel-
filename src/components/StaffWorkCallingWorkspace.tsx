@@ -11,7 +11,6 @@ import {
   Plus,
   RefreshCw,
   Save,
-  Search,
   Trash2,
   User,
   X,
@@ -101,7 +100,6 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
 
   const [selectedBatchId, setSelectedBatchId] = useState<string>('');
   const [filterTab, setFilterTab] = useState<'all' | 'pending' | 'followup' | 'done'>('all');
-  const [searchQuery, setSearchQuery] = useState('');
   const [selectedTaskId, setSelectedTaskId] = useState<string>('');
 
   // Editable form state for the active student box
@@ -134,7 +132,6 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
   const progress = useMemo(() => computeAssignmentProgress(batchTasks), [batchTasks]);
 
   const filteredTasks = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
     return batchTasks.filter((t) => {
       if (filterTab === 'pending' && t.callStatus !== 'Pending' && t.callStatus !== 'Not Answered') {
         return false;
@@ -145,16 +142,9 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
       if (filterTab === 'done' && t.callStatus !== 'Called - Done') {
         return false;
       }
-      if (!q) return true;
-      return (
-        t.studentName.toLowerCase().includes(q) ||
-        t.fatherName.toLowerCase().includes(q) ||
-        t.callingNumber.toLowerCase().includes(q) ||
-        t.mobileNumber.toLowerCase().includes(q) ||
-        String(t.serialNumber).includes(q)
-      );
+      return true;
     });
-  }, [batchTasks, filterTab, searchQuery]);
+  }, [batchTasks, filterTab]);
 
   // Keep selectedTaskId synced with available tasks
   useEffect(() => {
@@ -219,7 +209,7 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
 
       onNotify(
         'Call Update Saved',
-        `Saved remark & follow-up for #${activeTask.serialNumber} ${activeTask.studentName}.`,
+        `Saved remark & follow-up for #${activeTask.serialNumber} ${activeTask.studentName}. Synced to department sheet.`,
         'success',
       );
 
@@ -260,10 +250,10 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
   const displayPhone = activeTask?.callingNumber || activeTask?.mobileNumber || 'Not Provided';
 
   return (
-    <div className="space-y-5">
+    <div className="max-w-3xl mx-auto space-y-5">
       {/* Top Assigned Batch Header & Live Progress */}
       <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <p className="text-[11px] font-bold uppercase tracking-wider text-red-700">
               {deptLabel} · Assigned Work Box
@@ -282,7 +272,7 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
           </div>
 
           {/* Live Progress Counters */}
-          <div className="grid grid-cols-4 gap-3 text-center">
+          <div className="grid grid-cols-4 gap-2.5 text-center shrink-0">
             <div className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-200">
               <p className="text-[10px] font-bold uppercase text-slate-600">Pending</p>
               <p className="text-lg font-extrabold font-mono tabular-nums text-slate-900">
@@ -308,151 +298,74 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
           </div>
         </div>
 
-        {/* Multiple Active Batches Switcher (only shown if admin added multiple active batches) */}
-        {activeBatches.length > 1 && (
-          <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center gap-2">
-            <span className="text-xs font-semibold text-slate-600">Assigned Batches:</span>
-            {activeBatches.map((b) => (
+        {/* Filter Mode Pills (keeps strictly 1 student visible at a time) */}
+        <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            {(
+              [
+                { id: 'all', label: `All (${batchTasks.length})` },
+                { id: 'pending', label: `Pending (${progress.pending + progress.notAnswered})` },
+                { id: 'followup', label: `Follow-up (${progress.followUpScheduled})` },
+                { id: 'done', label: `Done (${progress.completed})` },
+              ] as const
+            ).map((tab) => (
               <button
-                key={b.assignmentId}
+                key={tab.id}
                 type="button"
-                onClick={() => setSelectedBatchId(b.assignmentId)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors ${
-                  b.assignmentId === currentBatch.assignmentId
+                onClick={() => setFilterTab(tab.id)}
+                className={`px-3 py-1.5 rounded-lg font-bold border transition-colors ${
+                  filterTab === tab.id
                     ? 'bg-slate-900 text-white border-slate-900'
                     : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
                 }`}
               >
-                S.No #{b.fromSerial}–#{b.toSerial} ({b.totalStudents})
+                {tab.label}
               </button>
             ))}
           </div>
-        )}
-      </div>
 
-      {/* Main Split Calling Layout: Compact Queue Rail (Left) + Big Calling Box (Right) */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-        {/* Left Student Queue Selector */}
-        <div className="lg:col-span-4 bg-white rounded-2xl border border-slate-200 overflow-hidden">
-          <div className="p-3.5 border-b border-slate-200 space-y-2.5 bg-slate-50/70">
-            <div className="relative">
-              <Search className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search name, father, mobile, S.No..."
-                className="w-full pl-9 pr-3 py-2 text-xs bg-white text-slate-900 placeholder:text-slate-400 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
-              />
-            </div>
-            <div className="grid grid-cols-4 gap-1 text-[11px]">
-              {(
-                [
-                  { id: 'all', label: `All (${batchTasks.length})` },
-                  { id: 'pending', label: `Pending (${progress.pending + progress.notAnswered})` },
-                  { id: 'followup', label: `Follow (${progress.followUpScheduled})` },
-                  { id: 'done', label: `Done (${progress.completed})` },
-                ] as const
-              ).map((tab) => (
+          {activeBatches.length > 1 && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {activeBatches.map((b) => (
                 <button
-                  key={tab.id}
+                  key={b.assignmentId}
                   type="button"
-                  onClick={() => setFilterTab(tab.id)}
-                  className={`py-1.5 px-1 rounded-lg font-bold border text-center transition-colors truncate ${
-                    filterTab === tab.id
-                      ? 'bg-slate-900 text-white border-slate-900'
-                      : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                  onClick={() => setSelectedBatchId(b.assignmentId)}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-colors ${
+                    b.assignmentId === currentBatch.assignmentId
+                      ? 'bg-red-700 text-white border-red-700'
+                      : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
                   }`}
                 >
-                  {tab.label}
+                  #{b.fromSerial}–#{b.toSerial}
                 </button>
               ))}
             </div>
-          </div>
-
-          <div className="max-h-[600px] overflow-y-auto divide-y divide-slate-100">
-            {filteredTasks.length === 0 ? (
-              <div className="p-8 text-center text-xs text-slate-500">
-                No students match this filter.
-              </div>
-            ) : (
-              filteredTasks.map((t) => {
-                const isSelected = activeTask?.taskId === t.taskId;
-                const sched = formatFollowUpSchedule(t.followUpDate, t.followUpTime);
-                return (
-                  <button
-                    key={t.taskId}
-                    type="button"
-                    onClick={() => setSelectedTaskId(t.taskId)}
-                    className={`w-full text-left px-4 py-3 transition-colors flex items-start justify-between gap-2 ${
-                      isSelected ? 'bg-red-50/90' : 'hover:bg-slate-50'
-                    }`}
-                  >
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`font-mono text-xs font-extrabold tabular-nums ${
-                            isSelected ? 'text-red-700' : 'text-slate-500'
-                          }`}
-                        >
-                          #{t.serialNumber}
-                        </span>
-                        <p className="text-sm font-bold text-slate-950 truncate">{t.studentName}</p>
-                      </div>
-                      <p className="text-[11px] text-slate-600 truncate mt-0.5">
-                        Father: {t.fatherName || '—'}
-                      </p>
-                      {sched.hasSchedule && (
-                        <p className="text-[11px] font-semibold text-amber-800 mt-1 flex items-center gap-1">
-                          <Clock className="w-3 h-3 shrink-0" />
-                          {sched.label}
-                        </p>
-                      )}
-                    </div>
-                    <span
-                      className={`text-[10px] font-bold uppercase shrink-0 mt-0.5 ${
-                        t.callStatus === 'Called - Done'
-                          ? 'text-emerald-700'
-                          : t.callStatus === 'Follow-up Scheduled'
-                            ? 'text-amber-700'
-                            : t.callStatus === 'Not Answered'
-                              ? 'text-rose-700'
-                              : 'text-slate-500'
-                      }`}
-                    >
-                      {t.callStatus === 'Called - Done'
-                        ? 'Done'
-                        : t.callStatus === 'Follow-up Scheduled'
-                          ? 'Follow-up'
-                          : t.callStatus === 'Not Answered'
-                            ? 'No Ans'
-                            : 'Pending'}
-                    </span>
-                  </button>
-                );
-              })
-            )}
-          </div>
+          )}
         </div>
+      </div>
 
-        {/* Right BIG CALLING BOX (Hero Card — Zero Excel Clutter) */}
-        <div className="lg:col-span-8">
-          {!activeTask ? (
-            <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center text-sm text-slate-600">
-              Select a student from the left list to open their calling card.
-            </div>
-          ) : (
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-8 space-y-6">
-              {/* Top Card Stepper */}
-              <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-200">
-                <div className="flex items-center gap-3">
-                  <span className="px-3 py-1 rounded-lg bg-slate-900 text-white font-mono text-sm font-extrabold tabular-nums">
-                    S.No #{activeTask.serialNumber}
-                  </span>
-                  <span className="text-xs font-mono font-semibold text-slate-600">
-                    Card {activeIndex + 1} of {filteredTasks.length}
-                  </span>
-                </div>
+      {/* SINGLE FOCUSED STUDENT CALLING BOX (Only 1 student shown at a time — click Next for next student) */}
+      <div>
+        {!activeTask ? (
+          <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center space-y-2">
+            <p className="text-base font-bold text-slate-900">No students in this filter</p>
+            <p className="text-xs text-slate-600">
+              Switch to <strong>All ({batchTasks.length})</strong> above to view assigned students.
+            </p>
+          </div>
+        ) : (
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-8 space-y-6">
+            {/* Top Card Stepper */}
+            <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-200">
+              <div className="flex items-center gap-3">
+                <span className="px-3 py-1 rounded-lg bg-slate-900 text-white font-mono text-sm font-extrabold tabular-nums">
+                  S.No #{activeTask.serialNumber}
+                </span>
+                <span className="text-xs font-mono font-semibold text-slate-600">
+                  Student {activeIndex + 1} of {filteredTasks.length}
+                </span>
+              </div>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
@@ -715,7 +628,6 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
               </div>
             </div>
           )}
-        </div>
       </div>
     </div>
   );

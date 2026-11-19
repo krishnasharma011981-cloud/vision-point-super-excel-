@@ -717,7 +717,8 @@ service cloud.firestore {
       allow update: if isValidId(studentId) && isActiveUser() && isValidFeeRecovery(incoming()) && incoming().studentId == existing().studentId && incoming().createdAt == existing().createdAt && incoming().createdBy == existing().createdBy && incoming().updatedAt == request.time && (
         isSuperAdmin() ||
         (incoming().centreId == existing().centreId && isCentreHeadOf(existing().centreId)) ||
-        (incoming().centreId == existing().centreId && isEmployeeOf(existing().centreId, 'fee_recovery') && (!('employeeLocked' in existing()) || existing().employeeLocked == false) && incoming().employeeLocked == true && incoming().lockedByUid == request.auth.uid && incoming().updatedBy == request.auth.uid)
+        (incoming().centreId == existing().centreId && isEmployeeOf(existing().centreId, 'fee_recovery') && (!('employeeLocked' in existing()) || existing().employeeLocked == false) && incoming().employeeLocked == true && incoming().lockedByUid == request.auth.uid && incoming().updatedBy == request.auth.uid) ||
+        (incoming().centreId == existing().centreId && isEmployeeOf(existing().centreId, 'fee_recovery') && incoming().updatedBy == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['followUpNotes', 'nextFollowUpDate', 'lastContactDate', 'followUpStatus', 'updatedBy', 'updatedAt']))
       );
       allow delete: if isValidId(studentId) && isSuperAdmin();
     }
@@ -733,7 +734,8 @@ service cloud.firestore {
       allow update: if isValidId(studentId) && isActiveUser() && isValidPracticalRecord(incoming()) && incoming().studentId == existing().studentId && incoming().createdAt == existing().createdAt && incoming().createdBy == existing().createdBy && incoming().updatedAt == request.time && (
         isSuperAdmin() ||
         (incoming().centreId == existing().centreId && isCentreHeadOf(existing().centreId)) ||
-        (incoming().centreId == existing().centreId && isEmployeeOf(existing().centreId, 'practical') && (!('employeeLocked' in existing()) || existing().employeeLocked == false) && incoming().employeeLocked == true && incoming().lockedByUid == request.auth.uid && incoming().updatedBy == request.auth.uid)
+        (incoming().centreId == existing().centreId && isEmployeeOf(existing().centreId, 'practical') && (!('employeeLocked' in existing()) || existing().employeeLocked == false) && incoming().employeeLocked == true && incoming().lockedByUid == request.auth.uid && incoming().updatedBy == request.auth.uid) ||
+        (incoming().centreId == existing().centreId && isEmployeeOf(existing().centreId, 'practical') && incoming().updatedBy == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['remarks', 'updatedBy', 'updatedAt']))
       );
       allow delete: if isValidId(studentId) && isSuperAdmin();
     }
@@ -749,7 +751,8 @@ service cloud.firestore {
       allow update: if isValidId(studentId) && isActiveUser() && isValidTmaRecord(incoming()) && incoming().studentId == existing().studentId && incoming().createdAt == existing().createdAt && incoming().createdBy == existing().createdBy && incoming().updatedAt == request.time && (
         isSuperAdmin() ||
         (incoming().centreId == existing().centreId && isCentreHeadOf(existing().centreId)) ||
-        (incoming().centreId == existing().centreId && isEmployeeOf(existing().centreId, 'tma') && (!('employeeLocked' in existing()) || existing().employeeLocked == false) && incoming().employeeLocked == true && incoming().lockedByUid == request.auth.uid && incoming().updatedBy == request.auth.uid)
+        (incoming().centreId == existing().centreId && isEmployeeOf(existing().centreId, 'tma') && (!('employeeLocked' in existing()) || existing().employeeLocked == false) && incoming().employeeLocked == true && incoming().lockedByUid == request.auth.uid && incoming().updatedBy == request.auth.uid) ||
+        (incoming().centreId == existing().centreId && isEmployeeOf(existing().centreId, 'tma') && incoming().updatedBy == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['remarks', 'updatedBy', 'updatedAt']))
       );
       allow delete: if isValidId(studentId) && isSuperAdmin();
     }

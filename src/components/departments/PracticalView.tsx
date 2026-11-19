@@ -9,6 +9,10 @@ import {
   sanitizeRealSubject,
 } from '../../lib/csvUtils';
 import { verifyOperationLocation } from '../../lib/securityClient';
+import {
+  buildLatestTaskByStudentMap,
+  formatStoredFollowUpDateTime,
+} from '../../lib/workAssignment';
 import { clearMockSubjectsFromStudents, upsertPracticalRecord } from '../../services/firestoreService';
 import type {
   CentreId,
@@ -109,13 +113,23 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
     [students, effectiveCentre],
   );
 
+  const latestTaskMap = useMemo(
+    () => buildLatestTaskByStudentMap(workAssignmentTasks, 'practical'),
+    [workAssignmentTasks],
+  );
+
   const rows = useMemo(() => {
     return scopedStudents
       .map((s) => {
         const rec = recMap.get(s.studentId);
+        const latestTask = latestTaskMap.get(s.studentId);
         const lockedForEmployee =
           currentUser.role === 'employee' && (Boolean(s.practicalLocked) || Boolean(rec?.employeeLocked));
         const displaySubject = getDisplaySubject(s.subject);
+        const taskFollowUp = latestTask
+          ? formatStoredFollowUpDateTime(latestTask.followUpDate, latestTask.followUpTime)
+          : '';
+        const mergedRemark = latestTask?.remark?.trim() || rec?.remarks || '';
         return {
           student: s,
           displaySerial: displaySerialMap.get(s.studentId) ?? s.serialNumber,
@@ -123,8 +137,9 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
           practicalStatus: rec?.practicalStatus || s.practicalStatus,
           submissionStatus: rec?.submissionStatus || 'Not Submitted',
           completionPercentage: rec?.completionPercentage ?? (s.practicalStatus === 'Completed' ? 100 : 0),
-          assignedEmployeeName: rec?.assignedEmployeeName || s.assignedEmployeeName || 'Unassigned',
-          remarks: rec?.remarks || '',
+          assignedEmployeeName: latestTask?.staffName || rec?.assignedEmployeeName || s.assignedEmployeeName || 'Unassigned',
+          nextFollowUp: taskFollowUp,
+          remarks: mergedRemark,
           lockedForEmployee,
         };
       })
@@ -135,11 +150,12 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
           r.student.studentName.toLowerCase().includes(combinedSearch) ||
           r.student.studentId.toLowerCase().includes(combinedSearch) ||
           r.student.mobileNumber.toLowerCase().includes(combinedSearch) ||
-          r.displaySubject.toLowerCase().includes(combinedSearch)
+          r.displaySubject.toLowerCase().includes(combinedSearch) ||
+          r.remarks.toLowerCase().includes(combinedSearch)
         );
       })
       .sort((a, b) => a.displaySerial - b.displaySerial);
-  }, [scopedStudents, recMap, statusFilter, combinedSearch, displaySerialMap, currentUser.role, cleanupDone]);
+  }, [scopedStudents, recMap, latestTaskMap, statusFilter, combinedSearch, displaySerialMap, currentUser.role, cleanupDone]);
 
   const completedCount = rows.filter((r) => r.practicalStatus === 'Completed').length;
   const pendingCount = rows.filter((r) => r.practicalStatus !== 'Completed').length;
@@ -380,6 +396,7 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
                   <th className="py-3 px-4">Practical Status</th>
                   <th className="py-3 px-4">Submission</th>
                   <th className="py-3 px-4 text-right">Completion</th>
+                  <th className="py-3 px-4">Call Remark &amp; Follow-Up</th>
                   <th className="py-3 px-4">Assigned</th>
                   <th className="py-3 px-4 text-right">Update</th>
                 </tr>
@@ -451,6 +468,14 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
                     <td className="py-3 px-4 text-zinc-800">{r.submissionStatus}</td>
                     <td className="py-3 px-4 text-right font-mono tabular-nums font-semibold text-black">
                       {r.completionPercentage}%
+                    </td>
+                    <td className="py-3 px-4 min-w-[180px] max-w-[260px] whitespace-normal leading-snug">
+                      {r.nextFollowUp && (
+                        <p className="text-[11px] font-mono font-bold text-amber-900 mb-0.5">
+                          Next: {r.nextFollowUp}
+                        </p>
+                      )}
+                      <p className="text-slate-800 break-words">{r.remarks || '—'}</p>
                     </td>
                     <td className="py-3 px-4 text-zinc-800">{r.assignedEmployeeName}</td>
                     <td className="py-3 px-4 text-right">

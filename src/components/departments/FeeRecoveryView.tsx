@@ -1,4 +1,5 @@
 import {
+  Clock,
   Download,
   FileSpreadsheet,
   IndianRupee,
@@ -22,6 +23,11 @@ import {
 import { buildContextualSerialMap, exportToCsv } from '../../lib/csvUtils';
 import { playDeleteWarningVoice } from '../../lib/deleteSecurity';
 import { verifyOperationLocation } from '../../lib/securityClient';
+import {
+  buildLatestTaskByStudentMap,
+  formatStoredFollowUpDateTime,
+  mapCallStatusToFeeFollowUp,
+} from '../../lib/workAssignment';
 import {
   deleteFeeRecoveryRecordsBatch,
   resetAllFeeRecordsToZero,
@@ -131,18 +137,35 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
     [students, effectiveCentre],
   );
 
+  const latestTaskMap = useMemo(
+    () => buildLatestTaskByStudentMap(workAssignmentTasks, 'fee_recovery'),
+    [workAssignmentTasks],
+  );
+
   const allScopedRows = useMemo(() => {
     return scopedStudents.map((s) => {
       const rec = feeMap.get(s.studentId);
+      const latestTask = latestTaskMap.get(s.studentId);
       const resolved = resolveStudentFeeSummary(s, rec);
       const fullyPaid = isFeeFullyPaid(resolved);
       const lockedForEmployee = currentUser.role === 'employee' && Boolean(rec?.employeeLocked);
+
+      const taskNextFollowUp = latestTask
+        ? formatStoredFollowUpDateTime(latestTask.followUpDate, latestTask.followUpTime)
+        : '';
+      const resolvedNextFollowUp = taskNextFollowUp || rec?.nextFollowUpDate || '—';
+      const resolvedRemark = latestTask?.remark?.trim() || rec?.followUpNotes?.trim() || '';
+      const resolvedFollowUpStatus = latestTask
+        ? mapCallStatusToFeeFollowUp(latestTask.callStatus, resolved.followUpStatus)
+        : resolved.followUpStatus;
+
       return {
         student: s,
         displaySerial: displaySerialMap.get(s.studentId) ?? s.serialNumber,
         record: rec,
+        latestTask,
         recoveryStatus: resolved.recoveryStatus,
-        followUpStatus: resolved.followUpStatus,
+        followUpStatus: resolvedFollowUpStatus,
         fullyPaid,
         totalFee: resolved.totalFee,
         paidAmount: resolved.paidAmount,
@@ -150,14 +173,16 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
         tmaFee: resolved.tmaFee,
         examFee: resolved.examFee,
         hasFeeData: resolved.hasFeeData,
-        assignedEmployeeName: rec?.assignedEmployeeName || s.assignedEmployeeName || 'Unassigned',
-        lastContactDate: rec?.lastContactDate || '—',
-        nextFollowUpDate: rec?.nextFollowUpDate || '—',
-        followUpNotes: rec?.followUpNotes || '',
+        assignedEmployeeName: latestTask?.staffName || rec?.assignedEmployeeName || s.assignedEmployeeName || 'Unassigned',
+        lastContactDate: latestTask?.lastCalledAt ? latestTask.lastCalledAt.slice(0, 10) : (rec?.lastContactDate || '—'),
+        nextFollowUpDate: resolvedNextFollowUp,
+        hasCallingSchedule: Boolean(taskNextFollowUp),
+        followUpNotes: resolvedRemark,
+        callStatusLabel: latestTask?.callStatus || '',
         lockedForEmployee,
       };
     });
-  }, [scopedStudents, feeMap, displaySerialMap, currentUser.role]);
+  }, [scopedStudents, feeMap, latestTaskMap, displaySerialMap, currentUser.role]);
 
   const scopeCounts = useMemo(() => {
     let paid = 0;
@@ -194,7 +219,8 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
         return (
           r.student.studentName.toLowerCase().includes(combinedSearch) ||
           r.student.studentId.toLowerCase().includes(combinedSearch) ||
-          r.student.mobileNumber.toLowerCase().includes(combinedSearch)
+          r.student.mobileNumber.toLowerCase().includes(combinedSearch) ||
+          r.followUpNotes.toLowerCase().includes(combinedSearch)
         );
       })
       .sort((a, b) => {
@@ -249,10 +275,16 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
     setPaidAmount(String(resolved.paidAmount));
     setTmaFee(String(resolved.tmaFee));
     setExamFee(String(resolved.examFee));
+    const latestTask = latestTaskMap.get(student.studentId);
+    const taskFollowUp = latestTask
+      ? formatStoredFollowUpDateTime(latestTask.followUpDate, latestTask.followUpTime)
+      : '';
     setAssignedEmployeeUid(existing?.assignedEmployeeUid || student.assignedEmployeeUid || currentUser.uid);
-    setFollowUpNotes(existing?.followUpNotes || '');
-    setLastContactDate(existing?.lastContactDate || new Date().toISOString().slice(0, 10));
-    setNextFollowUpDate(existing?.nextFollowUpDate || new Date().toISOString().slice(0, 10));
+    setFollowUpNotes(latestTask?.remark?.trim() || existing?.followUpNotes || '');
+    setLastContactDate(
+      latestTask?.lastCalledAt ? latestTask.lastCalledAt.slice(0, 10) : (existing?.lastContactDate || new Date().toISOString().slice(0, 10)),
+    );
+    setNextFollowUpDate(taskFollowUp || existing?.nextFollowUpDate || new Date().toISOString().slice(0, 10));
   };
 
   const handleAmountFieldChange = (nextTotalStr: string, nextPaidStr: string) => {
@@ -426,6 +458,7 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
         'Exam Fee (INR)',
         'Last Contact',
         'Next Follow-Up',
+        'Call Remark',
         'Assigned To',
       ],
       rows.map((r) => [
@@ -443,6 +476,7 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
         r.examFee,
         r.lastContactDate,
         r.nextFollowUpDate,
+        r.followUpNotes || '',
         r.assignedEmployeeName,
       ]),
     );
@@ -778,6 +812,7 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
                   <th className="py-3 px-4 text-right">TMA Fee</th>
                   <th className="py-3 px-4 text-right">Exam Fee</th>
                   <th className="py-3 px-4">Next Follow-Up</th>
+                  <th className="py-3 px-4">Call Remark</th>
                   <th className="py-3 px-4">Assigned</th>
                   <th className="py-3 px-4 text-right">Update</th>
                 </tr>
@@ -865,7 +900,31 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
                     <td className="py-3 px-4 text-right font-mono font-semibold text-indigo-800 tabular-nums whitespace-nowrap">
                       ₹{r.examFee.toLocaleString('en-IN')}
                     </td>
-                    <td className="py-3 px-4 font-mono text-zinc-700 whitespace-nowrap">{r.nextFollowUpDate}</td>
+                    <td className="py-3 px-4 font-mono whitespace-nowrap">
+                      {r.hasCallingSchedule ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-50 border border-amber-300 text-amber-900 font-bold text-[11px]">
+                          <Clock className="w-3 h-3 text-amber-700 shrink-0" />
+                          {r.nextFollowUpDate}
+                        </span>
+                      ) : (
+                        <span className="text-zinc-700">{r.nextFollowUpDate}</span>
+                      )}
+                    </td>
+                    <td className="py-3 px-4 min-w-[200px] max-w-[280px] whitespace-normal leading-snug">
+                      {r.followUpNotes ? (
+                        <div>
+                          <p className="text-slate-900 font-medium break-words">{r.followUpNotes}</p>
+                          {r.callStatusLabel && (
+                            <p className="text-[10px] font-semibold text-zinc-500 mt-0.5">
+                              {r.callStatusLabel}
+                              {r.latestTask?.staffName ? ` · ${r.latestTask.staffName}` : ''}
+                            </p>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-zinc-400">—</span>
+                      )}
+                    </td>
                     <td className="py-3 px-4 text-zinc-800 whitespace-nowrap">{r.assignedEmployeeName}</td>
                     <td className="py-3 px-4 text-right">
                       <DepartmentRowActionButton
@@ -904,7 +963,7 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
                   <td className="py-3 px-4 text-right font-mono text-indigo-800 tabular-nums">
                     ₹{totals.examFee.toLocaleString('en-IN')}
                   </td>
-                  <td colSpan={3} className="py-3 px-4 text-right font-mono text-zinc-600">
+                  <td colSpan={4} className="py-3 px-4 text-right font-mono text-zinc-600">
                     {totals.collectionRatePct}% Collected
                   </td>
                 </tr>

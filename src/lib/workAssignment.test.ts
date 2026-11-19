@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Student, WorkAssignmentTask } from '../types/domain';
 import {
+  buildLatestTaskByStudentMap,
   buildQuickFollowUpPreset,
   buildTaskCallLink,
   buildTaskWhatsAppLink,
@@ -11,7 +12,9 @@ import {
   extractStudentCallingNumber,
   extractStudentFatherName,
   formatFollowUpSchedule,
+  formatStoredFollowUpDateTime,
   formatTime12Hour,
+  mapCallStatusToFeeFollowUp,
   sanitizeFirestoreDocId,
   selectStudentsForAssignmentRange,
 } from './workAssignment';
@@ -198,3 +201,65 @@ test('buildTaskCallLink and buildTaskWhatsAppLink generate valid tel and wa.me l
 test('sanitizeFirestoreDocId produces safe alphanumeric/underscore/hyphen IDs', () => {
   assert.equal(sanitizeFirestoreDocId('WA_fee/recovery: 123!!'), 'WA_fee_recovery_123');
 });
+
+test('formatStoredFollowUpDateTime and mapCallStatusToFeeFollowUp produce compact Firestore-safe values', () => {
+  assert.equal(formatStoredFollowUpDateTime('2026-11-20', '16:00'), '2026-11-20 4:00 PM');
+  assert.equal(formatStoredFollowUpDateTime('2026-11-20', ''), '2026-11-20');
+  assert.equal(formatStoredFollowUpDateTime('', '16:00'), '');
+  assert.equal(mapCallStatusToFeeFollowUp('Follow-up Scheduled'), 'Scheduled');
+  assert.equal(mapCallStatusToFeeFollowUp('Called - Done'), 'Contacted');
+});
+
+test('buildLatestTaskByStudentMap picks the latest called remark & follow-up per student for the department', () => {
+  const older: WorkAssignmentTask = {
+    taskId: 't1',
+    assignmentId: 'a1',
+    centreId: 'vp_lookerganj',
+    department: 'fee_recovery',
+    staffUid: 's1',
+    staffName: 'Reena Patel',
+    studentId: 'STU_1',
+    serialNumber: 1,
+    studentName: 'Mohd Faraz Ansari',
+    fatherName: 'Mohd Altaf',
+    mobileNumber: '7860399509',
+    callingNumber: '7860399509',
+    subject: '',
+    pendingFee: 7700,
+    totalFee: 22700,
+    callStatus: 'Not Answered',
+    followUpDate: '2026-11-19',
+    followUpTime: '11:00',
+    remark: 'Phone nahi uthaya',
+    lastCalledAt: '2026-11-19T05:00:00.000Z',
+    updatedBy: 's1',
+    createdAt: '2026-11-19T04:00:00.000Z',
+    updatedAt: '2026-11-19T05:00:00.000Z',
+  };
+  const newer: WorkAssignmentTask = {
+    ...older,
+    taskId: 't2',
+    callStatus: 'Follow-up Scheduled',
+    followUpDate: '2026-11-20',
+    followUpTime: '16:00',
+    remark: 'Papa bole kal 4 baje call karna fees jama kar denge',
+    lastCalledAt: '2026-11-19T08:30:00.000Z',
+  };
+  const untouched: WorkAssignmentTask = {
+    ...older,
+    taskId: 't3',
+    studentId: 'STU_2',
+    callStatus: 'Pending',
+    followUpDate: '',
+    followUpTime: '',
+    remark: '',
+    lastCalledAt: '',
+  };
+
+  const map = buildLatestTaskByStudentMap([older, newer, untouched], 'fee_recovery');
+  assert.equal(map.size, 1);
+  assert.equal(map.get('STU_1')?.remark, 'Papa bole kal 4 baje call karna fees jama kar denge');
+  assert.equal(map.get('STU_1')?.followUpTime, '16:00');
+  assert.equal(map.has('STU_2'), false);
+});
+

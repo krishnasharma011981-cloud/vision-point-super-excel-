@@ -10,6 +10,10 @@ import {
   sanitizeRealSubject,
 } from '../../lib/csvUtils';
 import { verifyOperationLocation } from '../../lib/securityClient';
+import {
+  buildLatestTaskByStudentMap,
+  formatStoredFollowUpDateTime,
+} from '../../lib/workAssignment';
 import { clearMockSubjectsFromStudents, upsertTmaRecord } from '../../services/firestoreService';
 import type {
   CentreId,
@@ -110,10 +114,16 @@ export const TmaView: React.FC<TmaViewProps> = ({
     [students, effectiveCentre],
   );
 
+  const latestTaskMap = useMemo(
+    () => buildLatestTaskByStudentMap(workAssignmentTasks, 'tma'),
+    [workAssignmentTasks],
+  );
+
   const rows = useMemo(() => {
     return scopedStudents
       .map((s) => {
         const rec = recMap.get(s.studentId);
+        const latestTask = latestTaskMap.get(s.studentId);
         const lockedForEmployee =
           currentUser.role === 'employee' && (Boolean(s.tmaLocked) || Boolean(rec?.employeeLocked));
         const displaySubject = getDisplaySubject(s.subject);
@@ -136,6 +146,10 @@ export const TmaView: React.FC<TmaViewProps> = ({
               : resolvedTmaStatus === 'Submitted'
                 ? effectiveTotalSubjects
                 : 0;
+        const taskFollowUp = latestTask
+          ? formatStoredFollowUpDateTime(latestTask.followUpDate, latestTask.followUpTime)
+          : '';
+        const mergedRemark = latestTask?.remark?.trim() || rec?.remarks || '';
         return {
           student: s,
           displaySerial: displaySerialMap.get(s.studentId) ?? s.serialNumber,
@@ -144,8 +158,9 @@ export const TmaView: React.FC<TmaViewProps> = ({
           subjectsSubmittedCount: effectiveSubmittedCount,
           totalSubjectsCount: effectiveTotalSubjects,
           submissionDate: rec?.submissionDate || '—',
-          assignedEmployeeName: rec?.assignedEmployeeName || s.assignedEmployeeName || 'Unassigned',
-          remarks: rec?.remarks || '',
+          assignedEmployeeName: latestTask?.staffName || rec?.assignedEmployeeName || s.assignedEmployeeName || 'Unassigned',
+          nextFollowUp: taskFollowUp,
+          remarks: mergedRemark,
           lockedForEmployee,
         };
       })
@@ -156,11 +171,12 @@ export const TmaView: React.FC<TmaViewProps> = ({
           r.student.studentName.toLowerCase().includes(combinedSearch) ||
           r.student.studentId.toLowerCase().includes(combinedSearch) ||
           r.student.mobileNumber.toLowerCase().includes(combinedSearch) ||
-          r.displaySubject.toLowerCase().includes(combinedSearch)
+          r.displaySubject.toLowerCase().includes(combinedSearch) ||
+          r.remarks.toLowerCase().includes(combinedSearch)
         );
       })
       .sort((a, b) => a.displaySerial - b.displaySerial);
-  }, [scopedStudents, recMap, statusFilter, combinedSearch, displaySerialMap, currentUser.role, cleanupDone]);
+  }, [scopedStudents, recMap, latestTaskMap, statusFilter, combinedSearch, displaySerialMap, currentUser.role, cleanupDone]);
 
   const submittedCount = rows.filter((r) => r.tmaStatus === 'Submitted').length;
   const pendingCount = rows.filter((r) => r.tmaStatus !== 'Submitted').length;
@@ -495,7 +511,14 @@ export const TmaView: React.FC<TmaViewProps> = ({
                     </td>
                     <td className="py-3 px-4 font-mono text-zinc-700">{r.submissionDate}</td>
                     <td className="py-3 px-4 text-zinc-800">{r.assignedEmployeeName}</td>
-                    <td className="py-3 px-4 text-zinc-700 max-w-[180px] truncate">{r.remarks || '—'}</td>
+                    <td className="py-3 px-4 text-zinc-700 min-w-[180px] max-w-[260px] whitespace-normal leading-snug">
+                      {r.nextFollowUp && (
+                        <p className="text-[11px] font-mono font-bold text-amber-900 mb-0.5">
+                          Next: {r.nextFollowUp}
+                        </p>
+                      )}
+                      <p className="text-slate-800 break-words">{r.remarks || '—'}</p>
+                    </td>
                     <td className="py-3 px-4 text-right">
                       <DepartmentRowActionButton
                         lockedForEmployee={r.lockedForEmployee}

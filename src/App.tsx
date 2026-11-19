@@ -1176,6 +1176,14 @@ export default function App() {
             settings={systemSettings}
             centres={centres}
             students={students}
+            feeRecords={feeRecords}
+            practicalRecords={practicalRecords}
+            tmaRecords={tmaRecords}
+            onlineClassRecords={onlineClassRecords}
+            admissionRecords={admissionRecords}
+            sheetConfigs={sheetConfigs}
+            workAssignments={workAssignments}
+            workAssignmentTasks={workAssignmentTasks}
             users={users}
             onNotify={notify}
           />

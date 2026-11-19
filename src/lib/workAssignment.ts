@@ -2,6 +2,7 @@ import { buildTelHref, buildWhatsAppHref } from './analyticsMath';
 import type {
   CallTaskStatus,
   CentreId,
+  FeeFollowUpStatus,
   Student,
   UserAccount,
   WorkAssignmentDepartment,
@@ -373,3 +374,74 @@ export function getEligibleStaffForCentre(
     return a.fullName.localeCompare(b.fullName);
   });
 }
+
+/**
+ * Formats followUpDate + followUpTime into a concise <=30-char Firestore-safe string
+ * (e.g., "2026-11-20 4:00 PM") so it renders cleanly in Fee Recovery Excel tables & CSV exports.
+ */
+export function formatStoredFollowUpDateTime(dateStr: string, timeStr: string): string {
+  const cleanDate = String(dateStr || '').trim();
+  const cleanTime = String(timeStr || '').trim();
+  if (!cleanDate) return '';
+  if (!cleanTime) return cleanDate.slice(0, 30);
+  const t12 = formatTime12Hour(cleanTime) || cleanTime;
+  return `${cleanDate} ${t12}`.slice(0, 30);
+}
+
+export function mapCallStatusToFeeFollowUp(
+  callStatus: CallTaskStatus,
+  existing?: FeeFollowUpStatus,
+): FeeFollowUpStatus {
+  if (callStatus === 'Follow-up Scheduled') return 'Scheduled';
+  if (callStatus === 'Called - Done') return 'Contacted';
+  if (callStatus === 'Not Answered') return 'Scheduled';
+  return existing || 'Scheduled';
+}
+
+function getTaskActivityTimestamp(task: WorkAssignmentTask): number {
+  if (task.lastCalledAt) {
+    const parsed = Date.parse(task.lastCalledAt);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  const updated = task.updatedAt as unknown;
+  if (updated && typeof updated === 'object') {
+    const ts = updated as { toMillis?: () => number; seconds?: number };
+    if (typeof ts.toMillis === 'function') return ts.toMillis();
+    if (typeof ts.seconds === 'number') return ts.seconds * 1000;
+  }
+  return 0;
+}
+
+/**
+ * Maps each studentId to their most recently updated calling task (with remark, follow-up, or call status)
+ * so Fee Recovery, Practical, and TMA tables display staff calling remarks and follow-up date/time live.
+ */
+export function buildLatestTaskByStudentMap(
+  tasks: WorkAssignmentTask[],
+  department: WorkAssignmentDepartment,
+): Map<string, WorkAssignmentTask> {
+  const map = new Map<string, { task: WorkAssignmentTask; ts: number }>();
+
+  for (const task of tasks) {
+    if (task.department !== department) continue;
+    const hasActivity =
+      Boolean(task.remark?.trim()) ||
+      Boolean(task.followUpDate?.trim()) ||
+      Boolean(task.lastCalledAt?.trim()) ||
+      task.callStatus !== 'Pending';
+    if (!hasActivity) continue;
+
+    const ts = getTaskActivityTimestamp(task);
+    const prev = map.get(task.studentId);
+    if (!prev || ts >= prev.ts) {
+      map.set(task.studentId, { task, ts });
+    }
+  }
+
+  const result = new Map<string, WorkAssignmentTask>();
+  for (const [sid, entry] of map.entries()) {
+    result.set(sid, entry.task);
+  }
+  return result;
+}
+
