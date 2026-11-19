@@ -726,6 +726,7 @@ export const TmaView: React.FC<TmaViewProps> = ({
           displaySerialMap={displaySerialMap}
           employees={employees}
           existingAssignments={workAssignments}
+          existingTasks={workAssignmentTasks}
           initialStaffUid={assignPrefill.staffUid}
           initialFromSerial={assignPrefill.fromSerial}
           resolveStudentContext={(st) => {

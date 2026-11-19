@@ -5,6 +5,7 @@ import type {
   FeeFollowUpStatus,
   Student,
   UserAccount,
+  WorkAssignment,
   WorkAssignmentDepartment,
   WorkAssignmentTask,
 } from '../types/domain';
@@ -444,4 +445,141 @@ export function buildLatestTaskByStudentMap(
   }
   return result;
 }
+
+export interface AssignedTodayInfo {
+  assignmentId: string;
+  staffUid: string;
+  staffName: string;
+  assignedDate: string;
+}
+
+/**
+ * Returns a map of studentId -> assignment info for every student already assigned
+ * in the same branch + department on `todayIso` (local YYYY-MM-DD).
+ * Assignments from previous calendar dates are ignored so students automatically
+ * unlock on the next day for fresh reassignment.
+ */
+export function getStudentsAssignedTodayMap(
+  assignments: Array<
+    Pick<
+      WorkAssignment,
+      'assignmentId' | 'centreId' | 'department' | 'staffUid' | 'staffName' | 'assignedDate'
+    >
+  >,
+  tasks: Array<
+    Pick<
+      WorkAssignmentTask,
+      'assignmentId' | 'centreId' | 'department' | 'staffUid' | 'staffName' | 'studentId'
+    >
+  >,
+  centreId: CentreId,
+  department: WorkAssignmentDepartment,
+  todayIso: string = formatLocalDateIso(new Date()),
+): Map<string, AssignedTodayInfo> {
+  const todayAssignments = new Map<
+    string,
+    Pick<WorkAssignment, 'assignmentId' | 'staffUid' | 'staffName' | 'assignedDate'>
+  >();
+
+  for (const assignment of assignments) {
+    if (
+      assignment.centreId === centreId &&
+      assignment.department === department &&
+      assignment.assignedDate === todayIso
+    ) {
+      todayAssignments.set(assignment.assignmentId, assignment);
+    }
+  }
+
+  const locked = new Map<string, AssignedTodayInfo>();
+  if (todayAssignments.size === 0) return locked;
+
+  for (const task of tasks) {
+    const parent = todayAssignments.get(task.assignmentId);
+    if (!parent) continue;
+    if (!locked.has(task.studentId)) {
+      locked.set(task.studentId, {
+        assignmentId: parent.assignmentId,
+        staffUid: parent.staffUid || task.staffUid,
+        staffName: parent.staffName || task.staffName || 'Staff',
+        assignedDate: parent.assignedDate,
+      });
+    }
+  }
+
+  return locked;
+}
+
+/**
+ * Selects studentIds in the inclusive serial range [fromSerial, toSerial]
+ * that are NOT locked today and satisfy the optional predicate, ordered by displaySerial.
+ */
+export function getSelectableStudentIdsInRange(
+  students: Student[],
+  displaySerialMap: Map<string, number>,
+  fromSerial: number,
+  toSerial: number,
+  assignedTodayMap: Map<string, AssignedTodayInfo>,
+  predicate?: (student: Student) => boolean,
+): string[] {
+  const inRange = selectStudentsForAssignmentRange(
+    students,
+    displaySerialMap,
+    fromSerial,
+    toSerial,
+    (student) => {
+      if (assignedTodayMap.has(student.studentId)) return false;
+      if (predicate && !predicate(student)) return false;
+      return true;
+    },
+  );
+  return inRange.map((entry) => entry.student.studentId);
+}
+
+/**
+ * Selects up to `count` unlocked (not assigned today) students in ascending serial order,
+ * optionally applying a pending-work predicate.
+ */
+export function getNextAvailableStudentIds(
+  students: Student[],
+  displaySerialMap: Map<string, number>,
+  count: number,
+  assignedTodayMap: Map<string, AssignedTodayInfo>,
+  predicate?: (student: Student) => boolean,
+): string[] {
+  const safeCount = Math.max(1, Math.floor(count || 1));
+  const candidates: Array<{ studentId: string; serial: number }> = [];
+
+  for (const student of students) {
+    if (assignedTodayMap.has(student.studentId)) continue;
+    if (predicate && !predicate(student)) continue;
+    const serial = displaySerialMap.get(student.studentId) ?? (Number(student.serialNumber) || 0);
+    candidates.push({ studentId: student.studentId, serial });
+  }
+
+  candidates.sort((a, b) => a.serial - b.serial);
+  return candidates.slice(0, safeCount).map((c) => c.studentId);
+}
+
+/**
+ * Computes valid min/max serial bounds for any manual or range-based student selection.
+ */
+export function computeSelectedSerialBounds(
+  selectedItems: Array<{ displaySerial: number }>,
+): { fromSerial: number; toSerial: number } {
+  if (selectedItems.length === 0) {
+    return { fromSerial: 1, toSerial: 1 };
+  }
+  let minSerial = Number.POSITIVE_INFINITY;
+  let maxSerial = 0;
+  for (const item of selectedItems) {
+    const serial = Math.max(1, Math.floor(Number(item.displaySerial) || 1));
+    if (serial < minSerial) minSerial = serial;
+    if (serial > maxSerial) maxSerial = serial;
+  }
+  const safeFrom = Number.isFinite(minSerial) ? Math.max(1, minSerial) : 1;
+  const safeTo = Math.max(safeFrom, maxSerial);
+  return { fromSerial: safeFrom, toSerial: safeTo };
+}
+
 

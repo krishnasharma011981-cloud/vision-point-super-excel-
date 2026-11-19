@@ -767,7 +767,7 @@ export const AdminWorkAssignmentsPanel: React.FC<AdminWorkAssignmentsPanelProps>
               Staff Calling Assignments — {deptLabel}
             </h3>
             <p className="text-[11px] text-slate-600">
-              Assign serial ranges (e.g., 1–50) to staff. Assigned staff see a dedicated Calling Box with Father&apos;s Name, Call, WhatsApp, Follow-up Time &amp; Remarks.
+              Excel sheet se manually tick karke ya 1–25 select karke staff ko assign karein. Aaj assign hue students kal auto-unlock ho jayenge.
             </p>
           </div>
         </div>
@@ -801,7 +801,7 @@ export const AdminWorkAssignmentsPanel: React.FC<AdminWorkAssignmentsPanelProps>
             onClick={() => onOpenAssignModal()}
             className="text-red-700 font-bold hover:underline"
           >
-            Assign S.No 1–50 now →
+            Select &amp; Assign Work now →
           </button>
         </div>
       ) : (

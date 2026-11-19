@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { Student, WorkAssignmentTask } from '../types/domain';
+import type { Student, WorkAssignment, WorkAssignmentTask } from '../types/domain';
 import {
   buildLatestTaskByStudentMap,
   buildQuickFollowUpPreset,
@@ -9,11 +9,15 @@ import {
   canAssignDepartmentWork,
   canManageAssignmentForCentre,
   computeAssignmentProgress,
+  computeSelectedSerialBounds,
   extractStudentCallingNumber,
   extractStudentFatherName,
   formatFollowUpSchedule,
   formatStoredFollowUpDateTime,
   formatTime12Hour,
+  getNextAvailableStudentIds,
+  getSelectableStudentIdsInRange,
+  getStudentsAssignedTodayMap,
   mapCallStatusToFeeFollowUp,
   sanitizeFirestoreDocId,
   selectStudentsForAssignmentRange,
@@ -262,4 +266,147 @@ test('buildLatestTaskByStudentMap picks the latest called remark & follow-up per
   assert.equal(map.get('STU_1')?.followUpTime, '16:00');
   assert.equal(map.has('STU_2'), false);
 });
+
+test('getStudentsAssignedTodayMap locks same-day assigned students and auto-unlocks them the next day', () => {
+  const assignments: Array<
+    Pick<WorkAssignment, 'assignmentId' | 'centreId' | 'department' | 'staffUid' | 'staffName' | 'assignedDate'>
+  > = [
+    {
+      assignmentId: 'WA_TODAY_FEE',
+      centreId: 'vp_lookerganj',
+      department: 'fee_recovery',
+      staffUid: 'staff_reena',
+      staffName: 'Reena Patel',
+      assignedDate: '2026-11-19',
+    },
+    {
+      assignmentId: 'WA_YESTERDAY_FEE',
+      centreId: 'vp_lookerganj',
+      department: 'fee_recovery',
+      staffUid: 'staff_amit',
+      staffName: 'Amit Kumar',
+      assignedDate: '2026-11-18',
+    },
+    {
+      assignmentId: 'WA_TODAY_PRACTICAL',
+      centreId: 'vp_lookerganj',
+      department: 'practical',
+      staffUid: 'staff_neha',
+      staffName: 'Neha Singh',
+      assignedDate: '2026-11-19',
+    },
+    {
+      assignmentId: 'WA_TODAY_OTHER_CENTRE',
+      centreId: 'vp_civillines',
+      department: 'fee_recovery',
+      staffUid: 'staff_raj',
+      staffName: 'Raj Verma',
+      assignedDate: '2026-11-19',
+    },
+  ];
+
+  const tasks: Array<
+    Pick<WorkAssignmentTask, 'assignmentId' | 'centreId' | 'department' | 'staffUid' | 'staffName' | 'studentId'>
+  > = [
+    {
+      assignmentId: 'WA_TODAY_FEE',
+      centreId: 'vp_lookerganj',
+      department: 'fee_recovery',
+      staffUid: 'staff_reena',
+      staffName: 'Reena Patel',
+      studentId: 'VP-2026-0001',
+    },
+    {
+      assignmentId: 'WA_YESTERDAY_FEE',
+      centreId: 'vp_lookerganj',
+      department: 'fee_recovery',
+      staffUid: 'staff_amit',
+      staffName: 'Amit Kumar',
+      studentId: 'VP-2026-0002',
+    },
+    {
+      assignmentId: 'WA_TODAY_PRACTICAL',
+      centreId: 'vp_lookerganj',
+      department: 'practical',
+      staffUid: 'staff_neha',
+      staffName: 'Neha Singh',
+      studentId: 'VP-2026-0003',
+    },
+    {
+      assignmentId: 'WA_TODAY_OTHER_CENTRE',
+      centreId: 'vp_civillines',
+      department: 'fee_recovery',
+      staffUid: 'staff_raj',
+      staffName: 'Raj Verma',
+      studentId: 'VP-2026-0004',
+    },
+  ];
+
+  // On 2026-11-19: only VP-2026-0001 is locked for vp_lookerganj + fee_recovery
+  const lockedToday = getStudentsAssignedTodayMap(
+    assignments,
+    tasks,
+    'vp_lookerganj',
+    'fee_recovery',
+    '2026-11-19',
+  );
+  assert.equal(lockedToday.size, 1);
+  assert.equal(lockedToday.get('VP-2026-0001')?.staffName, 'Reena Patel');
+  assert.equal(lockedToday.has('VP-2026-0002'), false); // Yesterday's batch is unlocked
+  assert.equal(lockedToday.has('VP-2026-0003'), false); // Different department
+  assert.equal(lockedToday.has('VP-2026-0004'), false); // Different centre
+
+  // On the next day (2026-11-20): VP-2026-0001 is automatically unlocked for reassignment
+  const lockedTomorrow = getStudentsAssignedTodayMap(
+    assignments,
+    tasks,
+    'vp_lookerganj',
+    'fee_recovery',
+    '2026-11-20',
+  );
+  assert.equal(lockedTomorrow.size, 0);
+});
+
+test('getSelectableStudentIdsInRange (1-25) and getNextAvailableStudentIds skip locked-today students', () => {
+  const students = Array.from({ length: 40 }, (_, i) =>
+    makeStudent({
+      serialNumber: i + 1,
+      studentId: `VP-2026-${String(i + 1).padStart(4, '0')}`,
+      studentName: `Student ${i + 1}`,
+    }),
+  );
+  const serialMap = new Map<string, number>();
+  students.forEach((s, idx) => serialMap.set(s.studentId, idx + 1));
+
+  const locked = new Map([
+    [
+      'VP-2026-0002',
+      { assignmentId: 'A1', staffUid: 's1', staffName: 'Reena', assignedDate: '2026-11-19' },
+    ],
+    [
+      'VP-2026-0005',
+      { assignmentId: 'A1', staffUid: 's1', staffName: 'Reena', assignedDate: '2026-11-19' },
+    ],
+  ]);
+
+  const ids1To25 = getSelectableStudentIdsInRange(students, serialMap, 1, 25, locked);
+  assert.equal(ids1To25.length, 23);
+  assert.equal(ids1To25.includes('VP-2026-0002'), false);
+  assert.equal(ids1To25.includes('VP-2026-0005'), false);
+  assert.equal(ids1To25[0], 'VP-2026-0001');
+  assert.equal(ids1To25[ids1To25.length - 1], 'VP-2026-0025');
+
+  const next25 = getNextAvailableStudentIds(students, serialMap, 25, locked);
+  assert.equal(next25.length, 25);
+  assert.equal(next25.includes('VP-2026-0002'), false);
+  assert.equal(next25[next25.length - 1], 'VP-2026-0027');
+
+  const bounds = computeSelectedSerialBounds([
+    { displaySerial: 17 },
+    { displaySerial: 3 },
+    { displaySerial: 42 },
+  ]);
+  assert.deepEqual(bounds, { fromSerial: 3, toSerial: 42 });
+});
+
 

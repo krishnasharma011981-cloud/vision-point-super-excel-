@@ -61,6 +61,7 @@ import {
   extractStudentFatherName,
   formatLocalDateIso,
   formatStoredFollowUpDateTime,
+  getStudentsAssignedTodayMap,
   mapCallStatusToFeeFollowUp,
   sanitizeFirestoreDocId,
   WORK_ASSIGNMENT_DEPARTMENT_LABELS,
@@ -4063,6 +4064,7 @@ export async function createWorkAssignmentBatch(params: {
   items: CreateWorkAssignmentTaskInput[];
   replaceExistingActive: boolean;
   existingAssignments: WorkAssignment[];
+  existingTasks?: WorkAssignmentTask[];
   note?: string;
   actor: UserAccount;
 }): Promise<{ assignmentId: string; taskCount: number }> {
@@ -4075,6 +4077,7 @@ export async function createWorkAssignmentBatch(params: {
     items,
     replaceExistingActive,
     existingAssignments,
+    existingTasks = [],
     note = '',
     actor,
   } = params;
@@ -4083,7 +4086,7 @@ export async function createWorkAssignmentBatch(params: {
     throw new Error('Only Super Admin or the Centre Head of this branch can assign staff work.');
   }
   if (items.length === 0) {
-    throw new Error('No students found in the selected serial number range.');
+    throw new Error('Please select at least 1 student from the Excel list to assign.');
   }
   if (items.length > 2000) {
     throw new Error('Please assign up to 2000 students in a single batch.');
@@ -4092,6 +4095,22 @@ export async function createWorkAssignmentBatch(params: {
   const centreInfo = CENTRE_MAP[centreId];
   const now = new Date();
   const assignedDate = formatLocalDateIso(now);
+
+  // Enforce same-day duplicate assignment lock: students assigned today cannot be assigned again today
+  const assignedTodayMap = getStudentsAssignedTodayMap(
+    existingAssignments,
+    existingTasks,
+    centreId,
+    department,
+    assignedDate,
+  );
+  const eligibleItems = items.filter((item) => !assignedTodayMap.has(item.student.studentId));
+  if (eligibleItems.length === 0) {
+    throw new Error(
+      'Selected students are already assigned today. They will automatically unlock tomorrow for reassignment.',
+    );
+  }
+
   const randomSuffix = Math.random().toString(36).slice(2, 7).toUpperCase();
   const assignmentId = sanitizeFirestoreDocId(`WA_${department}_${centreId}_${Date.now()}_${randomSuffix}`, 100);
   const safeFrom = Math.max(1, Math.floor(fromSerial));
@@ -4136,7 +4155,7 @@ export async function createWorkAssignmentBatch(params: {
       assignedDate,
       fromSerial: safeFrom,
       toSerial: safeTo,
-      totalStudents: items.length,
+      totalStudents: eligibleItems.length,
       status: 'Active',
       note: safeNote,
       createdAt: serverTimestamp(),
@@ -4145,8 +4164,8 @@ export async function createWorkAssignmentBatch(params: {
 
     // 3. Write task cards in safe chunks (<= 350 per batch)
     const chunkSize = 350;
-    for (let i = 0; i < items.length; i += chunkSize) {
-      const chunk = items.slice(i, i + chunkSize);
+    for (let i = 0; i < eligibleItems.length; i += chunkSize) {
+      const chunk = eligibleItems.slice(i, i + chunkSize);
       const batch = writeBatch(db);
       chunk.forEach((item) => {
         const taskId = sanitizeFirestoreDocId(`${assignmentId}__${item.student.studentId}`, 128);
@@ -4191,7 +4210,7 @@ export async function createWorkAssignmentBatch(params: {
       recipientUid: staff.uid,
       centreId,
       title: `New ${deptLabel} Work Assigned`,
-      message: `${safeActorName} assigned S.No #${safeFrom} to #${safeTo} (${items.length} students) for ${deptLabel}.`,
+      message: `${safeActorName} assigned ${eligibleItems.length} students (S.No #${safeFrom} to #${safeTo}) for ${deptLabel}.`,
       type: 'info',
       read: false,
     }).catch(() => {});
@@ -4206,11 +4225,11 @@ export async function createWorkAssignmentBatch(params: {
       action: 'WORK_ASSIGNMENT_CREATED',
       targetCollection: 'work_assignments',
       targetId: assignmentId,
-      details: `Assigned ${items.length} students (S.No #${safeFrom}-#${safeTo}) in ${deptLabel} to ${safeStaffName}.`,
+      details: `Assigned ${eligibleItems.length} students (S.No #${safeFrom}-#${safeTo}) in ${deptLabel} to ${safeStaffName}.`,
       locationVerified: true,
     }).catch(() => {});
 
-    return { assignmentId, taskCount: items.length };
+    return { assignmentId, taskCount: eligibleItems.length };
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, `work_assignments/${assignmentId}`);
     return { assignmentId, taskCount: 0 };
