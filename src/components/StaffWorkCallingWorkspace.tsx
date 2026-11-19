@@ -250,20 +250,22 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
   const displayPhone = activeTask?.callingNumber || activeTask?.mobileNumber || 'Not Provided';
 
   return (
-    <div className="max-w-3xl mx-auto space-y-5">
-      {/* Top Assigned Batch Header & Live Progress */}
-      <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
+    <div className="w-full space-y-4">
+      {/* Top Assigned Batch Header — Horizontal Strip on Desktop, Vertical Stack on Mobile */}
+      <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 space-y-3.5">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="min-w-0">
             <p className="text-[11px] font-bold uppercase tracking-wider text-red-700">
               {deptLabel} · Assigned Work Box
             </p>
-            <h2 className="text-xl font-extrabold text-slate-950 mt-0.5">
-              S.No #{currentBatch.fromSerial} to #{currentBatch.toSerial}
-              <span className="text-slate-500 font-mono font-semibold text-base ml-2">
+            <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 mt-0.5">
+              <h2 className="text-lg sm:text-xl font-extrabold text-slate-950">
+                S.No #{currentBatch.fromSerial} to #{currentBatch.toSerial}
+              </h2>
+              <span className="text-slate-500 font-mono font-semibold text-sm tabular-nums">
                 ({progress.total} Students)
               </span>
-            </h2>
+            </div>
             <p className="text-xs text-slate-600 mt-1">
               Assigned by <strong className="text-slate-900">{currentBatch.assignedByName}</strong> on{' '}
               <span className="font-mono">{currentBatch.assignedDate}</span>
@@ -271,34 +273,34 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
             </p>
           </div>
 
-          {/* Live Progress Counters */}
-          <div className="grid grid-cols-4 gap-2.5 text-center shrink-0">
-            <div className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-200">
+          {/* Live Progress Counters — Horizontal Metric Row */}
+          <div className="grid grid-cols-4 gap-2 sm:gap-2.5 text-center shrink-0">
+            <div className="px-2.5 sm:px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-200">
               <p className="text-[10px] font-bold uppercase text-slate-600">Pending</p>
-              <p className="text-lg font-extrabold font-mono tabular-nums text-slate-900">
+              <p className="text-base sm:text-lg font-extrabold font-mono tabular-nums text-slate-900">
                 {progress.pending + progress.notAnswered}
               </p>
             </div>
-            <div className="px-3 py-2 rounded-xl bg-amber-50 border border-amber-200">
+            <div className="px-2.5 sm:px-3.5 py-2 rounded-xl bg-amber-50 border border-amber-200">
               <p className="text-[10px] font-bold uppercase text-amber-800">Follow-up</p>
-              <p className="text-lg font-extrabold font-mono tabular-nums text-amber-900">
+              <p className="text-base sm:text-lg font-extrabold font-mono tabular-nums text-amber-900">
                 {progress.followUpScheduled}
               </p>
             </div>
-            <div className="px-3 py-2 rounded-xl bg-emerald-50 border border-emerald-200">
+            <div className="px-2.5 sm:px-3.5 py-2 rounded-xl bg-emerald-50 border border-emerald-200">
               <p className="text-[10px] font-bold uppercase text-emerald-800">Done</p>
-              <p className="text-lg font-extrabold font-mono tabular-nums text-emerald-800">
+              <p className="text-base sm:text-lg font-extrabold font-mono tabular-nums text-emerald-800">
                 {progress.completed}
               </p>
             </div>
-            <div className="px-3 py-2 rounded-xl bg-slate-900 text-white">
+            <div className="px-2.5 sm:px-3.5 py-2 rounded-xl bg-slate-900 text-white">
               <p className="text-[10px] font-bold uppercase text-slate-300">Progress</p>
-              <p className="text-lg font-extrabold font-mono tabular-nums">{progress.percentDone}%</p>
+              <p className="text-base sm:text-lg font-extrabold font-mono tabular-nums">{progress.percentDone}%</p>
             </div>
           </div>
         </div>
 
-        {/* Filter Mode Pills (keeps strictly 1 student visible at a time) */}
+        {/* Filter Mode Controls (strictly 1 student visible at a time) */}
         <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
             {(
@@ -313,7 +315,7 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
                 key={tab.id}
                 type="button"
                 onClick={() => setFilterTab(tab.id)}
-                className={`px-3 py-1.5 rounded-lg font-bold border transition-colors ${
+                className={`px-3 py-1.5 rounded-lg font-bold border transition-colors whitespace-nowrap shrink-0 ${
                   filterTab === tab.id
                     ? 'bg-slate-900 text-white border-slate-900'
                     : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
@@ -331,7 +333,7 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
                   key={b.assignmentId}
                   type="button"
                   onClick={() => setSelectedBatchId(b.assignmentId)}
-                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-colors ${
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-colors whitespace-nowrap shrink-0 ${
                     b.assignmentId === currentBatch.assignmentId
                       ? 'bg-red-700 text-white border-red-700'
                       : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
@@ -345,7 +347,7 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
         </div>
       </div>
 
-      {/* SINGLE FOCUSED STUDENT CALLING BOX (Only 1 student shown at a time — click Next for next student) */}
+      {/* SINGLE FOCUSED STUDENT CALLING BOX — Horizontal 2-Column Workspace on Desktop, Vertical Stack on Mobile */}
       <div>
         {!activeTask ? (
           <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center space-y-2">
@@ -355,279 +357,287 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
             </p>
           </div>
         ) : (
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-8 space-y-6">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 sm:p-6 space-y-5">
             {/* Top Card Stepper */}
             <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-200">
               <div className="flex items-center gap-3">
                 <span className="px-3 py-1 rounded-lg bg-slate-900 text-white font-mono text-sm font-extrabold tabular-nums">
                   S.No #{activeTask.serialNumber}
                 </span>
-                <span className="text-xs font-mono font-semibold text-slate-600">
+                <span className="text-xs font-mono font-semibold text-slate-600 tabular-nums">
                   Student {activeIndex + 1} of {filteredTasks.length}
                 </span>
               </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    disabled={activeIndex <= 0}
-                    onClick={() => setSelectedTaskId(filteredTasks[activeIndex - 1].taskId)}
-                    className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg disabled:opacity-40"
-                  >
-                    <ChevronLeft className="w-4 h-4" />
-                    Previous
-                  </button>
-                  <button
-                    type="button"
-                    disabled={activeIndex < 0 || activeIndex >= filteredTasks.length - 1}
-                    onClick={() => setSelectedTaskId(filteredTasks[activeIndex + 1].taskId)}
-                    className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg disabled:opacity-40"
-                  >
-                    Next
-                    <ChevronRight className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-
-              {/* Student Name + Papa ka Naam + Department Info */}
-              <div className="space-y-4">
-                <div>
-                  <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Student Name</p>
-                  <h3 className="text-2xl sm:text-3xl font-extrabold text-slate-950 tracking-tight mt-0.5">
-                    {activeTask.studentName}
-                  </h3>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
-                    <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
-                      <User className="w-3.5 h-3.5 text-slate-600" />
-                      Father&apos;s Name (Papa ka Naam)
-                    </p>
-                    <p className="text-base font-bold text-slate-900 mt-1">
-                      {activeTask.fatherName || 'Not available in sheet'}
-                    </p>
-                  </div>
-
-                  {department === 'fee_recovery' ? (
-                    <div className="p-4 rounded-xl bg-red-50/70 border border-red-200">
-                      <p className="text-[11px] font-bold uppercase tracking-wider text-red-800">
-                        Fee Balance / Pending
-                      </p>
-                      <p className="text-xl font-extrabold font-mono tabular-nums text-red-700 mt-0.5">
-                        ₹{activeTask.pendingFee.toLocaleString('en-IN')}
-                        <span className="text-xs font-semibold text-slate-600 ml-2">
-                          / Total ₹{activeTask.totalFee.toLocaleString('en-IN')}
-                        </span>
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
-                      <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                        {department === 'practical' ? 'Practical Subjects' : 'TMA Subjects'}
-                      </p>
-                      <p className="text-sm font-bold text-slate-900 mt-1 leading-snug">
-                        {activeTask.subject || 'Subjects not uploaded yet'}
-                      </p>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Direct CALL & WHATSAPP Big Action Buttons */}
-              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold uppercase tracking-wider text-slate-600">
-                    Contact Number
-                  </span>
-                  <span className="font-mono text-base font-extrabold text-slate-950 tracking-wide">
-                    {displayPhone}
-                  </span>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  {telHref ? (
-                    <a
-                      href={telHref}
-                      className="flex items-center justify-center gap-2.5 py-3.5 px-5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-extrabold shadow-sm transition-colors"
-                    >
-                      <Phone className="w-5 h-5" />
-                      Call Now
-                    </a>
-                  ) : (
-                    <div className="flex items-center justify-center gap-2 py-3.5 px-5 rounded-xl bg-slate-200 text-slate-500 text-sm font-bold">
-                      <Phone className="w-5 h-5" />
-                      Phone Number Missing
-                    </div>
-                  )}
-
-                  {waHref ? (
-                    <a
-                      href={waHref}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex items-center justify-center gap-2.5 py-3.5 px-5 rounded-xl bg-[#16A34A] hover:bg-[#15803D] text-white text-sm font-extrabold shadow-sm transition-colors"
-                    >
-                      <MessageCircle className="w-5 h-5" />
-                      WhatsApp Message
-                    </a>
-                  ) : (
-                    <div className="flex items-center justify-center gap-2 py-3.5 px-5 rounded-xl bg-slate-200 text-slate-500 text-sm font-bold">
-                      <MessageCircle className="w-5 h-5" />
-                      WhatsApp Unavailable
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Next Follow-up Date & Time Setting System */}
-              <div className="p-5 rounded-xl bg-amber-50/60 border border-amber-200 space-y-3.5">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <CalendarClock className="w-4 h-4 text-amber-800" />
-                    <h4 className="text-sm font-extrabold text-slate-950">
-                      Next Follow-Up Date &amp; Time (Dubara Kab Phone Karna Hai)
-                    </h4>
-                  </div>
-                  {(followUpDate || followUpTime) && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setFollowUpDate('');
-                        setFollowUpTime('');
-                      }}
-                      className="text-[11px] font-bold text-slate-600 hover:text-red-700 underline"
-                    >
-                      Clear Schedule
-                    </button>
-                  )}
-                </div>
-
-                {/* 1-Click Quick Time Presets (e.g. Kal 4:00 PM) */}
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-[11px] font-semibold text-slate-700">Quick Set:</span>
-                  {QUICK_PRESETS.map((p) => (
-                    <button
-                      key={p.id}
-                      type="button"
-                      onClick={() => handleApplyPreset(p.id)}
-                      className="px-3 py-1.5 text-xs font-bold text-amber-950 bg-white hover:bg-amber-100 border border-amber-300 rounded-lg transition-colors"
-                    >
-                      {p.label}
-                    </button>
-                  ))}
-                </div>
-
-                {/* Custom Date + Time Inputs */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label htmlFor="staff-followup-date" className="block text-xs font-bold text-slate-800 mb-1">
-                      Follow-Up Date (Tarikh)
-                    </label>
-                    <input
-                      id="staff-followup-date"
-                      type="date"
-                      value={followUpDate}
-                      onChange={(e) => {
-                        setFollowUpDate(e.target.value);
-                        if (e.target.value && (callStatus === 'Pending' || callStatus === 'Not Answered')) {
-                          setCallStatus('Follow-up Scheduled');
-                        }
-                      }}
-                      className="w-full px-3.5 py-2.5 text-sm font-mono font-semibold bg-white text-slate-950 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-600"
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="staff-followup-time" className="block text-xs font-bold text-slate-800 mb-1">
-                      Follow-Up Time (Samay)
-                    </label>
-                    <input
-                      id="staff-followup-time"
-                      type="time"
-                      value={followUpTime}
-                      onChange={(e) => {
-                        setFollowUpTime(e.target.value);
-                        if (e.target.value && (callStatus === 'Pending' || callStatus === 'Not Answered')) {
-                          setCallStatus('Follow-up Scheduled');
-                        }
-                      }}
-                      className="w-full px-3.5 py-2.5 text-sm font-mono font-semibold bg-white text-slate-950 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-600"
-                    />
-                  </div>
-                </div>
-
-                {schedulePreview.hasSchedule && (
-                  <p className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
-                    <Clock className="w-3.5 h-3.5 text-amber-700" />
-                    Follow-Up Scheduled: <span className="underline">{schedulePreview.label}</span>
-                  </p>
-                )}
-              </div>
-
-              {/* Remark Box ("Usne kya bola?") */}
-              <div>
-                <label htmlFor="staff-call-remark" className="block text-sm font-extrabold text-slate-950 mb-1.5">
-                  Call Remark (Student / Parent ne kya bola?)
-                </label>
-                <textarea
-                  id="staff-call-remark"
-                  rows={3}
-                  maxLength={1000}
-                  value={remark}
-                  onChange={(e) => setRemark(e.target.value)}
-                  placeholder="Yahaan likhein ki baat karne par unhone kya bola (jaise: Papa bole kal 4 baje call karna, ₹5,000 fee jama karenge)..."
-                  className="w-full px-4 py-3 text-sm bg-white text-slate-950 placeholder:text-slate-400 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900"
-                />
-              </div>
-
-              {/* Call Outcome Status Selector */}
-              <div>
-                <p className="text-xs font-bold uppercase tracking-wider text-slate-600 mb-2">
-                  Call Status
-                </p>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {CALL_STATUS_OPTIONS.map((opt) => (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      onClick={() => setCallStatus(opt.value)}
-                      className={`py-2.5 px-3 rounded-xl border text-xs font-bold transition-colors ${
-                        callStatus === opt.value
-                          ? opt.activeClass
-                          : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
-                      }`}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Save Action Footer */}
-              <div className="pt-4 border-t border-slate-200 flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-3">
+              <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  disabled={saving}
-                  onClick={() => void handleSaveTask(false)}
-                  className="inline-flex items-center justify-center gap-2 px-5 py-3 text-xs font-bold text-slate-900 bg-white border border-slate-300 hover:bg-slate-50 rounded-xl disabled:opacity-50"
+                  disabled={activeIndex <= 0}
+                  onClick={() => setSelectedTaskId(filteredTasks[activeIndex - 1].taskId)}
+                  className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-bold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg disabled:opacity-40 whitespace-nowrap shrink-0"
                 >
-                  <Save className="w-4 h-4" />
-                  {saving ? 'Saving...' : 'Save Update'}
+                  <ChevronLeft className="w-4 h-4" />
+                  Previous
                 </button>
                 <button
                   type="button"
-                  disabled={saving}
-                  onClick={() => void handleSaveTask(true)}
-                  className="inline-flex items-center justify-center gap-2 px-6 py-3 text-xs font-extrabold text-white btn-crimson-gloss rounded-xl disabled:opacity-50"
+                  disabled={activeIndex < 0 || activeIndex >= filteredTasks.length - 1}
+                  onClick={() => setSelectedTaskId(filteredTasks[activeIndex + 1].taskId)}
+                  className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-bold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg disabled:opacity-40 whitespace-nowrap shrink-0"
                 >
-                  <CheckCircle2 className="w-4 h-4" />
-                  {saving
-                    ? 'Saving...'
-                    : activeIndex < filteredTasks.length - 1
-                      ? 'Save & Next Student →'
-                      : 'Save Final Student'}
+                  Next
+                  <ChevronRight className="w-4 h-4" />
                 </button>
               </div>
             </div>
-          )}
+
+            {/* Responsive Horizontal Split on Desktop (lg:grid-cols-12) | Vertical Stack on Mobile (grid-cols-1) */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+              {/* LEFT PANEL (Desktop): Student Identity, Father's Name, Fee/Subjects, Call & WhatsApp */}
+              <div className="lg:col-span-5 flex flex-col justify-between gap-5 lg:border-r lg:border-slate-200 lg:pr-6">
+                <div className="space-y-4">
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Student Name</p>
+                    <h3 className="text-2xl xl:text-3xl font-extrabold text-slate-950 tracking-tight mt-0.5 break-words">
+                      {activeTask.studentName}
+                    </h3>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-3">
+                    <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                      <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+                        <User className="w-3.5 h-3.5 text-slate-600" />
+                        Father&apos;s Name (Papa ka Naam)
+                      </p>
+                      <p className="text-base font-bold text-slate-900 mt-1 break-words">
+                        {activeTask.fatherName || 'Not available in sheet'}
+                      </p>
+                    </div>
+
+                    {department === 'fee_recovery' ? (
+                      <div className="p-4 rounded-xl bg-red-50/70 border border-red-200">
+                        <p className="text-[11px] font-bold uppercase tracking-wider text-red-800">
+                          Fee Balance / Pending
+                        </p>
+                        <p className="text-xl font-extrabold font-mono tabular-nums text-red-700 mt-0.5">
+                          ₹{activeTask.pendingFee.toLocaleString('en-IN')}
+                          <span className="text-xs font-semibold text-slate-600 ml-2">
+                            / Total ₹{activeTask.totalFee.toLocaleString('en-IN')}
+                          </span>
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                        <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                          {department === 'practical' ? 'Practical Subjects' : 'TMA Subjects'}
+                        </p>
+                        <p className="text-sm font-bold text-slate-900 mt-1 leading-snug break-words">
+                          {activeTask.subject || 'Subjects not uploaded yet'}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Direct CALL & WHATSAPP Action Box */}
+                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-bold uppercase tracking-wider text-slate-600">
+                      Contact Number
+                    </span>
+                    <span className="font-mono text-base font-extrabold tabular-nums text-slate-950 tracking-wide">
+                      {displayPhone}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    {telHref ? (
+                      <a
+                        href={telHref}
+                        className="flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-extrabold shadow-sm transition-colors whitespace-nowrap"
+                      >
+                        <Phone className="w-4 h-4 shrink-0" />
+                        Call Now
+                      </a>
+                    ) : (
+                      <div className="flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl bg-slate-200 text-slate-500 text-sm font-bold whitespace-nowrap">
+                        <Phone className="w-4 h-4 shrink-0" />
+                        Phone Missing
+                      </div>
+                    )}
+
+                    {waHref ? (
+                      <a
+                        href={waHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl bg-[#16A34A] hover:bg-[#15803D] text-white text-sm font-extrabold shadow-sm transition-colors whitespace-nowrap"
+                      >
+                        <MessageCircle className="w-4 h-4 shrink-0" />
+                        WhatsApp
+                      </a>
+                    ) : (
+                      <div className="flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl bg-slate-200 text-slate-500 text-sm font-bold whitespace-nowrap">
+                        <MessageCircle className="w-4 h-4 shrink-0" />
+                        No WhatsApp
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* RIGHT PANEL (Desktop): Follow-Up Date/Time, Call Remark, Call Status & Save Actions */}
+              <div className="lg:col-span-7 flex flex-col justify-between gap-4">
+                {/* Next Follow-up Date & Time Setting System */}
+                <div className="p-4 sm:p-5 rounded-xl bg-amber-50/60 border border-amber-200 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <CalendarClock className="w-4 h-4 text-amber-800 shrink-0" />
+                      <h4 className="text-sm font-extrabold text-slate-950">
+                        Next Follow-Up Date &amp; Time (Dubara Kab Phone Karna Hai)
+                      </h4>
+                    </div>
+                    {(followUpDate || followUpTime) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setFollowUpDate('');
+                          setFollowUpTime('');
+                        }}
+                        className="text-[11px] font-bold text-slate-600 hover:text-red-700 underline whitespace-nowrap"
+                      >
+                        Clear Schedule
+                      </button>
+                    )}
+                  </div>
+
+                  {/* 1-Click Quick Time Presets (e.g. Kal 4:00 PM) */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] font-semibold text-slate-700">Quick Set:</span>
+                    {QUICK_PRESETS.map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => handleApplyPreset(p.id)}
+                        className="px-3 py-1.5 text-xs font-bold text-amber-950 bg-white hover:bg-amber-100 border border-amber-300 rounded-lg transition-colors whitespace-nowrap"
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Custom Date + Time Inputs */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label htmlFor="staff-followup-date" className="block text-xs font-bold text-slate-800 mb-1">
+                        Follow-Up Date (Tarikh)
+                      </label>
+                      <input
+                        id="staff-followup-date"
+                        type="date"
+                        value={followUpDate}
+                        onChange={(e) => {
+                          setFollowUpDate(e.target.value);
+                          if (e.target.value && (callStatus === 'Pending' || callStatus === 'Not Answered')) {
+                            setCallStatus('Follow-up Scheduled');
+                          }
+                        }}
+                        className="w-full px-3.5 py-2 text-sm font-mono font-semibold bg-white text-slate-950 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-600"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="staff-followup-time" className="block text-xs font-bold text-slate-800 mb-1">
+                        Follow-Up Time (Samay)
+                      </label>
+                      <input
+                        id="staff-followup-time"
+                        type="time"
+                        value={followUpTime}
+                        onChange={(e) => {
+                          setFollowUpTime(e.target.value);
+                          if (e.target.value && (callStatus === 'Pending' || callStatus === 'Not Answered')) {
+                            setCallStatus('Follow-up Scheduled');
+                          }
+                        }}
+                        className="w-full px-3.5 py-2 text-sm font-mono font-semibold bg-white text-slate-950 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-600"
+                      />
+                    </div>
+                  </div>
+
+                  {schedulePreview.hasSchedule && (
+                    <p className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                      Follow-Up Scheduled: <span className="underline">{schedulePreview.label}</span>
+                    </p>
+                  )}
+                </div>
+
+                {/* Remark Box ("Usne kya bola?") */}
+                <div>
+                  <label htmlFor="staff-call-remark" className="block text-sm font-extrabold text-slate-950 mb-1.5">
+                    Call Remark (Student / Parent ne kya bola?)
+                  </label>
+                  <textarea
+                    id="staff-call-remark"
+                    rows={3}
+                    maxLength={1000}
+                    value={remark}
+                    onChange={(e) => setRemark(e.target.value)}
+                    placeholder="Yahaan likhein ki baat karne par unhone kya bola (jaise: Papa bole kal 4 baje call karna, ₹5,000 fee jama karenge)..."
+                    className="w-full px-4 py-2.5 text-sm bg-white text-slate-950 placeholder:text-slate-400 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900"
+                  />
+                </div>
+
+                {/* Call Outcome Status Selector */}
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-wider text-slate-600 mb-2">
+                    Call Status
+                  </p>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {CALL_STATUS_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => setCallStatus(opt.value)}
+                        className={`py-2 px-3 rounded-xl border text-xs font-bold transition-colors whitespace-nowrap ${
+                          callStatus === opt.value
+                            ? opt.activeClass
+                            : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Save Action Footer */}
+                <div className="pt-3.5 border-t border-slate-200 flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2.5">
+                  <button
+                    type="button"
+                    disabled={saving}
+                    onClick={() => void handleSaveTask(false)}
+                    className="inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs font-bold text-slate-900 bg-white border border-slate-300 hover:bg-slate-50 rounded-xl disabled:opacity-50 whitespace-nowrap"
+                  >
+                    <Save className="w-4 h-4" />
+                    {saving ? 'Saving...' : 'Save Update'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={saving}
+                    onClick={() => void handleSaveTask(true)}
+                    className="inline-flex items-center justify-center gap-2 px-6 py-2.5 text-xs font-extrabold text-white btn-crimson-gloss rounded-xl disabled:opacity-50 whitespace-nowrap"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    {saving
+                      ? 'Saving...'
+                      : activeIndex < filteredTasks.length - 1
+                        ? 'Save & Next Student →'
+                        : 'Save Final Student'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
