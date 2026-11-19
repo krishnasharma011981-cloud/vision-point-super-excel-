@@ -26,7 +26,13 @@ import {
 import React, { useEffect, useRef, useState } from 'react';
 import { CANONICAL_CENTRES, DEPARTMENT_LABELS, ROLE_LABELS, SIDEBAR_ITEMS } from '../constants/centres';
 import { markNotificationRead } from '../services/firestoreService';
-import type { CentreId, NavSection, NotificationItem, UserAccount } from '../types/domain';
+import type {
+  CentreId,
+  NavSection,
+  NotificationItem,
+  UserAccount,
+  WorkAssignmentDepartment,
+} from '../types/domain';
 
 interface DashboardShellProps {
   currentUser: UserAccount;
@@ -35,6 +41,7 @@ interface DashboardShellProps {
   globalSearch: string;
   notifications: NotificationItem[];
   unreadCommsCount?: number;
+  assignedDepartments?: WorkAssignmentDepartment[];
   onSelectSection: (section: NavSection) => void;
   onChangeCentreFilter: (centreId: CentreId | 'all') => void;
   onChangeGlobalSearch: (value: string) => void;
@@ -60,7 +67,11 @@ const SECTION_ICONS: Record<NavSection, React.FC<{ className?: string }>> = {
   activity_logs: Activity,
 };
 
-export function canUserAccessSection(user: UserAccount, section: NavSection): boolean {
+export function canUserAccessSection(
+  user: UserAccount,
+  section: NavSection,
+  assignedDepartments: WorkAssignmentDepartment[] = [],
+): boolean {
   if (section === 'activity_logs') return user.role === 'super_admin';
   if (user.role === 'super_admin') return true;
   if (user.role === 'centre_head') return true;
@@ -74,6 +85,12 @@ export function canUserAccessSection(user: UserAccount, section: NavSection): bo
     return true;
   }
   if (section === user.department) return true;
+  if (
+    (section === 'fee_recovery' || section === 'practical' || section === 'tma') &&
+    assignedDepartments.includes(section)
+  ) {
+    return true;
+  }
   return false;
 }
 
@@ -84,6 +101,7 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
   globalSearch,
   notifications,
   unreadCommsCount = 0,
+  assignedDepartments = [],
   onSelectSection,
   onChangeCentreFilter,
   onChangeGlobalSearch,
@@ -95,7 +113,9 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
   const [showNotifs, setShowNotifs] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
-  const visibleNavItems = SIDEBAR_ITEMS.filter((item) => canUserAccessSection(currentUser, item.id));
+  const visibleNavItems = SIDEBAR_ITEMS.filter((item) =>
+    canUserAccessSection(currentUser, item.id, assignedDepartments),
+  );
   const unreadCount = notifications.filter((n) => !n.read).length;
 
   useEffect(() => {

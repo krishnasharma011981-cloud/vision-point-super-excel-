@@ -63,6 +63,9 @@ import type {
   SystemSettings,
   TmaRecord,
   UserAccount,
+  WorkAssignment,
+  WorkAssignmentDepartment,
+  WorkAssignmentTask,
 } from './types/domain';
 
 const toMillis = (val: unknown): number => {
@@ -111,6 +114,8 @@ export default function App() {
   const [editRequests, setEditRequests] = useState<EditRequest[]>([]);
   const [directMessages, setDirectMessages] = useState<DirectMessage[]>([]);
   const [sheetConfigs, setSheetConfigs] = useState<ExcelSheetConfig[]>([]);
+  const [workAssignments, setWorkAssignments] = useState<WorkAssignment[]>([]);
+  const [workAssignmentTasks, setWorkAssignmentTasks] = useState<WorkAssignmentTask[]>([]);
   const [sheetConfigsLoaded, setSheetConfigsLoaded] = useState(false);
   const [onlineClassRecordsLoaded, setOnlineClassRecordsLoaded] = useState(false);
   const [feeRecordsLoaded, setFeeRecordsLoaded] = useState(false);
@@ -232,7 +237,6 @@ export default function App() {
         let profile = await getUserProfile(fbUser.uid);
         if (
           fbUser.email &&
-          fbUser.emailVerified &&
           isBootstrappedOwnerEmail(fbUser.email) &&
           (!profile ||
             profile.role !== 'super_admin' ||
@@ -245,7 +249,7 @@ export default function App() {
             fullName: fbUser.displayName || profile?.fullName || 'Super Admin',
           });
         }
-        if (!profile && fbUser.email && fbUser.emailVerified) {
+        if (!profile && fbUser.email) {
           profile = await claimPendingStaffInvite({
             uid: fbUser.uid,
             email: fbUser.email,
@@ -379,7 +383,26 @@ export default function App() {
       ),
     );
 
-    // 2. Users (Super Admin sees all, Centre Head sees own centre, Employee sees self)
+    // 2. Users (Super Admin sees all, Centre Head sees own centre, Employee sees self + live session revocation check)
+    unsubs.push(
+      onSnapshot(
+        doc(db, 'users', currentUser.uid),
+        (snap) => {
+          const latest = snap.exists() ? (snap.data() as UserAccount) : null;
+          if (!latest || latest.status !== 'Active') {
+            if (!isBootstrappedOwnerEmail(currentUser.email)) {
+              void signOut(auth).catch(() => {});
+              setCurrentUser(null);
+              setLoginError('Access denied: Your staff account has been removed or deactivated by an administrator.');
+            }
+          }
+        },
+        () => {
+          // Ignore transient read error on signout
+        },
+      ),
+    );
+
     if (isSuper || isHead) {
       const usersQuery = isSuper
         ? query(collection(db, 'users'))
@@ -612,6 +635,40 @@ export default function App() {
       ),
     );
 
+    // 14. Staff Work Assignments & Calling Tasks (Fee Recovery, Practical, TMA)
+    const waQuery = isSuper
+      ? query(collection(db, 'work_assignments'))
+      : isHead
+        ? query(collection(db, 'work_assignments'), where('centreId', '==', cId))
+        : query(collection(db, 'work_assignments'), where('staffUid', '==', currentUser.uid));
+    unsubs.push(
+      onSnapshot(
+        waQuery,
+        (snap) => {
+          const sorted = snap.docs
+            .map((d) => d.data() as WorkAssignment)
+            .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+          setWorkAssignments(sorted);
+        },
+        (err) => handleFirestoreError(err, OperationType.LIST, 'work_assignments'),
+      ),
+    );
+
+    const waTasksQuery = isSuper
+      ? query(collection(db, 'work_assignment_tasks'))
+      : isHead
+        ? query(collection(db, 'work_assignment_tasks'), where('centreId', '==', cId))
+        : query(collection(db, 'work_assignment_tasks'), where('staffUid', '==', currentUser.uid));
+    unsubs.push(
+      onSnapshot(
+        waTasksQuery,
+        (snap) => {
+          setWorkAssignmentTasks(snap.docs.map((d) => d.data() as WorkAssignmentTask));
+        },
+        (err) => handleFirestoreError(err, OperationType.LIST, 'work_assignment_tasks'),
+      ),
+    );
+
     return () => {
       unsubs.forEach((u) => u());
     };
@@ -839,9 +896,19 @@ export default function App() {
     })();
   }, [currentUser, dataLoading, sheetConfigsLoaded, sheetConfigs, students, notify]);
 
+  const activeAssignedDepartments: WorkAssignmentDepartment[] = currentUser
+    ? Array.from(
+        new Set(
+          workAssignments
+            .filter((a) => a.staffUid === currentUser.uid && a.status === 'Active')
+            .map((a) => a.department),
+        ),
+      )
+    : [];
+
   const handleSelectSection = (section: NavSection) => {
     if (!currentUser) return;
-    if (!canUserAccessSection(currentUser, section)) {
+    if (!canUserAccessSection(currentUser, section, activeAssignedDepartments)) {
       notify('Access Denied', 'You do not have permission to open this department.', 'error');
       return;
     }
@@ -916,7 +983,7 @@ export default function App() {
     );
   }
 
-  const safeSection: NavSection = canUserAccessSection(currentUser, activeSection)
+  const safeSection: NavSection = canUserAccessSection(currentUser, activeSection, activeAssignedDepartments)
     ? activeSection
     : 'overview';
 
@@ -935,6 +1002,7 @@ export default function App() {
         globalSearch={globalSearch}
         notifications={notifications}
         unreadCommsCount={unreadCommsCount}
+        assignedDepartments={activeAssignedDepartments}
         onSelectSection={handleSelectSection}
         onChangeCentreFilter={handleChangeCentreFilter}
         onChangeGlobalSearch={setGlobalSearch}
@@ -1009,6 +1077,8 @@ export default function App() {
             feeRecords={feeRecords}
             employees={users}
             editRequests={editRequests}
+            workAssignments={workAssignments}
+            workAssignmentTasks={workAssignmentTasks}
             currentUser={currentUser}
             selectedCentreFilter={selectedCentreFilter}
             globalSearch={globalSearch}
@@ -1023,6 +1093,8 @@ export default function App() {
             employees={users}
             editRequests={editRequests}
             sheetConfigs={sheetConfigs}
+            workAssignments={workAssignments}
+            workAssignmentTasks={workAssignmentTasks}
             currentUser={currentUser}
             selectedCentreFilter={selectedCentreFilter}
             globalSearch={globalSearch}
@@ -1037,6 +1109,8 @@ export default function App() {
             employees={users}
             editRequests={editRequests}
             sheetConfigs={sheetConfigs}
+            workAssignments={workAssignments}
+            workAssignmentTasks={workAssignmentTasks}
             currentUser={currentUser}
             selectedCentreFilter={selectedCentreFilter}
             globalSearch={globalSearch}

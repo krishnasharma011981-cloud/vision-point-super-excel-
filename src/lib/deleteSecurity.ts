@@ -10,6 +10,23 @@ export function verifyDeletePassword(input: string): boolean {
   return String(input ?? '').trim() === DELETE_SECURITY_PASSWORD;
 }
 
+export interface StaffPermissionSubject {
+  uid: string;
+  role: 'super_admin' | 'centre_head' | 'employee';
+  centreId: string;
+}
+
+export function canManageStaffMember(actor: StaffPermissionSubject, target: StaffPermissionSubject): boolean {
+  if (actor.role === 'super_admin') return true;
+  return actor.role === 'centre_head' && target.role === 'employee' && target.centreId === actor.centreId;
+}
+
+export function canDeleteStaffMember(actor: StaffPermissionSubject, target: StaffPermissionSubject): boolean {
+  if (!target.uid || target.uid === actor.uid) return false;
+  if (target.role === 'super_admin') return false;
+  return canManageStaffMember(actor, target);
+}
+
 export interface DeleteVoiceCallbacks {
   onPlayStart?: () => void;
   onProgress?: (progress: number) => void;

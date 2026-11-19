@@ -13,14 +13,17 @@ import {
 } from 'lucide-react';
 import React, { useMemo, useState } from 'react';
 import { CANONICAL_CENTRES, CENTRE_MAP, DEPARTMENT_LABELS, DEPARTMENTS, ROLE_LABELS } from '../constants/centres';
+import { canDeleteStaffMember, canManageStaffMember } from '../lib/deleteSecurity';
 import { provisionAuthUserOnServer } from '../lib/securityClient';
 import {
   assignCentreHead,
   createStaffInvite,
   deleteStaffInvite,
+  deleteStaffMember,
   saveUserAccountDoc,
   updateUserAccount,
 } from '../services/firestoreService';
+import { DeleteProtectionModal } from './DeleteProtectionModal';
 import type {
   AccountStatus,
   CentreId,
@@ -55,6 +58,8 @@ export const EmployeeManagementView: React.FC<EmployeeManagementViewProps> = ({
   const [roleFilter, setRoleFilter] = useState('all');
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingUser, setEditingUser] = useState<UserAccount | null>(null);
+  const [deleteTargetUser, setDeleteTargetUser] = useState<UserAccount | null>(null);
+  const [deletingStaff, setDeletingStaff] = useState(false);
 
   // Create form state
   const [fullName, setFullName] = useState('');
@@ -293,9 +298,30 @@ export const EmployeeManagementView: React.FC<EmployeeManagementViewProps> = ({
   const handleCancelInvite = async (inv: StaffInvite) => {
     try {
       await deleteStaffInvite(inv.inviteId, inv.email, inv.centreId, currentUser);
-      onNotify('Invite Revoked', `Removed pending invite for ${inv.email}.`, 'info');
+      onNotify('Invite Removed', `Removed pending staff invite for ${inv.email}.`, 'info');
     } catch (err) {
-      onNotify('Revoke Failed', err instanceof Error ? err.message : 'Could not delete invite.', 'error');
+      onNotify('Remove Failed', err instanceof Error ? err.message : 'Could not remove invite.', 'error');
+    }
+  };
+
+  const handleConfirmDeleteStaff = async () => {
+    if (!deleteTargetUser) return;
+    setDeletingStaff(true);
+    try {
+      await deleteStaffMember(deleteTargetUser, currentUser);
+      onNotify(
+        'Staff Removed',
+        `${deleteTargetUser.fullName} (${deleteTargetUser.email}) has been permanently removed from ${deleteTargetUser.centreName}.`,
+        'success',
+      );
+      if (editingUser?.uid === deleteTargetUser.uid) {
+        setEditingUser(null);
+      }
+      setDeleteTargetUser(null);
+    } catch (err) {
+      onNotify('Delete Failed', err instanceof Error ? err.message : 'Could not delete staff member.', 'error');
+    } finally {
+      setDeletingStaff(false);
     }
   };
 
@@ -524,7 +550,7 @@ export const EmployeeManagementView: React.FC<EmployeeManagementViewProps> = ({
                         className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-red-700 hover:bg-red-50 rounded-md"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
-                        Revoke
+                        Delete
                       </button>
                     </td>
                   </tr>
@@ -558,7 +584,8 @@ export const EmployeeManagementView: React.FC<EmployeeManagementViewProps> = ({
               </thead>
               <tbody className="divide-y divide-zinc-200 text-xs">
                 {scopedUsers.map((u) => {
-                  const canManageRow = isSuperAdmin || (u.role === 'employee' && u.centreId === currentUser.centreId);
+                  const canManageRow = canManageStaffMember(currentUser, u);
+                  const canDeleteRow = canDeleteStaffMember(currentUser, u);
                   return (
                     <tr key={u.uid} className="hover:bg-zinc-50">
                       <td className="py-3 px-4">
@@ -580,9 +607,9 @@ export const EmployeeManagementView: React.FC<EmployeeManagementViewProps> = ({
                           {u.status}
                         </span>
                       </td>
-                      <td className="py-3 px-4 text-right">
+                      <td className="py-3 px-4 text-right whitespace-nowrap">
                         {canManageRow ? (
-                          <div className="inline-flex items-center gap-2">
+                          <div className="inline-flex items-center gap-1.5">
                             <button
                               type="button"
                               onClick={() => openEditModal(u)}
@@ -596,7 +623,7 @@ export const EmployeeManagementView: React.FC<EmployeeManagementViewProps> = ({
                                 onClick={() => handleToggleStatus(u)}
                                 className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-md ${
                                   u.status === 'Active'
-                                    ? 'text-red-700 hover:bg-red-50'
+                                    ? 'text-amber-800 hover:bg-amber-50'
                                     : 'text-emerald-700 hover:bg-emerald-50'
                                 }`}
                               >
@@ -609,6 +636,16 @@ export const EmployeeManagementView: React.FC<EmployeeManagementViewProps> = ({
                                     <UserCheck className="w-3.5 h-3.5" /> Activate
                                   </>
                                 )}
+                              </button>
+                            )}
+                            {canDeleteRow && (
+                              <button
+                                type="button"
+                                onClick={() => setDeleteTargetUser(u)}
+                                title={`Permanently delete ${u.fullName}`}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 rounded-md transition-colors"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" /> Delete
                               </button>
                             )}
                           </div>
@@ -919,6 +956,20 @@ export const EmployeeManagementView: React.FC<EmployeeManagementViewProps> = ({
           </div>
         </div>
       )}
+
+      <DeleteProtectionModal
+        open={Boolean(deleteTargetUser)}
+        title={deleteTargetUser ? `Remove ${deleteTargetUser.fullName}?` : 'Remove Staff Member'}
+        description={
+          deleteTargetUser
+            ? `Kya aap ${deleteTargetUser.fullName} (${deleteTargetUser.email}) — ${ROLE_LABELS[deleteTargetUser.role]} (${deleteTargetUser.centreName}) ko permanently hatana chahte hain? Unka portal login access turant band ho jayega.`
+            : ''
+        }
+        confirmLabel="Verify & Delete Staff"
+        busy={deletingStaff}
+        onConfirm={handleConfirmDeleteStaff}
+        onCancel={() => setDeleteTargetUser(null)}
+      />
     </div>
   );
 };

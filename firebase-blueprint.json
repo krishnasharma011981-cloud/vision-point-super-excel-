@@ -444,6 +444,73 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["configId", "headerLabels", "customColumns", "hiddenCoreColumns", "deletedExtraColumns", "updatedBy", "updatedAt"]
+    },
+    "WorkAssignment": {
+      "title": "WorkAssignment",
+      "description": "Batch work assignment (e.g., S.No 1 to 50) created by Super Admin or Centre Head for a staff member in Fee Recovery, Practical, or TMA",
+      "type": "object",
+      "properties": {
+        "assignmentId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "centreName": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "department": { "type": "string", "enum": ["fee_recovery", "practical", "tma"] },
+        "staffUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "staffName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "staffEmail": { "type": "string", "maxLength": 160 },
+        "assignedByUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "assignedByName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "assignedDate": { "type": "string", "maxLength": 30 },
+        "fromSerial": { "type": "number", "minimum": 1, "maximum": 100000 },
+        "toSerial": { "type": "number", "minimum": 1, "maximum": 100000 },
+        "totalStudents": { "type": "number", "minimum": 1, "maximum": 2000 },
+        "status": { "type": "string", "enum": ["Active", "Completed", "Archived"] },
+        "note": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "assignmentId", "centreId", "centreName", "department",
+        "staffUid", "staffName", "staffEmail", "assignedByUid", "assignedByName",
+        "assignedDate", "fromSerial", "toSerial", "totalStudents", "status", "note",
+        "createdAt", "updatedAt"
+      ]
+    },
+    "WorkAssignmentTask": {
+      "title": "WorkAssignmentTask",
+      "description": "Individual student calling/follow-up card assigned to a staff member within a WorkAssignment batch",
+      "type": "object",
+      "properties": {
+        "taskId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "assignmentId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "centreId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "department": { "type": "string", "enum": ["fee_recovery", "practical", "tma"] },
+        "staffUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "staffName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "studentId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "serialNumber": { "type": "number", "minimum": 1, "maximum": 100000 },
+        "studentName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "fatherName": { "type": "string", "maxLength": 120 },
+        "mobileNumber": { "type": "string", "maxLength": 20 },
+        "callingNumber": { "type": "string", "maxLength": 20 },
+        "subject": { "type": "string", "maxLength": 200 },
+        "pendingFee": { "type": "number", "minimum": 0, "maximum": 1000000 },
+        "totalFee": { "type": "number", "minimum": 0, "maximum": 1000000 },
+        "callStatus": { "type": "string", "enum": ["Pending", "Follow-up Scheduled", "Called - Done", "Not Answered"] },
+        "followUpDate": { "type": "string", "maxLength": 30 },
+        "followUpTime": { "type": "string", "maxLength": 10 },
+        "remark": { "type": "string", "maxLength": 1000 },
+        "lastCalledAt": { "type": "string", "maxLength": 40 },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "taskId", "assignmentId", "centreId", "department",
+        "staffUid", "staffName", "studentId", "serialNumber", "studentName", "fatherName",
+        "mobileNumber", "callingNumber", "subject", "pendingFee", "totalFee",
+        "callStatus", "followUpDate", "followUpTime", "remark", "lastCalledAt",
+        "updatedBy", "createdAt", "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -522,6 +589,14 @@
     "/excel_sheet_configs/{configId}": {
       "schema": { "$ref": "#/entities/ExcelSheetConfig" },
       "description": "Persisted Excel column definitions, custom headings, and visibility preferences"
+    },
+    "/work_assignments/{assignmentId}": {
+      "schema": { "$ref": "#/entities/WorkAssignment" },
+      "description": "Calling/follow-up work batches assigned by Super Admin or Centre Head to staff in Fee Recovery, Practical, and TMA"
+    },
+    "/work_assignment_tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/WorkAssignmentTask" },
+      "description": "Individual student calling cards with father name, follow-up date/time, and call remarks"
     }
   }
 }

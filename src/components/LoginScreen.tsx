@@ -8,6 +8,7 @@ import {
   Building2,
   Check,
   ChevronDown,
+  ExternalLink,
   Eye,
   EyeOff,
   Flame,
@@ -18,6 +19,7 @@ import {
   Mail,
   MapPin,
   Monitor,
+  RefreshCw,
   ShieldCheck,
   Users,
   X,
@@ -172,7 +174,47 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   const [resetEmail, setResetEmail] = useState('');
   const [resetSending, setResetSending] = useState(false);
 
+  const [providerStatus, setProviderStatus] = useState<{
+    checked: boolean;
+    emailPasswordEnabled: boolean;
+    projectId: string;
+  }>({
+    checked: false,
+    emailPasswordEnabled: true,
+    projectId: 'database-security-32018',
+  });
+  const [checkingProvider, setCheckingProvider] = useState(false);
+
   const dropdownRef = useRef<HTMLDivElement>(null);
+
+  const checkProviderStatus = async () => {
+    setCheckingProvider(true);
+    try {
+      const res = await fetch('/api/auth/provider-status');
+      if (res.ok) {
+        const data = (await res.json()) as {
+          emailPasswordEnabled?: boolean;
+          projectId?: string;
+        };
+        setProviderStatus({
+          checked: true,
+          emailPasswordEnabled: data.emailPasswordEnabled !== false,
+          projectId: data.projectId || 'database-security-32018',
+        });
+        if (data.emailPasswordEnabled !== false) {
+          setErrorMsg(null);
+        }
+      }
+    } catch {
+      // Keep default state on network hiccup
+    } finally {
+      setCheckingProvider(false);
+    }
+  };
+
+  useEffect(() => {
+    void checkProviderStatus();
+  }, []);
 
   useEffect(() => {
     if (externalError) {
@@ -197,11 +239,10 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
     };
   }, []);
 
-  const validateCentreAndComplete = async (uid: string, authEmail: string, emailVerified: boolean) => {
+  const validateCentreAndComplete = async (uid: string, authEmail: string) => {
     let profile = await getUserProfile(uid);
 
     if (
-      emailVerified &&
       isBootstrappedOwnerEmail(authEmail) &&
       (!profile || profile.role !== 'super_admin' || profile.department !== 'all' || profile.status !== 'Active')
     ) {
@@ -215,7 +256,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
       }
     }
 
-    if (!profile && emailVerified) {
+    if (!profile) {
       profile = await claimPendingStaffInvite({
         uid,
         email: authEmail,
@@ -295,22 +336,29 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
         const prepData = (await prepRes.json().catch(() => ({}))) as {
           ready?: boolean;
           providerDisabled?: boolean;
+          projectId?: string;
         };
         if (prepData.providerDisabled) {
+          setProviderStatus({
+            checked: true,
+            emailPasswordEnabled: false,
+            projectId: prepData.projectId || providerStatus.projectId,
+          });
           setErrorMsg(
-            'Email/Password sign-in is disabled in Firebase Console. Enable it under Authentication -> Sign-in method.',
+            'Email/Password Sign-In Firebase Console mein abhi OFF hai. Upar diye Firebase Console link par jaakar Email/Password ko Enable karein, fir Login karein.',
           );
           return;
         }
       }
 
       const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
-      await validateCentreAndComplete(cred.user.uid, cred.user.email || email.trim(), cred.user.emailVerified);
+      await validateCentreAndComplete(cred.user.uid, cred.user.email || email.trim());
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code || '';
       if (code === 'auth/operation-not-allowed') {
+        setProviderStatus((prev) => ({ ...prev, checked: true, emailPasswordEnabled: false }));
         setErrorMsg(
-          'Email/Password sign-in is disabled in Firebase Console. Enable it under Authentication -> Sign-in method.',
+          'Email/Password Sign-In Firebase Console mein abhi OFF hai. Upar diye Firebase Console link par jaakar Email/Password ko Enable karein, fir Login karein.',
         );
       } else if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
         setErrorMsg(
@@ -581,11 +629,50 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 </motion.div>
               </div>
 
+              {/* One-Time Firebase Email/Password Enable Notice (Only shown when disabled in Firebase Console) */}
+              {providerStatus.checked && !providerStatus.emailPasswordEnabled && (
+                <div className="mb-3.5 px-3.5 py-3 rounded-2xl bg-[#4a2608]/85 backdrop-blur-md border border-[#FFC83D]/70 shadow-[0_0_20px_rgba(255,200,61,0.2)] text-xs text-white leading-snug overflow-hidden">
+                  <div className="flex items-start gap-2.5">
+                    <AlertTriangle className="w-4 h-4 text-[#FFC83D] shrink-0 mt-0.5" />
+                    <div className="flex-1 min-w-0">
+                      <p className="font-extrabold text-[#FFC83D]">
+                        Enable Email/Password in Firebase Console
+                      </p>
+                      <p className="mt-1 text-slate-100/95 break-words">
+                        Project <span className="font-mono font-semibold text-white">{providerStatus.projectId}</span> mein
+                        Email/Password login abhi OFF hai. Console kholkar{' '}
+                        <strong className="text-white">Email/Password → Enable → Save</strong> karein, fir seedha apna ID &amp; Password daal kar login karein.
+                      </p>
+                      <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                        <a
+                          href={`https://console.firebase.google.com/project/${providerStatus.projectId}/authentication/providers`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#FFC83D] hover:bg-[#ffd460] text-[#071329] font-extrabold text-[11px] transition-colors"
+                        >
+                          Open Firebase Console
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() => void checkProviderStatus()}
+                          disabled={checkingProvider}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/15 hover:bg-white/25 border border-white/25 text-white font-bold text-[11px] transition-colors disabled:opacity-60"
+                        >
+                          <RefreshCw className={`w-3 h-3 ${checkingProvider ? 'animate-spin' : ''}`} />
+                          {checkingProvider ? 'Checking...' : 'Check Status'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Account Access Warning Banner */}
               {errorMsg && (
-                <div className="mb-3.5 px-3.5 py-2.5 rounded-2xl bg-[#9A001B]/45 backdrop-blur-md border border-[#FF1739]/85 shadow-[0_0_20px_rgba(255,23,57,0.28)] flex items-start gap-2.5 text-xs text-white leading-snug">
+                <div className="mb-3.5 px-3.5 py-2.5 rounded-2xl bg-[#9A001B]/45 backdrop-blur-md border border-[#FF1739]/85 shadow-[0_0_20px_rgba(255,23,57,0.28)] flex items-start gap-2.5 text-xs text-white leading-snug overflow-hidden">
                   <AlertTriangle className="w-4 h-4 text-white shrink-0 mt-0.5" />
-                  <span className="flex-1">{errorMsg}</span>
+                  <span className="flex-1 min-w-0 break-words">{errorMsg}</span>
                   <button
                     type="button"
                     onClick={() => setErrorMsg(null)}

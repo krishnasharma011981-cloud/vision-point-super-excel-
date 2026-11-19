@@ -29,7 +29,7 @@ service cloud.firestore {
     }
 
     function isBootstrappedSuperAdmin() {
-      return isSignedIn() && request.auth.token.email_verified == true && request.auth.token.email.lower() in [
+      return isSignedIn() && request.auth.token.email is string && request.auth.token.email.lower() in [
         'niosvisionpoint9@gmail.com',
         'krishnasharma011981@gmail.com'
       ];
@@ -548,10 +548,80 @@ service cloud.firestore {
       && data.createdAt is timestamp;
     }
 
+    function isValidWorkAssignment(data) {
+      return data.keys().hasAll([
+        'assignmentId', 'centreId', 'centreName', 'department',
+        'staffUid', 'staffName', 'staffEmail', 'assignedByUid', 'assignedByName',
+        'assignedDate', 'fromSerial', 'toSerial', 'totalStudents', 'status', 'note',
+        'createdAt', 'updatedAt'
+      ]) && data.keys().hasOnly([
+        'assignmentId', 'centreId', 'centreName', 'department',
+        'staffUid', 'staffName', 'staffEmail', 'assignedByUid', 'assignedByName',
+        'assignedDate', 'fromSerial', 'toSerial', 'totalStudents', 'status', 'note',
+        'createdAt', 'updatedAt'
+      ])
+      && isValidId(data.assignmentId)
+      && data.centreId in ['vp_lookerganj', 'vp_civillines', 'xis_varanasi', 'xis_jaunpur']
+      && isValidStr(data.centreName, 2, 120)
+      && data.department in ['fee_recovery', 'practical', 'tma']
+      && isValidId(data.staffUid)
+      && isValidStr(data.staffName, 1, 100)
+      && isValidStr(data.staffEmail, 0, 160)
+      && isValidId(data.assignedByUid)
+      && isValidStr(data.assignedByName, 1, 100)
+      && isValidStr(data.assignedDate, 4, 30)
+      && data.fromSerial is number && data.fromSerial >= 1 && data.fromSerial <= 100000
+      && data.toSerial is number && data.toSerial >= data.fromSerial && data.toSerial <= 100000
+      && data.totalStudents is number && data.totalStudents >= 1 && data.totalStudents <= 2000
+      && data.status in ['Active', 'Completed', 'Archived']
+      && isValidStr(data.note, 0, 500)
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidWorkAssignmentTask(data) {
+      return data.keys().hasAll([
+        'taskId', 'assignmentId', 'centreId', 'department',
+        'staffUid', 'staffName', 'studentId', 'serialNumber', 'studentName', 'fatherName',
+        'mobileNumber', 'callingNumber', 'subject', 'pendingFee', 'totalFee',
+        'callStatus', 'followUpDate', 'followUpTime', 'remark', 'lastCalledAt',
+        'updatedBy', 'createdAt', 'updatedAt'
+      ]) && data.keys().hasOnly([
+        'taskId', 'assignmentId', 'centreId', 'department',
+        'staffUid', 'staffName', 'studentId', 'serialNumber', 'studentName', 'fatherName',
+        'mobileNumber', 'callingNumber', 'subject', 'pendingFee', 'totalFee',
+        'callStatus', 'followUpDate', 'followUpTime', 'remark', 'lastCalledAt',
+        'updatedBy', 'createdAt', 'updatedAt'
+      ])
+      && isValidId(data.taskId)
+      && isValidId(data.assignmentId)
+      && data.centreId in ['vp_lookerganj', 'vp_civillines', 'xis_varanasi', 'xis_jaunpur']
+      && data.department in ['fee_recovery', 'practical', 'tma']
+      && isValidId(data.staffUid)
+      && isValidStr(data.staffName, 1, 100)
+      && isValidId(data.studentId)
+      && data.serialNumber is number && data.serialNumber >= 1 && data.serialNumber <= 100000
+      && isValidStr(data.studentName, 1, 120)
+      && isValidStr(data.fatherName, 0, 120)
+      && isValidStr(data.mobileNumber, 0, 20)
+      && isValidStr(data.callingNumber, 0, 20)
+      && isValidStr(data.subject, 0, 200)
+      && data.pendingFee is number && data.pendingFee >= 0 && data.pendingFee <= 1000000
+      && data.totalFee is number && data.totalFee >= 0 && data.totalFee <= 1000000
+      && data.callStatus in ['Pending', 'Follow-up Scheduled', 'Called - Done', 'Not Answered']
+      && isValidStr(data.followUpDate, 0, 30)
+      && isValidStr(data.followUpTime, 0, 10)
+      && isValidStr(data.remark, 0, 1000)
+      && isValidStr(data.lastCalledAt, 0, 40)
+      && isValidStr(data.updatedBy, 1, 128)
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
     function isValidInviteClaim(uid) {
       let invPath = /databases/$(database)/documents/staff_invites/$(incoming().createdBy);
       return isSignedIn()
-        && request.auth.token.email_verified == true
+        && request.auth.token.email is string
         && request.auth.uid == uid
         && incoming().uid == uid
         && incoming().status == 'Active'
@@ -614,7 +684,7 @@ service cloud.firestore {
         (isActiveUser() && userDoc().role == 'centre_head' && existing().role == 'employee' && incoming().role == 'employee' && existing().centreId == userDoc().centreId && incoming().centreId == userDoc().centreId && incoming().department != 'all' && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'mobileNumber', 'department', 'status', 'updatedBy', 'updatedAt'])) ||
         (request.auth.uid == uid && isActiveUser() && incoming().role == existing().role && incoming().centreId == existing().centreId && incoming().department == existing().department && incoming().status == existing().status && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'mobileNumber', 'updatedBy', 'updatedAt']))
       );
-      allow delete: if isValidId(uid) && isSuperAdmin() && uid != request.auth.uid;
+      allow delete: if isValidId(uid) && uid != request.auth.uid && existing().role != 'super_admin' && (isSuperAdmin() || (existing().role == 'employee' && isCentreHeadOf(existing().centreId)));
     }
 
     match /students/{studentId} {
@@ -725,7 +795,7 @@ service cloud.firestore {
         (assignmentId == request.auth.uid && incoming().uid == request.auth.uid && existsAfter(/databases/$(database)/documents/users/$(request.auth.uid)) && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'employee' && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.centreId == incoming().centreId && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.department == incoming().department)
       );
       allow update: if isValidId(assignmentId) && isActiveUser() && isValidEmployeeAssignment(incoming()) && incoming().createdAt == existing().createdAt && incoming().updatedAt == request.time && (isSuperAdmin() || (incoming().centreId == existing().centreId && isCentreHeadOf(existing().centreId)));
-      allow delete: if isValidId(assignmentId) && isSuperAdmin();
+      allow delete: if isValidId(assignmentId) && (isSuperAdmin() || isCentreHeadOf(existing().centreId));
     }
 
     match /centre_assignments/{centreId} {
@@ -775,12 +845,12 @@ service cloud.firestore {
     match /staff_invites/{inviteId} {
       allow get: if isValidId(inviteId) && (
         isSuperAdmin() ||
-        (isSignedIn() && request.auth.token.email_verified == true && resource.data.email == request.auth.token.email.lower()) ||
+        (isSignedIn() && request.auth.token.email is string && resource.data.email == request.auth.token.email.lower()) ||
         (isActiveUser() && userDoc().role == 'centre_head' && resource.data.centreId == userDoc().centreId)
       );
       allow list: if isSuperAdmin() || (
         isSignedIn() && (
-          (request.auth.token.email_verified == true && resource.data.email == request.auth.token.email.lower()) ||
+          (request.auth.token.email is string && resource.data.email == request.auth.token.email.lower()) ||
           (hasUserDoc() && userDoc().status == 'Active' && userDoc().role == 'centre_head' && resource.data.centreId == userDoc().centreId)
         )
       );
@@ -791,7 +861,7 @@ service cloud.firestore {
       allow update: if isValidId(inviteId) && isVerifiedUser() && isValidStaffInvite(incoming()) && incoming().inviteId == existing().inviteId && incoming().email == existing().email && incoming().createdAt == existing().createdAt && incoming().updatedAt == request.time && (
         isSuperAdmin() ||
         (isActiveUser() && userDoc().role == 'centre_head' && existing().role == 'employee' && incoming().role == 'employee' && existing().centreId == userDoc().centreId && incoming().centreId == userDoc().centreId && incoming().department != 'all') ||
-        (request.auth.token.email_verified == true && existing().status == 'Pending' && existing().email == request.auth.token.email.lower() && incoming().role == existing().role && incoming().centreId == existing().centreId && incoming().department == existing().department && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'claimedUid', 'updatedAt']) && incoming().status == 'Claimed' && incoming().claimedUid == request.auth.uid)
+        (request.auth.token.email is string && existing().status == 'Pending' && existing().email == request.auth.token.email.lower() && incoming().role == existing().role && incoming().centreId == existing().centreId && incoming().department == existing().department && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'claimedUid', 'updatedAt']) && incoming().status == 'Claimed' && incoming().claimedUid == request.auth.uid)
       );
       allow delete: if isValidId(inviteId) && (
         isSuperAdmin() ||
@@ -920,6 +990,80 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && (isSuperAdmin() || isCentreHeadOf(configId));
       allow delete: if isValidId(configId) && isSuperAdmin();
+    }
+
+    match /work_assignments/{assignmentId} {
+      allow get: if isValidId(assignmentId) && (
+        isSuperAdmin() ||
+        isCentreHeadOf(resource.data.centreId) ||
+        (isActiveUser() && resource.data.staffUid == request.auth.uid)
+      );
+      allow list: if isSuperAdmin() || (
+        isActiveUser() && (
+          (userDoc().role == 'centre_head' && resource.data.centreId == userDoc().centreId) ||
+          resource.data.staffUid == request.auth.uid
+        )
+      );
+      allow create: if isValidId(assignmentId) && isActiveUser() && isValidWorkAssignment(incoming())
+        && incoming().assignmentId == assignmentId
+        && incoming().assignedByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (isSuperAdmin() || isCentreHeadOf(incoming().centreId));
+      allow update: if isValidId(assignmentId) && isActiveUser() && isValidWorkAssignment(incoming())
+        && incoming().assignmentId == existing().assignmentId
+        && incoming().centreId == existing().centreId
+        && incoming().department == existing().department
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (isSuperAdmin() || isCentreHeadOf(existing().centreId));
+      allow delete: if isValidId(assignmentId) && (
+        isSuperAdmin() ||
+        isCentreHeadOf(existing().centreId)
+      );
+    }
+
+    match /work_assignment_tasks/{taskId} {
+      allow get: if isValidId(taskId) && (
+        isSuperAdmin() ||
+        isCentreHeadOf(resource.data.centreId) ||
+        (isActiveUser() && resource.data.staffUid == request.auth.uid)
+      );
+      allow list: if isSuperAdmin() || (
+        isActiveUser() && (
+          (userDoc().role == 'centre_head' && resource.data.centreId == userDoc().centreId) ||
+          resource.data.staffUid == request.auth.uid
+        )
+      );
+      allow create: if isValidId(taskId) && isActiveUser() && isValidWorkAssignmentTask(incoming())
+        && incoming().taskId == taskId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (isSuperAdmin() || isCentreHeadOf(incoming().centreId));
+      allow update: if isValidId(taskId) && isActiveUser() && isValidWorkAssignmentTask(incoming())
+        && incoming().taskId == existing().taskId
+        && incoming().assignmentId == existing().assignmentId
+        && incoming().centreId == existing().centreId
+        && incoming().department == existing().department
+        && incoming().studentId == existing().studentId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isSuperAdmin() ||
+          isCentreHeadOf(existing().centreId) ||
+          (
+            existing().staffUid == request.auth.uid
+            && incoming().staffUid == existing().staffUid
+            && incoming().updatedBy == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'callStatus', 'followUpDate', 'followUpTime', 'remark', 'lastCalledAt', 'updatedBy', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isValidId(taskId) && (
+        isSuperAdmin() ||
+        isCentreHeadOf(existing().centreId)
+      );
     }
   }
 }

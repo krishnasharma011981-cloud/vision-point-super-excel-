@@ -1,12 +1,12 @@
 {
-  "projectId": "vernal-rhythm-pv0ns",
-  "appId": "1:628952570178:web:dd0b3aa09ccec2e8af90db",
-  "apiKey": "AIzaSyBa0K9h_lYLuVd_qlON3Wl6PMpk5okEYPU",
-  "authDomain": "vernal-rhythm-pv0ns.firebaseapp.com",
+  "projectId": "database-security-32018",
+  "appId": "1:131561227967:web:f39bd014e8b9293001a80a",
+  "apiKey": "AIzaSyAOXVDSGBLRJG_VCeNbGwuJOzlu67T629U",
+  "authDomain": "database-security-32018.firebaseapp.com",
   "firestoreDatabaseId": "ai-studio-niosvisionpoint-0aa5b500-1550-4d5e-97ae-3f987eba227b",
-  "storageBucket": "vernal-rhythm-pv0ns.firebasestorage.app",
-  "messagingSenderId": "628952570178",
+  "storageBucket": "database-security-32018.firebasestorage.app",
+  "messagingSenderId": "131561227967",
   "measurementId": "",
-  "oAuthClientId": "628952570178-7070f0gnteg1g87ink41ajdi8hjpan3h.apps.googleusercontent.com",
+  "oAuthClientId": "131561227967-pjg3mr63lhjr5ktcccd378ne19tf859m.apps.googleusercontent.com",
   "recaptchaSiteKey": ""
 }

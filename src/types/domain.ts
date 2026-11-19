@@ -383,6 +383,58 @@ export interface IncomingWalkieState {
   startedAt: number;
 }
 
+export type WorkAssignmentDepartment = 'fee_recovery' | 'practical' | 'tma';
+
+export type WorkAssignmentStatus = 'Active' | 'Completed' | 'Archived';
+
+export type CallTaskStatus = 'Pending' | 'Follow-up Scheduled' | 'Called - Done' | 'Not Answered';
+
+export interface WorkAssignment {
+  assignmentId: string;
+  centreId: CentreId;
+  centreName: string;
+  department: WorkAssignmentDepartment;
+  staffUid: string;
+  staffName: string;
+  staffEmail: string;
+  assignedByUid: string;
+  assignedByName: string;
+  assignedDate: string;
+  fromSerial: number;
+  toSerial: number;
+  totalStudents: number;
+  status: WorkAssignmentStatus;
+  note: string;
+  createdAt: unknown;
+  updatedAt: unknown;
+}
+
+export interface WorkAssignmentTask {
+  taskId: string;
+  assignmentId: string;
+  centreId: CentreId;
+  department: WorkAssignmentDepartment;
+  staffUid: string;
+  staffName: string;
+  studentId: string;
+  serialNumber: number;
+  studentName: string;
+  fatherName: string;
+  mobileNumber: string;
+  callingNumber: string;
+  subject: string;
+  pendingFee: number;
+  totalFee: number;
+  callStatus: CallTaskStatus;
+  followUpDate: string;
+  followUpTime: string;
+  remark: string;
+  lastCalledAt: string;
+  updatedBy: string;
+  createdAt: unknown;
+  updatedAt: unknown;
+}
+
 export type NavSection =
   | 'overview'
   | 'communication'

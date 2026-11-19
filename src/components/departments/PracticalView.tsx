@@ -19,6 +19,8 @@ import type {
   PracticalSubmissionStatus,
   Student,
   UserAccount,
+  WorkAssignment,
+  WorkAssignmentTask,
 } from '../../types/domain';
 import { BulkImportModal } from '../BulkImportModal';
 import {
@@ -26,6 +28,11 @@ import {
   DepartmentPendingRequestsPanel,
   DepartmentRowActionButton,
 } from '../DepartmentPermissionControls';
+import {
+  AdminWorkAssignmentsPanel,
+  StaffWorkCallingWorkspace,
+} from '../StaffWorkCallingWorkspace';
+import { WorkAssignmentModal } from '../WorkAssignmentModal';
 
 interface PracticalViewProps {
   students: Student[];
@@ -33,6 +40,8 @@ interface PracticalViewProps {
   employees: UserAccount[];
   editRequests?: EditRequest[];
   sheetConfigs?: ExcelSheetConfig[];
+  workAssignments?: WorkAssignment[];
+  workAssignmentTasks?: WorkAssignmentTask[];
   currentUser: UserAccount;
   selectedCentreFilter: CentreId | 'all';
   globalSearch: string;
@@ -45,12 +54,16 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
   employees,
   editRequests = [],
   sheetConfigs = [],
+  workAssignments = [],
+  workAssignmentTasks = [],
   currentUser,
   selectedCentreFilter,
   globalSearch,
   onNotify,
 }) => {
   const [search, setSearch] = useState('');
+  const [assignModalOpen, setAssignModalOpen] = useState(false);
+  const [assignPrefill, setAssignPrefill] = useState<{ staffUid?: string; fromSerial?: number }>({});
   const [statusFilter, setStatusFilter] = useState('all');
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
   const [permissionStudent, setPermissionStudent] = useState<Student | null>(null);
@@ -241,8 +254,36 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
     onNotify('Practical Report Exported', `Exported ${rows.length} practical records.`, 'success');
   };
 
+  // Staff (employee) role sees ONLY their assigned Big Calling Box (not an Excel table)
+  if (currentUser.role === 'employee') {
+    return (
+      <StaffWorkCallingWorkspace
+        department="practical"
+        currentUser={currentUser}
+        assignments={workAssignments}
+        tasks={workAssignmentTasks}
+        onNotify={onNotify}
+      />
+    );
+  }
+
   return (
     <div className="space-y-5">
+      {canBatchSync && (
+        <AdminWorkAssignmentsPanel
+          department="practical"
+          currentUser={currentUser}
+          effectiveCentre={effectiveCentre}
+          assignments={workAssignments}
+          tasks={workAssignmentTasks}
+          onOpenAssignModal={(prefill) => {
+            setAssignPrefill(prefill || {});
+            setAssignModalOpen(true);
+          }}
+          onNotify={onNotify}
+        />
+      )}
+
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="bg-white rounded-xl border border-zinc-200 p-4">
           <p className="text-xs font-semibold text-zinc-700">Total Tracked Students</p>
@@ -600,6 +641,33 @@ export const PracticalView: React.FC<PracticalViewProps> = ({
             onNotify('Excel Practical & Subjects Synced', msg, 'success');
           }}
           onError={(title, desc) => onNotify(title, desc, 'error')}
+        />
+      )}
+
+      {canBatchSync && (
+        <WorkAssignmentModal
+          open={assignModalOpen}
+          department="practical"
+          currentUser={currentUser}
+          selectedCentreFilter={selectedCentreFilter}
+          students={students}
+          displaySerialMap={displaySerialMap}
+          employees={employees}
+          existingAssignments={workAssignments}
+          initialStaffUid={assignPrefill.staffUid}
+          initialFromSerial={assignPrefill.fromSerial}
+          resolveStudentContext={(st) => {
+            const rec = recMap.get(st.studentId);
+            const pStatus = rec?.practicalStatus || st.practicalStatus;
+            return {
+              subject: getDisplaySubject(st.subject),
+              pendingFee: 0,
+              totalFee: 0,
+              isPendingWork: pStatus !== 'Completed',
+            };
+          }}
+          onClose={() => setAssignModalOpen(false)}
+          onNotify={onNotify}
         />
       )}
     </div>

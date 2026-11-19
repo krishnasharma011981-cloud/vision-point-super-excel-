@@ -35,6 +35,8 @@ import type {
   RecoveryStatus,
   Student,
   UserAccount,
+  WorkAssignment,
+  WorkAssignmentTask,
 } from '../../types/domain';
 import { BulkImportModal } from '../BulkImportModal';
 import { DeleteProtectionModal } from '../DeleteProtectionModal';
@@ -43,12 +45,19 @@ import {
   DepartmentPendingRequestsPanel,
   DepartmentRowActionButton,
 } from '../DepartmentPermissionControls';
+import {
+  AdminWorkAssignmentsPanel,
+  StaffWorkCallingWorkspace,
+} from '../StaffWorkCallingWorkspace';
+import { WorkAssignmentModal } from '../WorkAssignmentModal';
 
 interface FeeRecoveryViewProps {
   students: Student[];
   feeRecords: FeeRecoveryRecord[];
   employees: UserAccount[];
   editRequests?: EditRequest[];
+  workAssignments?: WorkAssignment[];
+  workAssignmentTasks?: WorkAssignmentTask[];
   currentUser: UserAccount;
   selectedCentreFilter: CentreId | 'all';
   globalSearch: string;
@@ -60,12 +69,16 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
   feeRecords,
   employees,
   editRequests = [],
+  workAssignments = [],
+  workAssignmentTasks = [],
   currentUser,
   selectedCentreFilter,
   globalSearch,
   onNotify,
 }) => {
   const [search, setSearch] = useState('');
+  const [assignModalOpen, setAssignModalOpen] = useState(false);
+  const [assignPrefill, setAssignPrefill] = useState<{ staffUid?: string; fromSerial?: number }>({});
   const [statusFilter, setStatusFilter] = useState<'unpaid' | 'paid' | 'all'>('unpaid');
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
   const [permissionStudent, setPermissionStudent] = useState<Student | null>(null);
@@ -445,8 +458,37 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
 
   const modalLivePending = Math.max(0, clampFeeNumber(totalFee) - clampFeeNumber(paidAmount));
 
+  // Staff (employee) role sees ONLY their assigned Big Calling Box (not an Excel table)
+  if (currentUser.role === 'employee') {
+    return (
+      <StaffWorkCallingWorkspace
+        department="fee_recovery"
+        currentUser={currentUser}
+        assignments={workAssignments}
+        tasks={workAssignmentTasks}
+        onNotify={onNotify}
+      />
+    );
+  }
+
   return (
     <div className="space-y-5">
+      {/* Staff Calling Assignments Panel (Super Admin & Centre Head ONLY) */}
+      {canBatchSync && (
+        <AdminWorkAssignmentsPanel
+          department="fee_recovery"
+          currentUser={currentUser}
+          effectiveCentre={effectiveCentre}
+          assignments={workAssignments}
+          tasks={workAssignmentTasks}
+          onOpenAssignModal={(prefill) => {
+            setAssignPrefill(prefill || {});
+            setAssignModalOpen(true);
+          }}
+          onNotify={onNotify}
+        />
+      )}
+
       {/* KPI Summary Strip */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-white rounded-xl border border-zinc-200 p-4">
@@ -1077,6 +1119,33 @@ export const FeeRecoveryView: React.FC<FeeRecoveryViewProps> = ({
           if (!deletingAllFees) setShowDeleteAllFeesModal(false);
         }}
       />
+
+      {canBatchSync && (
+        <WorkAssignmentModal
+          open={assignModalOpen}
+          department="fee_recovery"
+          currentUser={currentUser}
+          selectedCentreFilter={selectedCentreFilter}
+          students={students}
+          displaySerialMap={displaySerialMap}
+          employees={employees}
+          existingAssignments={workAssignments}
+          initialStaffUid={assignPrefill.staffUid}
+          initialFromSerial={assignPrefill.fromSerial}
+          resolveStudentContext={(st) => {
+            const rec = feeMap.get(st.studentId);
+            const resolved = resolveStudentFeeSummary(st, rec);
+            return {
+              subject: st.subject || '',
+              pendingFee: resolved.pendingAmount,
+              totalFee: resolved.totalFee,
+              isPendingWork: !isFeeFullyPaid(resolved),
+            };
+          }}
+          onClose={() => setAssignModalOpen(false)}
+          onNotify={onNotify}
+        />
+      )}
     </div>
   );
 };

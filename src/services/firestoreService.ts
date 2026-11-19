@@ -49,7 +49,20 @@ import type {
   UserAccount,
   UserDepartment,
   UserRole,
+  CallTaskStatus,
+  WorkAssignment,
+  WorkAssignmentDepartment,
+  WorkAssignmentStatus,
+  WorkAssignmentTask,
 } from '../types/domain';
+import {
+  canManageAssignmentForCentre,
+  extractStudentCallingNumber,
+  extractStudentFatherName,
+  formatLocalDateIso,
+  sanitizeFirestoreDocId,
+  WORK_ASSIGNMENT_DEPARTMENT_LABELS,
+} from '../lib/workAssignment';
 
 export function getStudentDeptLockField(
   department: DepartmentId | UserDepartment,
@@ -451,6 +464,80 @@ export async function updateUserAccount(
     });
   } catch (err) {
     handleFirestoreError(err, OperationType.UPDATE, path);
+  }
+}
+
+export async function deleteStaffMember(
+  targetUser: UserAccount,
+  actor: UserAccount,
+): Promise<void> {
+  if (targetUser.uid === actor.uid) {
+    throw new Error('You cannot delete your own active account.');
+  }
+  if (targetUser.role === 'super_admin') {
+    throw new Error('Protected Super Admin accounts cannot be deleted.');
+  }
+
+  const path = `users/${targetUser.uid}`;
+  const batch = writeBatch(db);
+
+  batch.delete(doc(db, 'users', targetUser.uid));
+
+  const empAssignRef = doc(db, 'employee_assignments', targetUser.uid);
+  const empAssignSnap = await getDoc(empAssignRef).catch(() => null);
+  if (empAssignSnap && empAssignSnap.exists()) {
+    batch.delete(empAssignRef);
+  }
+
+  if (targetUser.role === 'centre_head') {
+    const centreRef = doc(db, 'centres', targetUser.centreId);
+    const centreSnap = await getDoc(centreRef).catch(() => null);
+    if (centreSnap && centreSnap.exists() && centreSnap.data()?.headUid === targetUser.uid) {
+      batch.update(centreRef, {
+        headUid: '',
+        headName: '',
+        updatedBy: actor.uid,
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    const centreAssignRef = doc(db, 'centre_assignments', targetUser.centreId);
+    const centreAssignSnap = await getDoc(centreAssignRef).catch(() => null);
+    if (centreAssignSnap && centreAssignSnap.exists() && centreAssignSnap.data()?.headUid === targetUser.uid) {
+      batch.delete(centreAssignRef);
+    }
+  }
+
+  const cleanEmail = targetUser.email.trim().toLowerCase();
+  if (cleanEmail) {
+    const inviteId = await emailToInviteId(cleanEmail);
+    const invRef = doc(db, 'staff_invites', inviteId);
+    const invSnap = await getDoc(invRef).catch(() => null);
+    if (invSnap && invSnap.exists()) {
+      const invData = invSnap.data() as StaffInvite;
+      if (actor.role === 'super_admin' || (invData.role === 'employee' && invData.centreId === actor.centreId)) {
+        batch.delete(invRef);
+      }
+    }
+  }
+
+  try {
+    await batch.commit();
+    await logActivity({
+      actorUid: actor.uid,
+      actorName: actor.fullName,
+      actorEmail: actor.email,
+      actorRole: actor.role,
+      centreId: targetUser.centreId,
+      department: targetUser.department,
+      action: 'USER_DELETED',
+      targetCollection: 'users',
+      targetId: targetUser.uid,
+      details: `Permanently removed ${targetUser.role} (${targetUser.fullName} · ${targetUser.email}) from ${targetUser.centreName}.`,
+      locationVerified: true,
+    }).catch(() => {});
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, path);
   }
 }
 
@@ -3943,6 +4030,271 @@ export async function clearMockSubjectsFromStudents(
     return { clearedCount };
   }
 }
+
+export interface CreateWorkAssignmentTaskInput {
+  student: Student;
+  displaySerial: number;
+  subject?: string;
+  pendingFee?: number;
+  totalFee?: number;
+}
+
+export async function createWorkAssignmentBatch(params: {
+  centreId: CentreId;
+  department: WorkAssignmentDepartment;
+  staff: UserAccount;
+  fromSerial: number;
+  toSerial: number;
+  items: CreateWorkAssignmentTaskInput[];
+  replaceExistingActive: boolean;
+  existingAssignments: WorkAssignment[];
+  note?: string;
+  actor: UserAccount;
+}): Promise<{ assignmentId: string; taskCount: number }> {
+  const {
+    centreId,
+    department,
+    staff,
+    fromSerial,
+    toSerial,
+    items,
+    replaceExistingActive,
+    existingAssignments,
+    note = '',
+    actor,
+  } = params;
+
+  if (!canManageAssignmentForCentre(actor, centreId)) {
+    throw new Error('Only Super Admin or the Centre Head of this branch can assign staff work.');
+  }
+  if (items.length === 0) {
+    throw new Error('No students found in the selected serial number range.');
+  }
+  if (items.length > 2000) {
+    throw new Error('Please assign up to 2000 students in a single batch.');
+  }
+
+  const centreInfo = CENTRE_MAP[centreId];
+  const now = new Date();
+  const assignedDate = formatLocalDateIso(now);
+  const randomSuffix = Math.random().toString(36).slice(2, 7).toUpperCase();
+  const assignmentId = sanitizeFirestoreDocId(`WA_${department}_${centreId}_${Date.now()}_${randomSuffix}`, 100);
+  const safeFrom = Math.max(1, Math.floor(fromSerial));
+  const safeTo = Math.max(safeFrom, Math.floor(toSerial));
+  const safeNote = String(note || '').trim().slice(0, 500);
+  const safeStaffName = (staff.fullName || 'Staff').trim().slice(0, 100) || 'Staff';
+  const safeActorName = (actor.fullName || 'Admin').trim().slice(0, 100) || 'Admin';
+
+  try {
+    // 1. Optionally archive previous active batches for the same staff + department so they only see today's active batch
+    if (replaceExistingActive) {
+      const toArchive = existingAssignments.filter(
+        (a) =>
+          a.staffUid === staff.uid &&
+          a.department === department &&
+          a.centreId === centreId &&
+          a.status === 'Active',
+      );
+      if (toArchive.length > 0) {
+        const archiveBatch = writeBatch(db);
+        toArchive.forEach((oldBatch) => {
+          archiveBatch.update(doc(db, 'work_assignments', oldBatch.assignmentId), {
+            status: 'Archived',
+            updatedAt: serverTimestamp(),
+          });
+        });
+        await archiveBatch.commit();
+      }
+    }
+
+    // 2. Create parent assignment document
+    await setDoc(doc(db, 'work_assignments', assignmentId), {
+      assignmentId,
+      centreId,
+      centreName: (centreInfo?.name || 'Vision Point').slice(0, 120),
+      department,
+      staffUid: staff.uid,
+      staffName: safeStaffName,
+      staffEmail: (staff.email || '').trim().slice(0, 160),
+      assignedByUid: actor.uid,
+      assignedByName: safeActorName,
+      assignedDate,
+      fromSerial: safeFrom,
+      toSerial: safeTo,
+      totalStudents: items.length,
+      status: 'Active',
+      note: safeNote,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    // 3. Write task cards in safe chunks (<= 350 per batch)
+    const chunkSize = 350;
+    for (let i = 0; i < items.length; i += chunkSize) {
+      const chunk = items.slice(i, i + chunkSize);
+      const batch = writeBatch(db);
+      chunk.forEach((item) => {
+        const taskId = sanitizeFirestoreDocId(`${assignmentId}__${item.student.studentId}`, 128);
+        const fatherName = extractStudentFatherName(item.student);
+        const callingNumber = extractStudentCallingNumber(item.student);
+        const safeSubject = String(item.subject ?? item.student.subject ?? '').trim().slice(0, 200);
+        const safePendingFee = clampFeeValue(item.pendingFee ?? 0);
+        const safeTotalFee = clampFeeValue(item.totalFee ?? 0);
+
+        batch.set(doc(db, 'work_assignment_tasks', taskId), {
+          taskId,
+          assignmentId,
+          centreId,
+          department,
+          staffUid: staff.uid,
+          staffName: safeStaffName,
+          studentId: item.student.studentId,
+          serialNumber: Math.max(1, Math.round(item.displaySerial || item.student.serialNumber || 1)),
+          studentName: (item.student.studentName || 'Student').trim().slice(0, 120) || 'Student',
+          fatherName: fatherName.slice(0, 120),
+          mobileNumber: String(item.student.mobileNumber || '').trim().slice(0, 20),
+          callingNumber: callingNumber.slice(0, 20),
+          subject: safeSubject,
+          pendingFee: safePendingFee,
+          totalFee: safeTotalFee,
+          callStatus: 'Pending',
+          followUpDate: '',
+          followUpTime: '',
+          remark: '',
+          lastCalledAt: '',
+          updatedBy: actor.uid,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      });
+      await batch.commit();
+    }
+
+    // 4. Notify staff & log audit trail
+    const deptLabel = WORK_ASSIGNMENT_DEPARTMENT_LABELS[department];
+    await createNotification({
+      recipientUid: staff.uid,
+      centreId,
+      title: `New ${deptLabel} Work Assigned`,
+      message: `${safeActorName} assigned S.No #${safeFrom} to #${safeTo} (${items.length} students) for ${deptLabel}.`,
+      type: 'info',
+      read: false,
+    }).catch(() => {});
+
+    await logActivity({
+      actorUid: actor.uid,
+      actorName: safeActorName,
+      actorEmail: actor.email,
+      actorRole: actor.role,
+      centreId,
+      department,
+      action: 'WORK_ASSIGNMENT_CREATED',
+      targetCollection: 'work_assignments',
+      targetId: assignmentId,
+      details: `Assigned ${items.length} students (S.No #${safeFrom}-#${safeTo}) in ${deptLabel} to ${safeStaffName}.`,
+      locationVerified: true,
+    }).catch(() => {});
+
+    return { assignmentId, taskCount: items.length };
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `work_assignments/${assignmentId}`);
+    return { assignmentId, taskCount: 0 };
+  }
+}
+
+export async function updateWorkAssignmentTask(
+  task: WorkAssignmentTask,
+  updates: {
+    callStatus: CallTaskStatus;
+    followUpDate: string;
+    followUpTime: string;
+    remark: string;
+    markCalledNow?: boolean;
+  },
+  actor: UserAccount,
+): Promise<void> {
+  const path = `work_assignment_tasks/${task.taskId}`;
+  try {
+    const cleanDate = String(updates.followUpDate || '').trim().slice(0, 30);
+    const cleanTime = String(updates.followUpTime || '').trim().slice(0, 10);
+    const cleanRemark = String(updates.remark || '').trim().slice(0, 1000);
+    const lastCalledAt = updates.markCalledNow
+      ? new Date().toISOString().slice(0, 35)
+      : (task.lastCalledAt || new Date().toISOString().slice(0, 35));
+
+    await updateDoc(doc(db, 'work_assignment_tasks', task.taskId), {
+      callStatus: updates.callStatus,
+      followUpDate: cleanDate,
+      followUpTime: cleanTime,
+      remark: cleanRemark,
+      lastCalledAt,
+      updatedBy: actor.uid,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, path);
+  }
+}
+
+export async function updateWorkAssignmentStatus(
+  assignment: WorkAssignment,
+  status: WorkAssignmentStatus,
+  actor: UserAccount,
+): Promise<void> {
+  if (!canManageAssignmentForCentre(actor, assignment.centreId)) {
+    throw new Error('Only Super Admin or the Centre Head of this branch can update work assignment status.');
+  }
+  const path = `work_assignments/${assignment.assignmentId}`;
+  try {
+    await updateDoc(doc(db, 'work_assignments', assignment.assignmentId), {
+      status,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, path);
+  }
+}
+
+export async function deleteWorkAssignmentBatch(
+  assignment: WorkAssignment,
+  tasks: WorkAssignmentTask[],
+  actor: UserAccount,
+): Promise<void> {
+  if (!canManageAssignmentForCentre(actor, assignment.centreId)) {
+    throw new Error('Only Super Admin or the Centre Head of this branch can delete work assignments.');
+  }
+  const path = `work_assignments/${assignment.assignmentId}`;
+  try {
+    const relatedTasks = tasks.filter((t) => t.assignmentId === assignment.assignmentId);
+    const chunkSize = 350;
+    for (let i = 0; i < relatedTasks.length; i += chunkSize) {
+      const chunk = relatedTasks.slice(i, i + chunkSize);
+      const batch = writeBatch(db);
+      chunk.forEach((t) => {
+        batch.delete(doc(db, 'work_assignment_tasks', t.taskId));
+      });
+      await batch.commit();
+    }
+    await deleteDoc(doc(db, 'work_assignments', assignment.assignmentId));
+
+    await logActivity({
+      actorUid: actor.uid,
+      actorName: actor.fullName,
+      actorEmail: actor.email,
+      actorRole: actor.role,
+      centreId: assignment.centreId,
+      department: assignment.department,
+      action: 'WORK_ASSIGNMENT_DELETED',
+      targetCollection: 'work_assignments',
+      targetId: assignment.assignmentId,
+      details: `Removed work assignment S.No #${assignment.fromSerial}-#${assignment.toSerial} (${assignment.staffName}).`,
+      locationVerified: true,
+    }).catch(() => {});
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, path);
+  }
+}
+
 
 
 

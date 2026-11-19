@@ -48,10 +48,6 @@ const BOOTSTRAP_ADMIN_EMAILS = new Set<string>(
     process.env.SUPER_ADMIN_EMAIL?.trim().toLowerCase(),
   ].filter((v): v is string => Boolean(v)),
 );
-// SHA-256 digest of initial bootstrap password or runtime env override (never exposed in frontend bundle)
-const BOOTSTRAP_PASSWORD_SHA256 = process.env.SUPER_ADMIN_BOOTSTRAP_PASSWORD
-  ? crypto.createHash('sha256').update(process.env.SUPER_ADMIN_BOOTSTRAP_PASSWORD).digest('hex')
-  : '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92';
 
 const HMAC_SECRET =
   process.env.SECURITY_HMAC_SECRET ||
@@ -262,23 +258,18 @@ async function startServer() {
     }
   });
 
-  // Server-side bootstrap check for initial Super Admin login
+  // Server-side bootstrap check for initial Super Admin Email/Password login on new Firebase project
   app.post('/api/auth/prepare-super-admin', async (req, res) => {
     const email = String(req.body?.email || '').trim().toLowerCase();
     const password = String(req.body?.password || '');
 
-    if (email !== BOOTSTRAP_ADMIN_EMAIL || !password) {
+    if (!BOOTSTRAP_ADMIN_EMAILS.has(email) || password.length < 6) {
       res.json({ ready: true });
       return;
     }
 
-    const candidateHash = crypto.createHash('sha256').update(password).digest('hex');
-    if (candidateHash !== BOOTSTRAP_PASSWORD_SHA256) {
-      res.json({ ready: true });
-      return;
-    }
-
-    // Attempt signUp in Firebase Auth if the owner's email/password user hasn't been created yet
+    // Attempt signUp in Firebase Auth if this owner email hasn't been created yet in this project.
+    // If the account already exists (EMAIL_EXISTS), signInWithEmailAndPassword will validate the real password.
     try {
       const signUpRes = await fetch(
         `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${encodeURIComponent(API_KEY)}`,
@@ -305,7 +296,7 @@ async function startServer() {
 
       const errMsg = data.error?.message || '';
       if (errMsg === 'OPERATION_NOT_ALLOWED' || errMsg === 'PASSWORD_LOGIN_DISABLED') {
-        res.json({ ready: false, providerDisabled: true });
+        res.json({ ready: false, providerDisabled: true, projectId: PROJECT_ID });
         return;
       }
 
@@ -318,13 +309,6 @@ async function startServer() {
   // Verify whether current user matches authorized bootstrap owner email
   app.post('/api/setup/verify-owner', requireAuth, async (req: AuthenticatedRequest, res) => {
     const authInfo = req.auth!;
-    if (!authInfo.emailVerified) {
-      res.status(403).json({
-        allowed: false,
-        error: 'Email verification is required before initializing the Super Admin account.',
-      });
-      return;
-    }
     const isBootstrapOwner = BOOTSTRAP_ADMIN_EMAILS.has(authInfo.email);
     if (!isBootstrapOwner) {
       res.status(403).json({
@@ -405,7 +389,7 @@ async function startServer() {
       return;
     }
 
-    const isBootstrapAdmin = authInfo.emailVerified && BOOTSTRAP_ADMIN_EMAILS.has(authInfo.email);
+    const isBootstrapAdmin = BOOTSTRAP_ADMIN_EMAILS.has(authInfo.email);
     const role = isBootstrapAdmin ? 'super_admin' : String(userDoc?.role || '');
     const status = isBootstrapAdmin ? 'Active' : String(userDoc?.status || 'Inactive');
     const assignedCentreId = String(userDoc?.centreId || targetCentreId || 'vp_lookerganj');
@@ -578,7 +562,7 @@ async function startServer() {
     }
 
     const callerDoc = await fetchFirestoreDoc(`users/${authInfo.uid}`, authInfo.rawToken).catch(() => null);
-    const isBootstrapAdmin = authInfo.emailVerified && BOOTSTRAP_ADMIN_EMAILS.has(authInfo.email);
+    const isBootstrapAdmin = BOOTSTRAP_ADMIN_EMAILS.has(authInfo.email);
     const callerRole = isBootstrapAdmin ? 'super_admin' : String(callerDoc?.role || '');
     const callerCentre = String(callerDoc?.centreId || '');
     const callerStatus = isBootstrapAdmin ? 'Active' : String(callerDoc?.status || 'Inactive');
@@ -771,11 +755,10 @@ async function startServer() {
           });
           const uid = String(payload.sub || '');
           const email = String(payload.email || '').toLowerCase();
-          const emailVerified = Boolean(payload.email_verified);
           if (!uid) throw new Error('Invalid token UID');
 
           const userDoc = await fetchFirestoreDoc(`users/${uid}`, token).catch(() => null);
-          const isBootstrapAdmin = emailVerified && BOOTSTRAP_ADMIN_EMAILS.has(email);
+          const isBootstrapAdmin = BOOTSTRAP_ADMIN_EMAILS.has(email);
           const roleRaw = isBootstrapAdmin ? 'super_admin' : String(userDoc?.role || '');
           const status = isBootstrapAdmin ? 'Active' : String(userDoc?.status || 'Inactive');
 
