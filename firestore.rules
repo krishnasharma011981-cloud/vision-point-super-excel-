@@ -31,7 +31,8 @@ service cloud.firestore {
     function isBootstrappedSuperAdmin() {
       return isSignedIn() && request.auth.token.email is string && request.auth.token.email.lower() in [
         'niosvisionpoint9@gmail.com',
-        'krishnasharma011981@gmail.com'
+        'krishnasharma011981@gmail.com',
+        'chanakyaclassesjanghai@gmail.com'
       ];
     }
 

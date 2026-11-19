@@ -4,6 +4,7 @@ export const BOOTSTRAPPED_OWNER_EMAIL = 'niosvisionpoint9@gmail.com';
 export const BOOTSTRAPPED_OWNER_EMAILS = [
   'niosvisionpoint9@gmail.com',
   'krishnasharma011981@gmail.com',
+  'chanakyaclassesjanghai@gmail.com',
 ] as const;
 
 export function isBootstrappedOwnerEmail(email?: string | null): boolean {

@@ -45,6 +45,7 @@ const BOOTSTRAP_ADMIN_EMAILS = new Set<string>(
   [
     'niosvisionpoint9@gmail.com',
     'krishnasharma011981@gmail.com',
+    'chanakyaclassesjanghai@gmail.com',
     process.env.SUPER_ADMIN_EMAIL?.trim().toLowerCase(),
   ].filter((v): v is string => Boolean(v)),
 );
