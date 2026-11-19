@@ -70,6 +70,7 @@ export function isFirestoreQuotaError(error: unknown): boolean {
   return (
     lower.includes('quota exceeded') ||
     lower.includes('quota limit exceeded') ||
+    lower.includes('daily read quota') ||
     lower.includes('resource-exhausted') ||
     lower.includes('resource_exhausted') ||
     lower.includes('free daily read units')
@@ -119,7 +120,11 @@ export function handleFirestoreError(
     operationType,
     path,
   };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  if (isFirestoreQuotaError(error)) {
+    console.warn('Firestore Quota Reached:', errInfo.path || 'firestore');
+  } else {
+    console.error('Firestore Error: ', JSON.stringify(errInfo));
+  }
   throw new Error(JSON.stringify(errInfo));
 }
 

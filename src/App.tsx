@@ -281,9 +281,10 @@ export default function App() {
           setCurrentUser(null);
         }
       } catch (err) {
-        console.error('Auth restoration error:', err);
         if (isFirestoreQuotaError(err)) {
           setLoginError(formatFirestoreUserError(err));
+        } else {
+          console.error('Auth restoration error:', err);
         }
       } finally {
         setAuthChecking(false);

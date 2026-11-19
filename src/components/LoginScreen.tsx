@@ -78,6 +78,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(externalError || null);
   const [isQuotaError, setIsQuotaError] = useState<boolean>(() => isFirestoreQuotaError(externalError));
 
+  useEffect(() => {
+    if (externalError) {
+      setErrorMsg(formatFirestoreUserError(externalError));
+      setIsQuotaError(isFirestoreQuotaError(externalError));
+    }
+  }, [externalError]);
+
   const [showResetModal, setShowResetModal] = useState(false);
   const [resetEmail, setResetEmail] = useState('');
   const [resetSending, setResetSending] = useState(false);
