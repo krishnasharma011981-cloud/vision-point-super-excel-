@@ -132,6 +132,45 @@
     inset 0 1.5px 0 rgba(255, 255, 255, 0.48);
 }
 
+/* Shukra Security Frosted Light Glassmorphism Login Card */
+.shukra-glass-card {
+  background:
+    radial-gradient(circle at 86% 12%, rgba(255, 214, 224, 0.58), transparent 44%),
+    radial-gradient(circle at 12% 88%, rgba(255, 222, 230, 0.52), transparent 46%),
+    linear-gradient(160deg, rgba(255, 255, 255, 0.92) 0%, rgba(255, 245, 247, 0.87) 52%, rgba(255, 234, 240, 0.90) 100%);
+  backdrop-filter: blur(18px) saturate(135%);
+  -webkit-backdrop-filter: blur(18px) saturate(135%);
+  border: 1.5px solid rgba(200, 16, 46, 0.68);
+  box-shadow:
+    0 28px 68px -14px rgba(200, 16, 46, 0.24),
+    0 12px 32px -10px rgba(23, 23, 23, 0.12),
+    inset 0 2px 2px rgba(255, 255, 255, 0.95),
+    inset 0 -2px 6px rgba(200, 16, 46, 0.08);
+}
+
+.shukra-security-banner {
+  background: linear-gradient(180deg, #ef001b 0%, #c8102e 54%, #9b0015 100%);
+  box-shadow:
+    0 10px 24px -6px rgba(200, 16, 46, 0.58),
+    inset 0 1.5px 1px rgba(255, 255, 255, 0.36);
+}
+
+.shukra-cta-btn {
+  background: linear-gradient(180deg, #ef001b 0%, #c8102e 50%, #9b0015 100%);
+  border: 1px solid rgba(255, 190, 200, 0.42);
+  box-shadow:
+    0 14px 30px -6px rgba(200, 16, 46, 0.62),
+    inset 0 1.5px 1px rgba(255, 255, 255, 0.36);
+}
+
+.shukra-cta-btn:hover:not(:disabled) {
+  background: linear-gradient(180deg, #ff1732 0%, #d41232 50%, #a30017 100%);
+  box-shadow:
+    0 18px 36px -6px rgba(239, 0, 27, 0.72),
+    0 0 24px rgba(239, 0, 27, 0.26),
+    inset 0 1.5px 1px rgba(255, 255, 255, 0.48);
+}
+
 .glass-scrollbar::-webkit-scrollbar {
   width: 6px;
   height: 6px;

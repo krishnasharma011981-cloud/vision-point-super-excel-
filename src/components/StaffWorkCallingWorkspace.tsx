@@ -1,8 +1,6 @@
 import {
   CalendarClock,
   CheckCircle2,
-  ChevronLeft,
-  ChevronRight,
   ClipboardList,
   Clock,
   Eye,
@@ -107,6 +105,7 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
   const [followUpDate, setFollowUpDate] = useState('');
   const [followUpTime, setFollowUpTime] = useState('');
   const [remark, setRemark] = useState('');
+  const [validationError, setValidationError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   // Auto-select latest active batch whenever activeBatches changes (e.g., when Centre Head re-assigns new work)
@@ -146,16 +145,18 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
     });
   }, [batchTasks, filterTab]);
 
-  // Keep selectedTaskId synced with available tasks
+  // Keep selectedTaskId synced with available tasks (auto-resume on first Pending student)
   useEffect(() => {
     if (filteredTasks.length === 0) {
       setSelectedTaskId('');
       return;
     }
     if (!filteredTasks.some((t) => t.taskId === selectedTaskId)) {
-      setSelectedTaskId(filteredTasks[0].taskId);
+      const firstUnworked =
+        filterTab === 'all' ? filteredTasks.find((t) => t.callStatus === 'Pending') : null;
+      setSelectedTaskId((firstUnworked || filteredTasks[0]).taskId);
     }
-  }, [filteredTasks, selectedTaskId]);
+  }, [filteredTasks, selectedTaskId, filterTab]);
 
   const activeTask = useMemo(
     () => filteredTasks.find((t) => t.taskId === selectedTaskId) || filteredTasks[0] || null,
@@ -171,6 +172,7 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
     setFollowUpDate(activeTask.followUpDate || '');
     setFollowUpTime(activeTask.followUpTime || '');
     setRemark(activeTask.remark || '');
+    setValidationError(null);
   }, [activeTask?.taskId, activeTask?.callStatus, activeTask?.followUpDate, activeTask?.followUpTime, activeTask?.remark]);
 
   const deptLabel = WORK_ASSIGNMENT_DEPARTMENT_LABELS[department];
@@ -186,10 +188,21 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
 
   const handleSaveTask = async (advanceNext: boolean) => {
     if (!activeTask) return;
+
+    const trimmedRemark = remark.trim();
+    if (!trimmedRemark) {
+      const msg =
+        'Pehle call karke Call Remark likhein (student/parent ne kya bola), tabhi details save hokar agla student khulega.';
+      setValidationError(msg);
+      onNotify('Call Details Required', msg, 'warning');
+      return;
+    }
+
+    setValidationError(null);
     setSaving(true);
     try {
       const nextStatus: CallTaskStatus =
-        callStatus === 'Pending' && (followUpDate || remark.trim())
+        callStatus === 'Pending'
           ? followUpDate
             ? 'Follow-up Scheduled'
             : 'Called - Done'
@@ -201,7 +214,7 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
           callStatus: nextStatus,
           followUpDate,
           followUpTime,
-          remark,
+          remark: trimmedRemark,
           markCalledNow: true,
         },
         currentUser,
@@ -358,7 +371,7 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
           </div>
         ) : (
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 sm:p-6 space-y-5">
-            {/* Top Card Stepper */}
+            {/* Top Card Header — Strictly Sequential (No Previous/Next Skip) */}
             <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-200">
               <div className="flex items-center gap-3">
                 <span className="px-3 py-1 rounded-lg bg-slate-900 text-white font-mono text-sm font-extrabold tabular-nums">
@@ -368,26 +381,9 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
                   Student {activeIndex + 1} of {filteredTasks.length}
                 </span>
               </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  disabled={activeIndex <= 0}
-                  onClick={() => setSelectedTaskId(filteredTasks[activeIndex - 1].taskId)}
-                  className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-bold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg disabled:opacity-40 whitespace-nowrap shrink-0"
-                >
-                  <ChevronLeft className="w-4 h-4" />
-                  Previous
-                </button>
-                <button
-                  type="button"
-                  disabled={activeIndex < 0 || activeIndex >= filteredTasks.length - 1}
-                  onClick={() => setSelectedTaskId(filteredTasks[activeIndex + 1].taskId)}
-                  className="inline-flex items-center gap-1 px-3.5 py-1.5 text-xs font-bold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg disabled:opacity-40 whitespace-nowrap shrink-0"
-                >
-                  Next
-                  <ChevronRight className="w-4 h-4" />
-                </button>
-              </div>
+              <p className="text-xs font-semibold text-slate-600">
+                Call &amp; save details below to move to the next student
+              </p>
             </div>
 
             {/* Responsive Horizontal Split on Desktop (lg:grid-cols-12) | Vertical Stack on Mobile (grid-cols-1) */}
@@ -573,17 +569,30 @@ export const StaffWorkCallingWorkspace: React.FC<StaffWorkCallingWorkspaceProps>
                 {/* Remark Box ("Usne kya bola?") */}
                 <div>
                   <label htmlFor="staff-call-remark" className="block text-sm font-extrabold text-slate-950 mb-1.5">
-                    Call Remark (Student / Parent ne kya bola?)
+                    Call Remark (Student / Parent ne kya bola?) <span className="text-red-700">*</span>
                   </label>
                   <textarea
                     id="staff-call-remark"
                     rows={3}
                     maxLength={1000}
+                    required
                     value={remark}
-                    onChange={(e) => setRemark(e.target.value)}
+                    onChange={(e) => {
+                      setRemark(e.target.value);
+                      if (validationError && e.target.value.trim()) {
+                        setValidationError(null);
+                      }
+                    }}
                     placeholder="Yahaan likhein ki baat karne par unhone kya bola (jaise: Papa bole kal 4 baje call karna, ₹5,000 fee jama karenge)..."
-                    className="w-full px-4 py-2.5 text-sm bg-white text-slate-950 placeholder:text-slate-400 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900"
+                    className={`w-full px-4 py-2.5 text-sm bg-white text-slate-950 placeholder:text-slate-400 border rounded-xl focus:outline-none focus:ring-2 ${
+                      validationError
+                        ? 'border-red-600 focus:ring-red-600'
+                        : 'border-slate-300 focus:ring-slate-900'
+                    }`}
                   />
+                  {validationError && (
+                    <p className="mt-1.5 text-xs font-bold text-red-700">{validationError}</p>
+                  )}
                 </div>
 
                 {/* Call Outcome Status Selector */}

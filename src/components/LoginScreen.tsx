@@ -1,35 +1,30 @@
 import {
+  browserLocalPersistence,
+  browserSessionPersistence,
   sendPasswordResetEmail,
+  setPersistence,
   signInWithEmailAndPassword,
   signOut,
 } from 'firebase/auth';
 import {
   AlertTriangle,
-  Building2,
   Check,
-  ChevronDown,
   ExternalLink,
   Eye,
   EyeOff,
-  Flame,
-  GraduationCap,
-  Layers,
+  Loader2,
   Lock,
   LogIn,
   Mail,
-  MapPin,
-  Monitor,
   RefreshCw,
   ShieldCheck,
-  Users,
   X,
 } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
-import React, { useEffect, useRef, useState } from 'react';
-import { CANONICAL_CENTRES, CENTRE_MAP, isBootstrappedOwnerEmail } from '../constants/centres';
+import React, { useEffect, useState } from 'react';
+import { CENTRE_MAP, isBootstrappedOwnerEmail } from '../constants/centres';
 import { auth } from '../lib/firebase';
 import { verifySuperAdminOwnerOnServer } from '../lib/securityClient';
-import { speakWelcomeMessage } from '../lib/voiceWelcome';
 import {
   claimPendingStaffInvite,
   ensureInitialPlatformSetup,
@@ -37,7 +32,9 @@ import {
   logActivity,
 } from '../services/firestoreService';
 import type { CentreId, UserAccount } from '../types/domain';
-import { CampusTwilightArtwork } from './CampusTwilightArtwork';
+import { ShukraBackgroundRibbons } from './shukra-login/ShukraBackgroundRibbons';
+import { ShukraBrandBadge, ShukraHeroScene } from './shukra-login/ShukraHeroScene';
+import { ShukraShieldEmblem } from './shukra-login/ShukraShieldEmblem';
 
 interface LoginScreenProps {
   onAuthenticated: (profile: UserAccount, activeCentre: CentreId) => void;
@@ -49,110 +46,8 @@ interface LoginScreenProps {
 const DEFAULT_ACCESS_NOTICE =
   'Access denied: Your account has not been provisioned yet. Ask your Super Admin or Centre Head to add your email first.';
 
-const CENTRE_STYLES: Record<
-  CentreId,
-  {
-    colorHex: string;
-    bgIdle: string;
-    bgActive: string;
-    borderIdle: string;
-    borderActive: string;
-    glowIdle: string;
-    glowActive: string;
-    iconRing: string;
-  }
-> = {
-  vp_lookerganj: {
-    colorHex: '#FF1739',
-    bgIdle: 'bg-[#1a0d1c]/70 hover:bg-[#2a0f22]/80',
-    bgActive: 'bg-gradient-to-r from-[#9A001B]/80 via-[#6b0c22]/75 to-[#161938]/75',
-    borderIdle: 'border-[#FF1739]/60 hover:border-[#FF1739]',
-    borderActive: 'border-[#FF1739]',
-    glowIdle: 'shadow-[0_0_18px_rgba(255,23,57,0.22)] hover:shadow-[0_0_26px_rgba(255,23,57,0.45)]',
-    glowActive: 'shadow-[0_0_30px_rgba(255,23,57,0.58),inset_0_1px_1px_rgba(255,255,255,0.32)]',
-    iconRing: 'text-white border-[#FF1739]/70 bg-[#FF1739]/25',
-  },
-  vp_civillines: {
-    colorHex: '#41A9FF',
-    bgIdle: 'bg-[#0c1934]/70 hover:bg-[#11244a]/80',
-    bgActive: 'bg-gradient-to-r from-[#164b8a]/80 via-[#102e5e]/75 to-[#0d1b3b]/75',
-    borderIdle: 'border-[#41A9FF]/55 hover:border-[#41A9FF]',
-    borderActive: 'border-[#41A9FF]',
-    glowIdle: 'shadow-[0_0_18px_rgba(65,169,255,0.2)] hover:shadow-[0_0_26px_rgba(65,169,255,0.45)]',
-    glowActive: 'shadow-[0_0_30px_rgba(65,169,255,0.55),inset_0_1px_1px_rgba(255,255,255,0.32)]',
-    iconRing: 'text-[#89CCFF] border-[#41A9FF]/60 bg-[#41A9FF]/20',
-  },
-  xis_varanasi: {
-    colorHex: '#BD54FF',
-    bgIdle: 'bg-[#151232]/70 hover:bg-[#22174a]/80',
-    bgActive: 'bg-gradient-to-r from-[#5b2192]/80 via-[#381868]/75 to-[#16153a]/75',
-    borderIdle: 'border-[#BD54FF]/55 hover:border-[#BD54FF]',
-    borderActive: 'border-[#BD54FF]',
-    glowIdle: 'shadow-[0_0_18px_rgba(189,84,255,0.2)] hover:shadow-[0_0_26px_rgba(189,84,255,0.45)]',
-    glowActive: 'shadow-[0_0_30px_rgba(189,84,255,0.55),inset_0_1px_1px_rgba(255,255,255,0.32)]',
-    iconRing: 'text-[#DDB0FF] border-[#BD54FF]/60 bg-[#BD54FF]/20',
-  },
-  xis_jaunpur: {
-    colorHex: '#00D9FF',
-    bgIdle: 'bg-[#091c34]/70 hover:bg-[#0d2b4c]/80',
-    bgActive: 'bg-gradient-to-r from-[#007a9c]/80 via-[#09476b]/75 to-[#0b1f3d]/75',
-    borderIdle: 'border-[#00D9FF]/55 hover:border-[#00D9FF]',
-    borderActive: 'border-[#00D9FF]',
-    glowIdle: 'shadow-[0_0_18px_rgba(0,217,255,0.2)] hover:shadow-[0_0_26px_rgba(0,217,255,0.45)]',
-    glowActive: 'shadow-[0_0_30px_rgba(0,217,255,0.55),inset_0_1px_1px_rgba(255,255,255,0.32)]',
-    iconRing: 'text-[#84EFFF] border-[#00D9FF]/60 bg-[#00D9FF]/20',
-  },
-};
-
-/** Glossy black graduation cap with golden tassel matching the hero centerpiece */
-const HeroGraduationCapSvg: React.FC<{ className?: string }> = ({ className }) => (
-  <svg viewBox="0 0 120 92" fill="none" className={className} aria-hidden="true">
-    <defs>
-      <linearGradient id="capTopGrad" x1="14" y1="12" x2="104" y2="54" gradientUnits="userSpaceOnUse">
-        <stop offset="0%" stopColor="#3B4256" />
-        <stop offset="45%" stopColor="#171C28" />
-        <stop offset="100%" stopColor="#070910" />
-      </linearGradient>
-      <linearGradient id="capBaseGrad" x1="30" y1="45" x2="88" y2="75" gradientUnits="userSpaceOnUse">
-        <stop offset="0%" stopColor="#262C3D" />
-        <stop offset="100%" stopColor="#090C14" />
-      </linearGradient>
-      <linearGradient id="tasselGold" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0%" stopColor="#FFE58F" />
-        <stop offset="50%" stopColor="#FFC83D" />
-        <stop offset="100%" stopColor="#D97706" />
-      </linearGradient>
-      <filter id="capDropShadow" x="-15%" y="-15%" width="135%" height="145%">
-        <feDropShadow dx="0" dy="8" stdDeviation="6" floodColor="#000000" floodOpacity="0.6" />
-      </filter>
-    </defs>
-    <g filter="url(#capDropShadow)">
-      {/* Lower skull cap dome */}
-      <path
-        d="M31 44 L31 64 C31 73 44 79 60 79 C76 79 89 73 89 64 L89 44 Z"
-        fill="url(#capBaseGrad)"
-        stroke="#475569"
-        strokeWidth="1"
-      />
-      {/* Top Mortarboard Diamond */}
-      <path
-        d="M60 10 L114 33 L60 55 L6 33 Z"
-        fill="url(#capTopGrad)"
-        stroke="#94A3B8"
-        strokeOpacity="0.45"
-        strokeWidth="1.2"
-      />
-      {/* Subtle bevel highlight */}
-      <path d="M60 11 L110 33 L60 52" stroke="rgba(255,255,255,0.22)" strokeWidth="1" />
-      {/* Gold centre button */}
-      <ellipse cx="60" cy="31" rx="4.5" ry="2.8" fill="url(#tasselGold)" />
-      {/* Hanging golden cord & tassel */}
-      <path d="M60 31 C76 34 90 42 93 56" stroke="url(#tasselGold)" strokeWidth="2.4" strokeLinecap="round" />
-      <circle cx="93" cy="58" r="3" fill="url(#tasselGold)" />
-      <path d="M90 60 L96 60 L99 84 L87 84 Z" fill="url(#tasselGold)" />
-    </g>
-  </svg>
-);
+const REMEMBER_EMAIL_STORAGE_KEY = 'shukra_security_remembered_email';
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 export const LoginScreen: React.FC<LoginScreenProps> = ({
   onAuthenticated,
@@ -162,11 +57,18 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
 }) => {
   const prefersReducedMotion = useReducedMotion();
 
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState<string>(() => {
+    try {
+      return window.localStorage.getItem(REMEMBER_EMAIL_STORAGE_KEY) || '';
+    } catch {
+      return '';
+    }
+  });
   const [password, setPassword] = useState('');
-  const [selectedCentreId, setSelectedCentreId] = useState<CentreId>('vp_lookerganj');
-  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [rememberMe, setRememberMe] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
+  const [emailTouched, setEmailTouched] = useState(false);
+  const [passwordTouched, setPasswordTouched] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(externalError || null);
 
@@ -185,7 +87,15 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   });
   const [checkingProvider, setCheckingProvider] = useState(false);
 
-  const dropdownRef = useRef<HTMLDivElement>(null);
+  const emailTrimmed = email.trim();
+  const emailValidationError =
+    emailTouched && emailTrimmed.length > 0 && !EMAIL_PATTERN.test(emailTrimmed)
+      ? 'Please enter a valid email address.'
+      : null;
+  const passwordValidationError =
+    passwordTouched && password.length > 0 && password.length < 6
+      ? 'Password must be at least 6 characters.'
+      : null;
 
   const checkProviderStatus = async () => {
     setCheckingProvider(true);
@@ -222,24 +132,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
     }
   }, [externalError]);
 
-  useEffect(() => {
-    const handleOutside = (e: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        setDropdownOpen(false);
-      }
-    };
-    const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setDropdownOpen(false);
-    };
-    document.addEventListener('mousedown', handleOutside);
-    document.addEventListener('keydown', handleEsc);
-    return () => {
-      document.removeEventListener('mousedown', handleOutside);
-      document.removeEventListener('keydown', handleEsc);
-    };
-  }, []);
-
-  const validateCentreAndComplete = async (uid: string, authEmail: string) => {
+  const resolveAuthorizedProfile = async (uid: string, authEmail: string) => {
     let profile = await getUserProfile(uid);
 
     if (
@@ -276,62 +169,71 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
       return;
     }
 
-    if (profile.role !== 'super_admin' && profile.centreId !== selectedCentreId) {
-      await logActivity({
-        actorUid: profile.uid,
-        actorName: profile.fullName,
-        actorEmail: profile.email,
-        actorRole: profile.role,
-        centreId: profile.centreId,
-        department: profile.department,
-        action: 'LOGIN_DENIED_CENTRE_MISMATCH',
-        targetCollection: 'users',
-        targetId: profile.uid,
-        details: `Denied login: selected ${CENTRE_MAP[selectedCentreId].name}, authorized for ${profile.centreName}.`,
-        locationVerified: false,
-      }).catch(() => {});
-
-      await signOut(auth);
-      setErrorMsg(
-        `ACCESS DENIED: Selected centre (${CENTRE_MAP[selectedCentreId].name}) does not match your authorized centre (${profile.centreName}). Please select "${profile.centreName}" above.`,
-      );
-      return;
-    }
+    const resolvedCentre: CentreId =
+      profile.centreId && CENTRE_MAP[profile.centreId] ? profile.centreId : 'vp_lookerganj';
 
     await logActivity({
       actorUid: profile.uid,
       actorName: profile.fullName,
       actorEmail: profile.email,
       actorRole: profile.role,
-      centreId: profile.role === 'super_admin' ? selectedCentreId : profile.centreId,
+      centreId: resolvedCentre,
       department: profile.department,
       action: 'LOGIN_SUCCESS',
       targetCollection: 'users',
       targetId: profile.uid,
-      details: `Authenticated into ${CENTRE_MAP[selectedCentreId].name} as ${profile.role}.`,
+      details: `Authenticated into ${CENTRE_MAP[resolvedCentre].name} as ${profile.role}.`,
       locationVerified: true,
     }).catch(() => {});
 
-    onAuthenticated(profile, profile.role === 'super_admin' ? selectedCentreId : profile.centreId);
+    onAuthenticated(profile, resolvedCentre);
   };
 
   const handleEmailLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+    setEmailTouched(true);
+    setPasswordTouched(true);
 
-    if (!email.trim() || !password) {
+    if (!emailTrimmed || !password) {
       setErrorMsg('Please enter both Email Address and Password.');
+      return;
+    }
+
+    if (!EMAIL_PATTERN.test(emailTrimmed)) {
+      setErrorMsg('Please enter a valid Email Address.');
+      return;
+    }
+
+    if (password.length < 6) {
+      setErrorMsg('Password must be at least 6 characters.');
       return;
     }
 
     setLoading(true);
     onAuthFlowChange?.(true);
     try {
+      try {
+        if (rememberMe) {
+          window.localStorage.setItem(REMEMBER_EMAIL_STORAGE_KEY, emailTrimmed);
+        } else {
+          window.localStorage.removeItem(REMEMBER_EMAIL_STORAGE_KEY);
+        }
+      } catch {
+        // Ignore storage restrictions in private browsing
+      }
+
+      await setPersistence(
+        auth,
+        rememberMe ? browserLocalPersistence : browserSessionPersistence,
+      ).catch(() => {});
+
       const prepRes = await fetch('/api/auth/prepare-super-admin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: email.trim(), password }),
+        body: JSON.stringify({ email: emailTrimmed, password }),
       }).catch(() => null);
+
       if (prepRes && (prepRes.headers.get('content-type') || '').toLowerCase().includes('application/json')) {
         const prepData = (await prepRes.json().catch(() => ({}))) as {
           ready?: boolean;
@@ -351,8 +253,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
         }
       }
 
-      const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
-      await validateCentreAndComplete(cred.user.uid, cred.user.email || email.trim());
+      const cred = await signInWithEmailAndPassword(auth, emailTrimmed, password);
+      await resolveAuthorizedProfile(cred.user.uid, cred.user.email || emailTrimmed);
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code || '';
       if (code === 'auth/operation-not-allowed') {
@@ -360,9 +262,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
         setErrorMsg(
           'Email/Password Sign-In Firebase Console mein abhi OFF hai. Upar diye Firebase Console link par jaakar Email/Password ko Enable karein, fir Login karein.',
         );
-      } else if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
+      } else if (
+        code === 'auth/invalid-credential' ||
+        code === 'auth/wrong-password' ||
+        code === 'auth/user-not-found'
+      ) {
         setErrorMsg(
-          "Invalid email address or password. (If your account has no password set yet, click 'Forgot password?' below to create one.)",
+          "Invalid email address or password. (If your account has no password set yet, click 'Forgot Password?' below.)",
         );
       } else if (code === 'auth/too-many-requests') {
         setErrorMsg('Too many failed attempts. Please wait a few minutes or reset your password.');
@@ -391,273 +297,139 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
     }
   };
 
-  const entranceProps = prefersReducedMotion
-    ? {}
-    : {
-        initial: { opacity: 0, y: 14 },
-        animate: { opacity: 1, y: 0 },
-        transition: { duration: 0.45, ease: [0.16, 1, 0.3, 1] as const },
-      };
-
   return (
-    <div className="relative min-h-screen w-full overflow-x-hidden flex flex-col justify-between text-white">
-      {/* Full-Viewport Photorealistic Sunset Educational Campus Backdrop */}
-      <CampusTwilightArtwork variant="login" />
+    <div className="relative min-h-screen w-full overflow-x-hidden flex flex-col justify-center bg-white text-[#171717]">
+      {/* Layer 1: Bright White & Soft Blush-Pink Flowing Crimson Ribbon Backdrop */}
+      <ShukraBackgroundRibbons />
 
-      {/* Main Container spanning desktop 1440px+ cleanly with compact top & bottom bars */}
-      <div className="relative z-10 w-full max-w-[1440px] mx-auto px-4 sm:px-8 lg:px-10 flex-1 flex flex-col justify-between py-4 sm:py-5 lg:py-6 gap-4">
-        {/* TOP BAR: Compact Shukra Infotech White Card (Left) + Encrypted Security Capsule (Upper Center) */}
-        <header className="w-full flex flex-wrap items-center justify-between gap-3">
-          {/* Top-Left Company Branding Floating White Rectangle */}
-          <div className="inline-flex items-center gap-2.5 bg-white text-[#071329] px-4 py-2 rounded-2xl border border-white shadow-[0_12px_32px_rgba(0,0,0,0.48)]">
-            <div className="w-7 h-7 rounded-lg bg-[#FF1739]/12 flex items-center justify-center shrink-0">
-              <Flame className="w-5 h-5 text-[#FF1739] fill-[#FF1739]/85" />
-            </div>
-            <div className="leading-tight">
-              <span className="block text-[9px] font-bold uppercase tracking-[0.18em] text-slate-600">
-                Powered By
-              </span>
-              <span className="block text-sm font-extrabold tracking-tight text-[#071329]">
-                SHUKRA INFOTECH<span className="text-[#FFC83D]">.</span>
-              </span>
-            </div>
-          </div>
+      {/* Layer 2 (Desktop 55% Left): Cinematic SHUKRA SECURITY Building + Original Portrait + HUD */}
+      <ShukraHeroScene />
 
-          {/* Upper-Center Dark-Glass Capsule Security Badge */}
-          <div className="mx-auto lg:mx-0 inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-[#0f182f]/75 backdrop-blur-md border border-[#FF1739] shadow-[0_0_22px_rgba(255,23,57,0.48)] text-xs font-bold tracking-[0.12em] text-white whitespace-nowrap">
-            <Lock className="w-3.5 h-3.5 text-white shrink-0" />
-            <span className="uppercase text-[11px]">ENCRYPTED MULTI-CENTRE MODE</span>
-          </div>
+      {/* Top-Left Brand Pill Badge (Positioned exactly matching reference on desktop & centered/top on mobile) */}
+      <header className="relative lg:fixed top-0 left-0 z-30 w-full lg:w-auto px-5 pt-5 sm:px-8 sm:pt-6 lg:px-0 lg:pt-0 lg:left-[3.5%] lg:top-[3.1%] flex justify-center lg:justify-start">
+        <ShukraBrandBadge />
+      </header>
 
-          {/* Right-side spacer on desktop to anchor capsule in upper-center */}
-          <div className="hidden lg:block w-48" aria-hidden="true" />
-        </header>
+      {/* Main Responsive Split Container: 55% Left Visual Stage | 45% Right Glassmorphism Login Panel */}
+      <main className="relative z-20 w-full max-w-[1600px] mx-auto flex-1 flex items-center px-4 sm:px-8 lg:px-12 xl:px-16 py-6 sm:py-8">
+        <div className="w-full grid grid-cols-1 lg:grid-cols-12 items-center gap-6">
+          {/* Left 55% Spacer over the fixed cinematic portrait & SHUKRA SECURITY building */}
+          <div className="hidden lg:block lg:col-span-6 xl:col-span-7" aria-hidden="true" />
 
-        {/* TWO-COLUMN SPLIT: Desktop Left 60% / Right 40% (Mobile stacks Sign In prominently above lower cards) */}
-        <main className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-8 items-center my-auto">
-          {/* LEFT 60% HERO + CENTRES + STATS */}
-          <motion.section
-            {...entranceProps}
-            className="lg:col-span-7 flex flex-col justify-center space-y-5 order-1"
-          >
-            {/* Hero Typography Block */}
-            <div>
-              <div className="inline-flex items-center gap-2.5 text-xs sm:text-sm font-bold tracking-[0.18em] uppercase">
-                <span className="w-[3px] h-4 bg-[#FF1739] -skew-x-12 rounded-full shadow-[0_0_10px_#FF1739]" />
-                <span className="text-white/95">
-                  WELCOME TO <span className="text-[#FFC83D]">ASHISH PANDEY&apos;S</span> DATABASE SECURITY
-                </span>
-              </div>
+          {/* Right 45% Floating Frosted-Glass SHUKRA SECURITY Login Card */}
+          <div className="lg:col-span-6 xl:col-span-5 flex justify-center lg:justify-end">
+            <motion.section
+              aria-label="Shukra Security Secure Access Portal Login"
+              initial={prefersReducedMotion ? { opacity: 1 } : { opacity: 0, y: 18, scale: 0.985 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              transition={
+                prefersReducedMotion
+                  ? undefined
+                  : { duration: 0.55, ease: [0.16, 1, 0.3, 1] }
+              }
+              className="relative w-full max-w-[468px] shukra-glass-card rounded-[32px] overflow-hidden px-6 py-7 sm:px-9 sm:py-9"
+            >
+              {/* Decorative Curved Crimson Corner Accents (Exact Reference Styling) */}
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 180 180"
+                fill="none"
+                className="pointer-events-none absolute -top-1 -right-1 w-32 h-32 sm:w-36 sm:h-36"
+              >
+                <defs>
+                  <linearGradient id="cardTopRightArc" x1="15%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stopColor="#EF001B" />
+                    <stop offset="55%" stopColor="#C8102E" />
+                    <stop offset="100%" stopColor="#850012" />
+                  </linearGradient>
+                </defs>
+                <path
+                  d="M28 0 H180 V152 C142 104 94 52 28 0 Z"
+                  fill="url(#cardTopRightArc)"
+                  opacity="0.94"
+                />
+                <path
+                  d="M72 0 H180 V106 C150 72 114 34 72 0 Z"
+                  fill="#FFFFFF"
+                  opacity="0.14"
+                />
+              </svg>
 
-              <div className="mt-2.5 relative max-w-[600px]">
-                <div className="flex items-end gap-2">
-                  <h1 className="hero-silver-title font-display text-[2.45rem] sm:text-5xl xl:text-[3.65rem] font-extrabold italic uppercase tracking-tight leading-[0.95] pr-2">
-                    DATABASE
-                  </h1>
-                  <HeroGraduationCapSvg className="w-14 h-11 sm:w-20 sm:h-16 -ml-4 -mb-1 shrink-0 pointer-events-none select-none" />
-                </div>
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 150 150"
+                fill="none"
+                className="pointer-events-none absolute -bottom-1 -left-1 w-24 h-24 sm:w-28 sm:h-28"
+              >
+                <defs>
+                  <linearGradient id="cardBottomLeftArc" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stopColor="#EF001B" />
+                    <stop offset="100%" stopColor="#9B0015" />
+                  </linearGradient>
+                </defs>
+                <path
+                  d="M0 32 C34 76 74 116 122 150 H0 V32 Z"
+                  fill="url(#cardBottomLeftArc)"
+                  opacity="0.92"
+                />
+              </svg>
 
-                {/* Glossy Slanted Crimson SECURITY Banner */}
-                <div className="mt-1.5 inline-block px-5 sm:px-6 py-1.5 rounded-xl super-excel-ribbon -skew-x-12">
-                  <span className="block skew-x-12 font-display text-[2.2rem] sm:text-5xl xl:text-[3.35rem] font-extrabold italic uppercase tracking-tight text-white leading-[0.98] drop-shadow-[0_4px_12px_rgba(0,0,0,0.45)]">
+              {/* Soft Top Specular Glass Reflection */}
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-x-10 top-0 h-[2px] bg-gradient-to-r from-transparent via-white to-transparent opacity-90"
+              />
+
+              {/* CARD HEADER: Shield Emblem + SHUKRA SECURITY Branding + Sub-Header */}
+              <div className="relative z-10 flex flex-col items-center text-center">
+                <ShukraShieldEmblem className="w-[68px] h-[74px] sm:w-[76px] sm:h-[82px]" />
+
+                <h1 className="mt-2 font-display text-[2.15rem] sm:text-[2.55rem] font-black uppercase tracking-[0.03em] text-[#0E1118] leading-[0.95]">
+                  SHUKRA
+                </h1>
+
+                <div className="mt-1.5 inline-block px-6 sm:px-8 py-1.5 rounded-[12px] shukra-security-banner -skew-x-12">
+                  <span className="block skew-x-12 font-display italic text-[1.75rem] sm:text-[2.05rem] font-extrabold uppercase tracking-[0.03em] text-white leading-none drop-shadow-[0_2px_6px_rgba(0,0,0,0.28)]">
                     SECURITY
                   </span>
                 </div>
-              </div>
 
-              <p className="mt-4 text-xs sm:text-[14px] text-slate-100/95 leading-relaxed max-w-[495px] font-medium drop-shadow-[0_2px_8px_rgba(0,0,0,0.7)]">
-                One Platform. Four Centres. Complete Control. Centralized multi-branch student governance, department
-                telemetry, geofenced location verification, and real-time staff reporting.
-              </p>
-              <div className="mt-2.5 w-14 h-[3px] rounded-full bg-[#FF1739] shadow-[0_0_12px_#FF1739]" />
-            </div>
-
-            {/* Desktop Centre Grid & Stats (Shown cleanly here on lg+ and duplicated below form on <lg mobile layout per spec) */}
-            <div className="hidden lg:block space-y-4">
-              {/* Authorized Educational Centres */}
-              <div>
-                <div className="flex items-center gap-2.5 mb-2.5">
-                  <Building2 className="w-4 h-4 text-[#FF1739] shrink-0" />
-                  <h2 className="text-xs font-extrabold uppercase tracking-[0.14em] text-white whitespace-nowrap">
-                    AUTHORIZED <span className="text-[#FFC83D]">EDUCATIONAL CENTRES</span>
-                  </h2>
-                  <div className="h-[1.5px] flex-1 bg-gradient-to-r from-[#FFC83D]/80 via-[#FFC83D]/30 to-transparent" />
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  {CANONICAL_CENTRES.map((centre) => {
-                    const isSelected = selectedCentreId === centre.id;
-                    const theme = CENTRE_STYLES[centre.id];
-                    return (
-                      <button
-                        key={centre.id}
-                        type="button"
-                        onClick={() => setSelectedCentreId(centre.id)}
-                        className={`text-left px-3.5 py-3 rounded-2xl border backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 flex items-center justify-between gap-2.5 ${
-                          isSelected
-                            ? `${theme.bgActive} ${theme.borderActive} ${theme.glowActive}`
-                            : `${theme.bgIdle} ${theme.borderIdle} ${theme.glowIdle}`
-                        }`}
-                      >
-                        <div className="flex items-center gap-3 min-w-0">
-                          <div
-                            className={`w-9 h-9 rounded-xl border flex items-center justify-center shrink-0 ${theme.iconRing}`}
-                          >
-                            <GraduationCap className="w-4 h-4" />
-                          </div>
-                          <div className="min-w-0">
-                            <p className="text-xs font-extrabold tracking-wide text-white">{centre.code}</p>
-                            <p className="text-[11px] font-medium text-slate-200/95 truncate mt-0.5">{centre.name}</p>
-                          </div>
-                        </div>
-                        <MapPin
-                          className="w-4 h-4 shrink-0"
-                          style={{ color: isSelected ? '#FFC83D' : '#E2E8F0' }}
-                        />
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* 4 Bottom Luminous Statistics Glass Cards */}
-              <div className="grid grid-cols-4 gap-3 pt-1">
-                <div className="px-3.5 py-2.5 rounded-2xl bg-[#161036]/68 backdrop-blur-xl border border-[#BD54FF]/70 shadow-[0_0_20px_rgba(189,84,255,0.28),inset_0_1px_0_rgba(255,255,255,0.2)] flex items-center gap-2.5">
-                  <Building2 className="w-6 h-6 text-[#BD54FF] shrink-0 drop-shadow-[0_0_8px_rgba(189,84,255,0.75)]" />
-                  <div className="leading-tight">
-                    <p className="text-base font-extrabold font-mono text-white tabular-nums">04</p>
-                    <p className="text-[11px] font-semibold text-slate-200">Centres</p>
-                  </div>
-                </div>
-
-                <div className="px-3.5 py-2.5 rounded-2xl bg-[#14103a]/68 backdrop-blur-xl border border-[#9E4BFF]/70 shadow-[0_0_20px_rgba(158,75,255,0.28),inset_0_1px_0_rgba(255,255,255,0.2)] flex items-center gap-2.5">
-                  <Users className="w-6 h-6 text-[#A855F7] shrink-0 drop-shadow-[0_0_8px_rgba(168,85,247,0.75)]" />
-                  <div className="leading-tight">
-                    <p className="text-base font-extrabold font-mono text-white tabular-nums">05</p>
-                    <p className="text-[11px] font-semibold text-slate-200">Depts</p>
-                  </div>
-                </div>
-
-                <div className="px-3.5 py-2.5 rounded-2xl bg-gradient-to-br from-[#3a260a]/75 to-[#1f160a]/75 backdrop-blur-xl border border-[#FFC83D]/75 shadow-[0_0_22px_rgba(255,200,61,0.32),inset_0_1px_0_rgba(255,255,255,0.24)] flex items-center gap-2.5">
-                  <ShieldCheck className="w-6 h-6 text-[#FFC83D] shrink-0 drop-shadow-[0_0_8px_rgba(255,200,61,0.75)]" />
-                  <div className="leading-tight">
-                    <p className="text-xs font-extrabold text-white">GPS</p>
-                    <p className="text-xs font-extrabold text-[#FFC83D]">Verified</p>
-                  </div>
-                </div>
-
-                <div className="px-3.5 py-2.5 rounded-2xl bg-[#0a223a]/68 backdrop-blur-xl border border-[#00D9FF]/70 shadow-[0_0_20px_rgba(0,217,255,0.28),inset_0_1px_0_rgba(255,255,255,0.2)] flex items-center gap-2.5">
-                  <Layers className="w-6 h-6 text-[#00D9FF] shrink-0 drop-shadow-[0_0_8px_rgba(0,217,255,0.75)]" />
-                  <div className="leading-tight">
-                    <p className="text-xs font-extrabold text-white">3-Tier</p>
-                    <p className="text-xs font-extrabold text-white">RBAC</p>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </motion.section>
-
-          {/* RIGHT 40% ENORMOUS FLOATING LIQUID-GLASS SIGN-IN PANEL */}
-          <motion.section
-            {...entranceProps}
-            transition={prefersReducedMotion ? undefined : { duration: 0.5, delay: 0.06, ease: [0.16, 1, 0.3, 1] }}
-            className="lg:col-span-5 flex justify-center lg:justify-end order-2"
-          >
-            <div className="w-full max-w-[465px] liquid-glass-portal rounded-[34px] p-5 sm:p-7 text-white relative">
-              {/* Top Specular Edge Reflection */}
-              <div
-                aria-hidden="true"
-                className="pointer-events-none absolute inset-x-8 top-0 h-[1.5px] bg-gradient-to-r from-transparent via-white/80 to-transparent"
-              />
-
-              {/* Panel Header + Floating 3D Red Security Shield Emblem */}
-              <div className="flex items-start justify-between gap-3 mb-4">
-                <div className="min-w-0">
-                  <div className="inline-flex items-center gap-2 pb-1 border-b border-white/25">
-                    <span className="w-[3px] h-3 bg-[#FF1739] -skew-x-12 rounded-full" />
-                    <p className="text-[10.5px] font-extrabold uppercase tracking-[0.14em] text-white/95">
-                      AUTHORIZED PORTAL ACCESS
-                    </p>
-                  </div>
-                  <h2 className="text-[1.85rem] font-extrabold text-white tracking-tight mt-1.5 leading-none">
-                    Sign In
-                  </h2>
-                  <p className="text-xs text-slate-200/90 mt-1.5 leading-relaxed">
-                    Securely access Database Security with your authorized credentials.
+                {/* SECURE ACCESS PORTAL with subtle crimson decorative dividers */}
+                <div className="mt-4 w-full flex items-center justify-center gap-3">
+                  <span className="h-[1.5px] flex-1 max-w-[44px] bg-gradient-to-r from-transparent to-[#C8102E]/75 rounded-full" />
+                  <p className="text-[11px] sm:text-[12px] font-bold uppercase tracking-[0.22em] text-[#171717] whitespace-nowrap">
+                    SECURE ACCESS PORTAL
                   </p>
+                  <span className="h-[1.5px] flex-1 max-w-[44px] bg-gradient-to-l from-transparent to-[#C8102E]/75 rounded-full" />
                 </div>
-
-                {/* Floating Red Security Shield over Soft Luminous Rings */}
-                <motion.div
-                  aria-hidden="true"
-                  animate={prefersReducedMotion ? undefined : { y: [-2.5, 2.5, -2.5] }}
-                  transition={
-                    prefersReducedMotion
-                      ? undefined
-                      : { duration: 4.2, repeat: Infinity, ease: 'easeInOut' }
-                  }
-                  className="relative flex flex-col items-center justify-center shrink-0 pt-0.5 pr-1"
-                >
-                  {/* Shield Silhouette */}
-                  <div className="relative z-10 w-16 h-16 flex items-center justify-center drop-shadow-[0_0_18px_rgba(255,23,57,0.85)]">
-                    <svg viewBox="0 0 64 72" className="w-16 h-16" fill="none">
-                      <defs>
-                        <linearGradient id="shieldGlassFill" x1="10" y1="4" x2="54" y2="66" gradientUnits="userSpaceOnUse">
-                          <stop offset="0%" stopColor="#FF526D" />
-                          <stop offset="45%" stopColor="#FF1739" />
-                          <stop offset="100%" stopColor="#9A001B" />
-                        </linearGradient>
-                      </defs>
-                      <path
-                        d="M32 3 L58 13 V33 C58 49.5 46.8 63 32 69 C17.2 63 6 49.5 6 33 V13 L32 3 Z"
-                        fill="url(#shieldGlassFill)"
-                        stroke="#FFE4E8"
-                        strokeWidth="2"
-                      />
-                      <path
-                        d="M32 8 L53 16.5 V33 C53 46.5 44 57.5 32 63"
-                        stroke="rgba(255,255,255,0.35)"
-                        strokeWidth="1.2"
-                      />
-                    </svg>
-                    <Lock className="w-6 h-6 text-white absolute mb-1 drop-shadow-[0_2px_6px_rgba(0,0,0,0.45)]" />
-                  </div>
-                  {/* Luminous Crimson Ring Pedestal beneath Shield */}
-                  <div className="-mt-2 w-20 h-4 rounded-full border border-[#FF1739]/90 bg-[#FF1739]/25 shadow-[0_0_18px_rgba(255,23,57,0.85)] flex items-center justify-center">
-                    <div className="w-12 h-1.5 rounded-full border border-white/75" />
-                  </div>
-                </motion.div>
               </div>
 
-              {/* One-Time Firebase Email/Password Enable Notice (Only shown when disabled in Firebase Console) */}
+              {/* One-Time Firebase Email/Password Enable Notice (Only shown if disabled in console) */}
               {providerStatus.checked && !providerStatus.emailPasswordEnabled && (
-                <div className="mb-3.5 px-3.5 py-3 rounded-2xl bg-[#4a2608]/85 backdrop-blur-md border border-[#FFC83D]/70 shadow-[0_0_20px_rgba(255,200,61,0.2)] text-xs text-white leading-snug overflow-hidden">
-                  <div className="flex items-start gap-2.5">
-                    <AlertTriangle className="w-4 h-4 text-[#FFC83D] shrink-0 mt-0.5" />
+                <div className="relative z-10 mt-4 px-3.5 py-3 rounded-2xl bg-amber-50 border border-amber-300 text-xs text-amber-950 leading-snug">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
                     <div className="flex-1 min-w-0">
-                      <p className="font-extrabold text-[#FFC83D]">
-                        Enable Email/Password in Firebase Console
+                      <p className="font-bold text-amber-950">Enable Email/Password in Firebase Console</p>
+                      <p className="mt-1 text-amber-900 break-words">
+                        Project <span className="font-mono font-semibold">{providerStatus.projectId}</span> mein
+                        Email/Password OFF hai. Console mein <strong>Enable → Save</strong> karein.
                       </p>
-                      <p className="mt-1 text-slate-100/95 break-words">
-                        Project <span className="font-mono font-semibold text-white">{providerStatus.projectId}</span> mein
-                        Email/Password login abhi OFF hai. Console kholkar{' '}
-                        <strong className="text-white">Email/Password → Enable → Save</strong> karein, fir seedha apna ID &amp; Password daal kar login karein.
-                      </p>
-                      <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
                         <a
                           href={`https://console.firebase.google.com/project/${providerStatus.projectId}/authentication/providers`}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#FFC83D] hover:bg-[#ffd460] text-[#071329] font-extrabold text-[11px] transition-colors"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-700 hover:bg-amber-800 text-white font-bold text-[11px]"
                         >
-                          Open Firebase Console
+                          Open Console
                           <ExternalLink className="w-3 h-3" />
                         </a>
                         <button
                           type="button"
                           onClick={() => void checkProviderStatus()}
                           disabled={checkingProvider}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/15 hover:bg-white/25 border border-white/25 text-white font-bold text-[11px] transition-colors disabled:opacity-60"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-amber-300 text-amber-950 font-bold text-[11px] disabled:opacity-60"
                         >
                           <RefreshCw className={`w-3 h-3 ${checkingProvider ? 'animate-spin' : ''}`} />
                           {checkingProvider ? 'Checking...' : 'Check Status'}
@@ -668,315 +440,280 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 </div>
               )}
 
-              {/* Account Access Warning Banner */}
-              {errorMsg && (
-                <div className="mb-3.5 px-3.5 py-2.5 rounded-2xl bg-[#9A001B]/45 backdrop-blur-md border border-[#FF1739]/85 shadow-[0_0_20px_rgba(255,23,57,0.28)] flex items-start gap-2.5 text-xs text-white leading-snug overflow-hidden">
-                  <AlertTriangle className="w-4 h-4 text-white shrink-0 mt-0.5" />
-                  <span className="flex-1 min-w-0 break-words">{errorMsg}</span>
-                  <button
-                    type="button"
-                    onClick={() => setErrorMsg(null)}
-                    className="text-white/70 hover:text-white p-0.5 shrink-0"
-                    aria-label="Dismiss alert"
+              {/* Animated Error Alert */}
+              <AnimatePresence>
+                {errorMsg && (
+                  <motion.div
+                    initial={prefersReducedMotion ? { opacity: 1 } : { opacity: 0, y: -6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6 }}
+                    role="alert"
+                    className="relative z-10 mt-4 px-3.5 py-2.5 rounded-xl bg-[#FFF0F3] border border-[#C8102E]/45 shadow-sm flex items-start gap-2.5 text-xs text-[#9B0015] leading-snug"
                   >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              )}
-
-              {/* Custom Animated Dark-Glass Select Centre Dropdown */}
-              <div ref={dropdownRef} className="relative mb-3">
-                <label
-                  htmlFor="centre-dropdown-trigger"
-                  className="flex items-center gap-1.5 text-xs font-bold text-white mb-1"
-                >
-                  <Building2 className="w-3.5 h-3.5 text-slate-300" />
-                  Select Centre
-                </label>
-                <button
-                  id="centre-dropdown-trigger"
-                  type="button"
-                  aria-haspopup="listbox"
-                  aria-expanded={dropdownOpen}
-                  onClick={() => setDropdownOpen((o) => !o)}
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-[#0b1630]/65 backdrop-blur-md border border-white/25 hover:border-[#41A9FF]/70 focus:outline-none focus:ring-2 focus:ring-[#41A9FF]/60 focus:border-[#FF1739]/70 text-left flex items-center justify-between gap-2 transition-all shadow-inner"
-                >
-                  <span className="flex items-center gap-2.5 min-w-0">
-                    <Building2 className="w-4 h-4 text-[#FF9C45] shrink-0" />
-                    <span className="text-sm font-semibold text-white truncate">
-                      {CENTRE_MAP[selectedCentreId].name}
-                    </span>
-                  </span>
-                  <ChevronDown
-                    className={`w-4 h-4 text-slate-200 shrink-0 transition-transform duration-200 ${
-                      dropdownOpen ? 'rotate-180' : ''
-                    }`}
-                  />
-                </button>
-
-                <AnimatePresence>
-                  {dropdownOpen && (
-                    <motion.ul
-                      role="listbox"
-                      initial={prefersReducedMotion ? { opacity: 1 } : { opacity: 0, y: -6, scale: 0.98 }}
-                      animate={{ opacity: 1, y: 0, scale: 1 }}
-                      exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6, scale: 0.98 }}
-                      transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
-                      className="absolute z-40 mt-1.5 w-full rounded-xl bg-[#071329]/95 backdrop-blur-xl border border-[#41A9FF]/45 shadow-[0_16px_38px_rgba(0,0,0,0.65)] py-1.5 overflow-hidden"
+                    <AlertTriangle className="w-4 h-4 text-[#C8102E] shrink-0 mt-0.5" />
+                    <span className="flex-1 min-w-0 font-medium break-words">{errorMsg}</span>
+                    <button
+                      type="button"
+                      onClick={() => setErrorMsg(null)}
+                      className="text-[#9B0015]/70 hover:text-[#9B0015] p-0.5 shrink-0"
+                      aria-label="Dismiss alert"
                     >
-                      {CANONICAL_CENTRES.map((centre) => {
-                        const active = centre.id === selectedCentreId;
-                        return (
-                          <li key={centre.id}>
-                            <button
-                              type="button"
-                              role="option"
-                              aria-selected={active}
-                              onClick={() => {
-                                setSelectedCentreId(centre.id);
-                                setDropdownOpen(false);
-                              }}
-                              className={`w-full px-3.5 py-2 text-left text-xs sm:text-sm flex items-center justify-between gap-2 transition-colors ${
-                                active
-                                  ? 'bg-[#FF1739]/25 text-white font-bold'
-                                  : 'text-slate-200 hover:bg-white/10 font-medium'
-                              }`}
-                            >
-                              <span className="truncate">{centre.name}</span>
-                              {active && <Check className="w-4 h-4 text-[#FFC83D] shrink-0" />}
-                            </button>
-                          </li>
-                        );
-                      })}
-                    </motion.ul>
-                  )}
-                </AnimatePresence>
-              </div>
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </motion.div>
+                )}
+              </AnimatePresence>
 
-              <form onSubmit={handleEmailLogin} className="space-y-3">
-                {/* Email Address Field */}
+              {/* LOGIN FORM */}
+              <form onSubmit={handleEmailLogin} noValidate className="relative z-10 mt-6 space-y-4">
+                {/* EMAIL ADDRESS INPUT */}
                 <div>
-                  <label htmlFor="login-email" className="flex items-center gap-1.5 text-xs font-bold text-white mb-1">
-                    <Mail className="w-3.5 h-3.5 text-slate-300" />
+                  <label htmlFor="login-email" className="sr-only">
                     Email Address
                   </label>
-                  <div className="relative">
-                    <Mail className="w-4 h-4 text-slate-300 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <div className="relative group">
+                    <Mail
+                      className="z-10 w-[19px] h-[19px] text-[#171717] group-focus-within:text-[#C8102E] transition-colors absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none"
+                      aria-hidden="true"
+                    />
                     <input
                       id="login-email"
                       type="email"
                       autoComplete="email"
                       required
                       value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      placeholder="name@visionpoint.edu"
-                      className="w-full pl-10 pr-4 py-2.5 text-sm rounded-xl bg-[#0b1630]/65 backdrop-blur-md border border-white/25 text-white placeholder:text-slate-300/75 shadow-inner focus:outline-none focus:ring-2 focus:ring-[#41A9FF]/60 focus:border-[#FF1739]/80 transition-all"
+                      onChange={(e) => {
+                        setEmail(e.target.value);
+                        if (errorMsg) setErrorMsg(null);
+                      }}
+                      onBlur={() => setEmailTouched(true)}
+                      placeholder="Email Address"
+                      aria-invalid={Boolean(emailValidationError)}
+                      className={`w-full pl-12 pr-4 py-3.5 text-[15px] font-medium rounded-xl bg-white/95 text-[#171717] placeholder:text-slate-500 border shadow-[0_6px_18px_-8px_rgba(15,23,42,0.14)] transition-all duration-200 focus:outline-none focus:bg-white ${
+                        emailValidationError
+                          ? 'border-[#EF001B] ring-4 ring-[#EF001B]/15'
+                          : 'border-slate-300/95 hover:border-slate-400 focus:border-[#C8102E] focus:ring-4 focus:ring-[#C8102E]/15'
+                      }`}
                     />
                   </div>
+                  <AnimatePresence>
+                    {emailValidationError && (
+                      <motion.p
+                        initial={prefersReducedMotion ? { opacity: 1 } : { opacity: 0, y: -4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -4 }}
+                        className="mt-1.5 pl-1 text-xs font-semibold text-[#C8102E]"
+                      >
+                        {emailValidationError}
+                      </motion.p>
+                    )}
+                  </AnimatePresence>
                 </div>
 
-                {/* Password Field */}
+                {/* PASSWORD INPUT */}
                 <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label htmlFor="login-password" className="flex items-center gap-1.5 text-xs font-bold text-white">
-                      <Lock className="w-3.5 h-3.5 text-slate-300" />
-                      Password
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setResetEmail(email);
-                        setShowResetModal(true);
-                      }}
-                      className="text-xs font-bold text-[#FFC83D] hover:text-amber-200 hover:underline transition-colors"
-                    >
-                      Forgot password?
-                    </button>
-                  </div>
-                  <div className="relative">
-                    <Lock className="w-4 h-4 text-slate-300 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <label htmlFor="login-password" className="sr-only">
+                    Password
+                  </label>
+                  <div className="relative group">
+                    <Lock
+                      className="z-10 w-[19px] h-[19px] text-[#171717] group-focus-within:text-[#C8102E] transition-colors absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none"
+                      aria-hidden="true"
+                    />
                     <input
                       id="login-password"
                       type={showPassword ? 'text' : 'password'}
                       autoComplete="current-password"
                       required
                       value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      placeholder="Enter your password"
-                      className="w-full pl-10 pr-11 py-2.5 text-sm rounded-xl bg-[#0b1630]/65 backdrop-blur-md border border-white/25 text-white placeholder:text-slate-300/75 shadow-inner focus:outline-none focus:ring-2 focus:ring-[#41A9FF]/60 focus:border-[#FF1739]/80 transition-all"
+                      onChange={(e) => {
+                        setPassword(e.target.value);
+                        if (errorMsg) setErrorMsg(null);
+                      }}
+                      onBlur={() => setPasswordTouched(true)}
+                      placeholder="Password"
+                      aria-invalid={Boolean(passwordValidationError)}
+                      className={`w-full pl-12 pr-12 py-3.5 text-[15px] font-medium rounded-xl bg-white/95 text-[#171717] placeholder:text-slate-500 border shadow-[0_6px_18px_-8px_rgba(15,23,42,0.14)] transition-all duration-200 focus:outline-none focus:bg-white ${
+                        passwordValidationError
+                          ? 'border-[#EF001B] ring-4 ring-[#EF001B]/15'
+                          : 'border-slate-300/95 hover:border-slate-400 focus:border-[#C8102E] focus:ring-4 focus:ring-[#C8102E]/15'
+                      }`}
                     />
                     <button
                       type="button"
                       onClick={() => setShowPassword((prev) => !prev)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 hover:text-white p-1"
+                      className="z-10 absolute right-3.5 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-[#171717] hover:text-[#C8102E] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#C8102E] transition-colors"
                       aria-label={showPassword ? 'Hide password' : 'Show password'}
                     >
-                      {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      {showPassword ? <EyeOff className="w-[19px] h-[19px]" /> : <Eye className="w-[19px] h-[19px]" />}
                     </button>
                   </div>
+                  <AnimatePresence>
+                    {passwordValidationError && (
+                      <motion.p
+                        initial={prefersReducedMotion ? { opacity: 1 } : { opacity: 0, y: -4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -4 }}
+                        className="mt-1.5 pl-1 text-xs font-semibold text-[#C8102E]"
+                      >
+                        {passwordValidationError}
+                      </motion.p>
+                    )}
+                  </AnimatePresence>
                 </div>
 
-                {/* Primary Glowing Crimson Pill CTA */}
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="group relative overflow-hidden w-full py-3 px-5 mt-1 btn-crimson-gloss text-white text-sm font-extrabold rounded-full transition-all duration-200 hover:-translate-y-0.5 disabled:opacity-50 inline-flex items-center justify-center gap-2 tracking-wide"
-                >
-                  <span
-                    aria-hidden="true"
-                    className="pointer-events-none absolute inset-0 -translate-x-full group-hover:translate-x-full transition-transform duration-700 bg-gradient-to-r from-transparent via-white/25 to-transparent"
-                  />
-                  <LogIn className="w-4 h-4 relative z-10" />
-                  <span className="relative z-10">
-                    {loading ? 'Authenticating Session...' : 'Login to Portal'}
-                  </span>
-                </button>
+                {/* REMEMBER ME & FORGOT PASSWORD ROW */}
+                <div className="flex items-center justify-between gap-3 pt-0.5 px-0.5">
+                  <label className="inline-flex items-center gap-2.5 cursor-pointer select-none group">
+                    <span className="relative inline-flex items-center justify-center">
+                      <input
+                        type="checkbox"
+                        checked={rememberMe}
+                        onChange={(e) => setRememberMe(e.target.checked)}
+                        className="peer sr-only"
+                      />
+                      <span
+                        className={`w-[18px] h-[18px] rounded-[5px] border flex items-center justify-center transition-all peer-focus-visible:ring-2 peer-focus-visible:ring-[#C8102E] peer-focus-visible:ring-offset-1 ${
+                          rememberMe
+                            ? 'bg-[#C8102E] border-[#C8102E] shadow-[0_3px_10px_rgba(200,16,46,0.38)]'
+                            : 'bg-white border-slate-400 group-hover:border-[#C8102E]'
+                        }`}
+                      >
+                        {rememberMe && <Check className="w-3.5 h-3.5 text-white stroke-[3]" />}
+                      </span>
+                    </span>
+                    <span className="text-[13px] font-semibold text-[#171717]">Remember Me</span>
+                  </label>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setResetEmail(emailTrimmed);
+                      setShowResetModal(true);
+                    }}
+                    className="text-[13px] font-semibold text-[#C8102E] hover:text-[#9B0015] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#C8102E] rounded px-1 py-0.5 transition-colors whitespace-nowrap"
+                  >
+                    Forgot Password?
+                  </button>
+                </div>
+
+                {/* PREMIUM FULL-WIDTH CRIMSON LOGIN BUTTON */}
+                <div className="pt-1.5">
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="group relative overflow-hidden w-full py-3.5 sm:py-4 px-6 shukra-cta-btn text-white text-[16px] font-bold rounded-full transition-all duration-200 hover:-translate-y-0.5 active:scale-[0.985] disabled:opacity-65 disabled:cursor-not-allowed disabled:hover:translate-y-0 inline-flex items-center justify-center gap-2.5 tracking-wide focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#EF001B]/35"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute inset-0 -translate-x-full group-hover:translate-x-full transition-transform duration-700 bg-gradient-to-r from-transparent via-white/30 to-transparent"
+                    />
+                    {loading ? (
+                      <>
+                        <Loader2 className="w-5 h-5 animate-spin relative z-10" />
+                        <span className="relative z-10">Authenticating...</span>
+                      </>
+                    ) : (
+                      <>
+                        <LogIn className="w-5 h-5 relative z-10 stroke-[2.4]" />
+                        <span className="relative z-10">Login to Portal</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               </form>
 
-              <p className="mt-3 text-[11px] text-center text-slate-200/95 leading-relaxed">
-                For Super Admin, Centre Heads, and Staff members: select your assigned branch above and log in directly with{' '}
-                <strong className="text-white">Email &amp; Password</strong>.
-              </p>
-            </div>
-          </motion.section>
-
-          {/* MOBILE & TABLET ONLY (<lg): Centre Cards & Stats ordered directly below Sign-In form */}
-          <section className="lg:hidden order-3 space-y-4">
-            <div>
-              <div className="flex items-center gap-2.5 mb-2.5">
-                <Building2 className="w-4 h-4 text-[#FF1739] shrink-0" />
-                <h2 className="text-xs font-extrabold uppercase tracking-[0.14em] text-white whitespace-nowrap">
-                  AUTHORIZED <span className="text-[#FFC83D]">EDUCATIONAL CENTRES</span>
-                </h2>
-                <div className="h-[1.5px] flex-1 bg-gradient-to-r from-[#FFC83D]/80 to-transparent" />
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                {CANONICAL_CENTRES.map((centre) => {
-                  const isSelected = selectedCentreId === centre.id;
-                  const theme = CENTRE_STYLES[centre.id];
-                  return (
-                    <button
-                      key={centre.id}
-                      type="button"
-                      onClick={() => setSelectedCentreId(centre.id)}
-                      className={`text-left px-3.5 py-3 rounded-2xl border backdrop-blur-xl transition-all flex items-center justify-between gap-2.5 ${
-                        isSelected
-                          ? `${theme.bgActive} ${theme.borderActive} ${theme.glowActive}`
-                          : `${theme.bgIdle} ${theme.borderIdle} ${theme.glowIdle}`
-                      }`}
-                    >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div
-                          className={`w-9 h-9 rounded-xl border flex items-center justify-center shrink-0 ${theme.iconRing}`}
-                        >
-                          <GraduationCap className="w-4 h-4" />
-                        </div>
-                        <div className="min-w-0">
-                          <p className="text-xs font-extrabold text-white">{centre.code}</p>
-                          <p className="text-[11px] font-medium text-slate-200/95 truncate">{centre.name}</p>
-                        </div>
-                      </div>
-                      <MapPin className="w-4 h-4 shrink-0" style={{ color: isSelected ? '#FFC83D' : '#E2E8F0' }} />
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-              <div className="px-3.5 py-2.5 rounded-2xl bg-[#161036]/75 backdrop-blur-xl border border-[#BD54FF]/70 flex items-center gap-2.5">
-                <Building2 className="w-5 h-5 text-[#BD54FF] shrink-0" />
-                <div>
-                  <p className="text-sm font-extrabold font-mono text-white tabular-nums">04</p>
-                  <p className="text-[11px] text-slate-200">Centres</p>
+              {/* SECURITY FOOTER */}
+              <div className="relative z-10 mt-6 pt-1 flex items-center justify-center gap-2.5">
+                <ShieldCheck className="w-7 h-7 text-[#C8102E] shrink-0 stroke-[2.2]" aria-hidden="true" />
+                <div className="text-left leading-[1.2]">
+                  <p className="text-[12.5px] font-semibold text-[#171717]">Protected by Enterprise</p>
+                  <p className="text-[14.5px] font-extrabold text-[#C8102E]">Shukra Security</p>
                 </div>
               </div>
-              <div className="px-3.5 py-2.5 rounded-2xl bg-[#14103a]/75 backdrop-blur-xl border border-[#9E4BFF]/70 flex items-center gap-2.5">
-                <Users className="w-5 h-5 text-[#A855F7] shrink-0" />
-                <div>
-                  <p className="text-sm font-extrabold font-mono text-white tabular-nums">05</p>
-                  <p className="text-[11px] text-slate-200">Depts</p>
-                </div>
-              </div>
-              <div className="px-3.5 py-2.5 rounded-2xl bg-[#3a260a]/75 backdrop-blur-xl border border-[#FFC83D]/75 flex items-center gap-2.5">
-                <ShieldCheck className="w-5 h-5 text-[#FFC83D] shrink-0" />
-                <div>
-                  <p className="text-xs font-extrabold text-white">GPS</p>
-                  <p className="text-xs font-extrabold text-[#FFC83D]">Verified</p>
-                </div>
-              </div>
-              <div className="px-3.5 py-2.5 rounded-2xl bg-[#0a223a]/75 backdrop-blur-xl border border-[#00D9FF]/70 flex items-center gap-2.5">
-                <Layers className="w-5 h-5 text-[#00D9FF] shrink-0" />
-                <div>
-                  <p className="text-xs font-extrabold text-white">3-Tier</p>
-                  <p className="text-xs font-extrabold text-white">RBAC</p>
-                </div>
-              </div>
-            </div>
-          </section>
-        </main>
-
-        {/* BOTTOM FOOTER BAR */}
-        <footer className="w-full pt-3 border-t border-white/15 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-200">
-          <div className="flex flex-wrap items-center gap-2.5">
-            <div className="w-6 h-6 rounded-md bg-white/10 border border-white/20 flex items-center justify-center shrink-0">
-              <Monitor className="w-3.5 h-3.5 text-white" />
-            </div>
-            <span className="font-medium text-white/95">
-              Enterprise Multi-Branch Student Management Platform
-            </span>
-            <span className="text-[#FFC83D] font-extrabold px-1" aria-hidden="true">
-              /
-            </span>
-            <span className="font-bold text-white">
-              Powered by <span className="text-[#FFC83D]">SHUKRA INFOTECH</span>
-            </span>
+            </motion.section>
           </div>
+        </div>
+      </main>
 
-          <span className="text-[11px] font-mono text-slate-300/85 hidden sm:inline">
-            VP-LKG · VP-CLN · AXIS-VNS · AXIS-JNP
-          </span>
-        </footer>
-      </div>
-
-      {/* Password Reset Modal */}
-      {showResetModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#050C1D]/85 backdrop-blur-md p-4">
-          <div className="liquid-glass-portal text-white rounded-3xl max-w-md w-full p-6">
-            <h3 className="text-lg font-bold text-white">Reset Institutional Password</h3>
-            <p className="text-xs text-slate-200/85 mt-1">
-              Enter your registered email address to receive a Firebase password reset link.
-            </p>
-            <form onSubmit={handlePasswordReset} className="mt-4 space-y-4">
-              <input
-                type="email"
-                required
-                value={resetEmail}
-                onChange={(e) => setResetEmail(e.target.value)}
-                placeholder="name@visionpoint.edu"
-                className="w-full px-3.5 py-2.5 text-sm bg-[#0b1630]/80 border border-white/25 rounded-xl text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#41A9FF]"
-              />
-              <div className="flex justify-end gap-2.5">
+      {/* FORGOT PASSWORD MODAL (Light Glass Crimson Theme) */}
+      <AnimatePresence>
+        {showResetModal && (
+          <motion.div
+            initial={prefersReducedMotion ? { opacity: 1 } : { opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-[#171717]/45 backdrop-blur-sm p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reset-password-title"
+          >
+            <motion.div
+              initial={prefersReducedMotion ? { opacity: 1 } : { opacity: 0, scale: 0.96, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.96, y: 8 }}
+              className="w-full max-w-md bg-white rounded-[24px] border border-[#C8102E]/35 shadow-[0_24px_60px_-14px_rgba(200,16,46,0.28)] p-6 text-[#171717]"
+            >
+              <div className="flex items-start justify-between gap-3 pb-3 border-b border-rose-100">
+                <div>
+                  <h3 id="reset-password-title" className="text-lg font-extrabold text-[#171717]">
+                    Reset Portal Password
+                  </h3>
+                  <p className="text-xs text-slate-600 mt-0.5">
+                    Enter your registered email address to receive a password reset link.
+                  </p>
+                </div>
                 <button
                   type="button"
                   onClick={() => setShowResetModal(false)}
-                  className="px-4 py-2 text-xs font-semibold text-white bg-white/10 border border-white/25 rounded-full hover:bg-white/20"
+                  aria-label="Close reset password modal"
+                  className="p-1.5 rounded-lg text-slate-500 hover:text-[#C8102E] hover:bg-rose-50 transition-colors"
                 >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={resetSending}
-                  className="px-5 py-2 text-xs font-bold text-white btn-crimson-gloss rounded-full disabled:opacity-50"
-                >
-                  {resetSending ? 'Sending...' : 'Send Reset Link'}
+                  <X className="w-5 h-5" />
                 </button>
               </div>
-            </form>
-          </div>
-        </div>
-      )}
+
+              <form onSubmit={handlePasswordReset} className="mt-4 space-y-4">
+                <div>
+                  <label htmlFor="reset-email-input" className="block text-xs font-bold text-[#171717] mb-1.5">
+                    Authorized Email Address
+                  </label>
+                  <div className="relative">
+                    <Mail className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      id="reset-email-input"
+                      type="email"
+                      required
+                      value={resetEmail}
+                      onChange={(e) => setResetEmail(e.target.value)}
+                      placeholder="name@domain.com"
+                      className="w-full pl-10 pr-4 py-3 text-sm rounded-xl bg-[#F5F5F7] border border-slate-300 text-[#171717] focus:outline-none focus:bg-white focus:border-[#C8102E] focus:ring-4 focus:ring-[#C8102E]/15 transition-all"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2.5 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowResetModal(false)}
+                    className="px-4 py-2.5 text-xs font-bold text-slate-700 bg-[#F5F5F7] hover:bg-slate-200 rounded-xl transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={resetSending}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-bold text-white shukra-cta-btn rounded-xl disabled:opacity-60 transition-all"
+                  >
+                    {resetSending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                    {resetSending ? 'Sending...' : 'Send Reset Link'}
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };
