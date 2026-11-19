@@ -12,7 +12,6 @@ import {
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityLogsView } from './components/ActivityLogsView';
 import { CentreManagementView } from './components/CentreManagementView';
-import { CommunicationView } from './components/CommunicationView';
 import { canUserAccessSection, DashboardShell } from './components/DashboardShell';
 import { AdmissionView } from './components/departments/AdmissionView';
 import { FeeRecoveryView } from './components/departments/FeeRecoveryView';
@@ -28,7 +27,6 @@ import { SirWelcomeOverlay } from './components/SirWelcomeOverlay';
 import { StudentDatabaseView } from './components/StudentDatabaseView';
 import { ToastContainer, type ToastMessage } from './components/Toast';
 import { CENTRE_MAP, isBootstrappedOwnerEmail } from './constants/centres';
-import { useChatComms } from './hooks/useChatComms';
 import { extractJaunpurHeadingAndBlankColumns } from './lib/csvUtils';
 import { auth, db, handleFirestoreError, OperationType } from './lib/firebase';
 import { speakWelcomeMessage, stopWelcomeMessage } from './lib/voiceWelcome';
@@ -48,7 +46,6 @@ import type {
   AdmissionRecord,
   Centre,
   CentreId,
-  DirectMessage,
   EditRequest,
   EmployeeReport,
   ExcelSheetConfig,
@@ -112,7 +109,6 @@ export default function App() {
   const [staffInvites, setStaffInvites] = useState<StaffInvite[]>([]);
   const [employeeReports, setEmployeeReports] = useState<EmployeeReport[]>([]);
   const [editRequests, setEditRequests] = useState<EditRequest[]>([]);
-  const [directMessages, setDirectMessages] = useState<DirectMessage[]>([]);
   const [sheetConfigs, setSheetConfigs] = useState<ExcelSheetConfig[]>([]);
   const [workAssignments, setWorkAssignments] = useState<WorkAssignment[]>([]);
   const [workAssignmentTasks, setWorkAssignmentTasks] = useState<WorkAssignmentTask[]>([]);
@@ -138,21 +134,6 @@ export default function App() {
   const dismissToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
-
-  const activeSectionRef = useRef<NavSection>(activeSection);
-  activeSectionRef.current = activeSection;
-
-  const chatComms = useChatComms({
-    currentUser,
-    onIncomingChatPing: useCallback(
-      ({ fromName, preview }: { fromName: string; staffUid: string; preview: string }) => {
-        if (activeSectionRef.current !== 'communication') {
-          notify(`New Message from ${fromName}`, preview || 'Open Direct Chat to read.', 'info');
-        }
-      },
-      [notify],
-    ),
-  });
 
   const triggerSirWelcome = useCallback(() => {
     if (sirAutoCloseTimerRef.current) {
@@ -603,24 +584,7 @@ export default function App() {
       ),
     );
 
-    // 12. Direct Messages (Super Admin <-> Staff Hub-and-Spoke)
-    const msgQuery = isSuper
-      ? query(collection(db, 'direct_messages'), orderBy('createdAt', 'desc'), limit(400))
-      : query(collection(db, 'direct_messages'), where('staffUid', '==', currentUser.uid), limit(250));
-      unsubs.push(
-      onSnapshot(
-        msgQuery,
-        (snap) => {
-          const sorted = snap.docs
-            .map((d) => d.data() as DirectMessage)
-            .sort((a, b) => toMillis(a.createdAt) - toMillis(b.createdAt));
-          setDirectMessages(sorted);
-        },
-        (err) => handleFirestoreError(err, OperationType.LIST, 'direct_messages'),
-      ),
-    );
-
-    // 13. Shared Excel Sheet Column & Heading Configs
+    // 12. Shared Excel Sheet Column & Heading Configs
     unsubs.push(
       onSnapshot(
         collection(db, 'excel_sheet_configs'),
@@ -987,12 +951,6 @@ export default function App() {
     ? activeSection
     : 'overview';
 
-  const unreadCommsCount = directMessages.filter((m) =>
-    currentUser.role === 'super_admin'
-      ? !m.readByAdmin
-      : m.staffUid === currentUser.uid && !m.readByStaff,
-  ).length;
-
   return (
     <>
       <DashboardShell
@@ -1001,7 +959,6 @@ export default function App() {
         selectedCentreFilter={selectedCentreFilter}
         globalSearch={globalSearch}
         notifications={notifications}
-        unreadCommsCount={unreadCommsCount}
         assignedDepartments={activeAssignedDepartments}
         onSelectSection={handleSelectSection}
         onChangeCentreFilter={handleChangeCentreFilter}
@@ -1022,20 +979,6 @@ export default function App() {
             activityLogs={activityLogs}
             selectedCentreFilter={selectedCentreFilter}
             onNavigate={handleSelectSection}
-            onNotify={notify}
-          />
-        )}
-
-        {safeSection === 'communication' && (
-          <CommunicationView
-            currentUser={currentUser}
-            users={users}
-            directMessages={directMessages}
-            selectedCentreFilter={selectedCentreFilter}
-            wsConnected={chatComms.wsConnected}
-            onlineStaff={chatComms.onlineStaff}
-            superAdminOnline={chatComms.superAdminOnline}
-            onSendChatPing={chatComms.sendChatPing}
             onNotify={notify}
           />
         )}

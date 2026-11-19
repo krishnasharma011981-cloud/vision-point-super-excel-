@@ -437,7 +437,6 @@ export interface WorkAssignmentTask {
 
 export type NavSection =
   | 'overview'
-  | 'communication'
   | 'centre_management'
   | 'student_database'
   | 'fee_recovery'

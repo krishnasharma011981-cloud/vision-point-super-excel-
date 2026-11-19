@@ -12,7 +12,6 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
-  MessageSquare,
   MonitorPlay,
   PanelLeftClose,
   PanelLeftOpen,
@@ -40,7 +39,6 @@ interface DashboardShellProps {
   selectedCentreFilter: CentreId | 'all';
   globalSearch: string;
   notifications: NotificationItem[];
-  unreadCommsCount?: number;
   assignedDepartments?: WorkAssignmentDepartment[];
   onSelectSection: (section: NavSection) => void;
   onChangeCentreFilter: (centreId: CentreId | 'all') => void;
@@ -53,7 +51,6 @@ const SHUKRA_LOGO_PATH = '/assets/aistudio/Chat-GPT-Image-Sep-16-2026-06-23-59-P
 
 const SECTION_ICONS: Record<NavSection, React.FC<{ className?: string }>> = {
   overview: LayoutDashboard,
-  communication: MessageSquare,
   centre_management: Building2,
   student_database: Database,
   fee_recovery: IndianRupee,
@@ -77,7 +74,6 @@ export function canUserAccessSection(
   if (user.role === 'centre_head') return true;
   if (
     section === 'overview' ||
-    section === 'communication' ||
     section === 'student_database' ||
     section === 'reports' ||
     section === 'settings'
@@ -100,7 +96,6 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
   selectedCentreFilter,
   globalSearch,
   notifications,
-  unreadCommsCount = 0,
   assignedDepartments = [],
   onSelectSection,
   onChangeCentreFilter,
@@ -169,10 +164,6 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
         {visibleNavItems.map((item) => {
           const Icon = SECTION_ICONS[item.id];
           const active = activeSection === item.id;
-          const label =
-            item.id === 'communication' && currentUser.role === 'super_admin'
-              ? 'Staff Direct Chat'
-              : item.label;
           return (
             <button
               key={item.id}
@@ -189,13 +180,8 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
             >
               <span className="flex items-center gap-3 min-w-0">
                 <Icon className={`w-4 h-4 shrink-0 ${active ? 'text-white' : 'text-slate-300/85'}`} />
-                <span className="truncate">{label}</span>
+                <span className="truncate">{item.label}</span>
               </span>
-              {item.id === 'communication' && unreadCommsCount > 0 && (
-                <span className="px-1.5 py-0.5 rounded-md bg-amber-400 text-[#0F172A] text-[10px] font-extrabold font-mono tabular-nums shrink-0">
-                  {unreadCommsCount}
-                </span>
-              )}
             </button>
           );
         })}
@@ -318,22 +304,6 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
                 </select>
               </div>
             )}
-
-            {/* Quick Direct Chat Button */}
-            <button
-              type="button"
-              onClick={() => onSelectSection('communication')}
-              className="relative p-2 rounded-xl border shadow-2xs transition-colors bg-white text-[#0F172A] hover:bg-slate-100 border-slate-200"
-              aria-label="Open Direct Chat"
-              title="Open Direct Chat"
-            >
-              <MessageSquare className="w-4 h-4" />
-              {unreadCommsCount > 0 && (
-                <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-amber-500 text-[#0F172A] text-[10px] font-extrabold flex items-center justify-center font-mono shadow-xs">
-                  {unreadCommsCount}
-                </span>
-              )}
-            </button>
 
             {/* Notifications */}
             <div className="relative">
