@@ -1,7 +1,8 @@
-import { doc, getDoc } from 'firebase/firestore';
+import { doc } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { CANONICAL_CENTRES, isBootstrappedOwnerEmail } from '../constants/centres';
 import { auth, db } from './firebase';
+import { CACHE_TTL_MS, fetchDocumentCached } from './firestoreCache';
 import type { CentreId, UserAccount, UserDepartment, UserRole } from '../types/domain';
 
 export interface LocationVerificationResult {
@@ -104,17 +105,27 @@ export async function verifyOperationLocation(
       return { allowed: true, overrideApplied: true };
     }
     try {
-      const [settingsSnap, centreSnap] = await Promise.all([
-        getDoc(doc(db, 'system_settings', 'global')).catch(() => null),
-        getDoc(doc(db, 'centres', centreId)).catch(() => null),
+      const [settingsDataRaw, centreDataRaw] = await Promise.all([
+        fetchDocumentCached<Record<string, unknown>>(
+          'system_settings',
+          'global',
+          doc(db, 'system_settings', 'global'),
+          CACHE_TTL_MS.STATIC,
+        ).catch(() => null),
+        fetchDocumentCached<Record<string, unknown>>(
+          'centres',
+          centreId,
+          doc(db, 'centres', centreId),
+          CACHE_TTL_MS.STATIC,
+        ).catch(() => null),
       ]);
-      const settingsData = settingsSnap?.exists() ? settingsSnap.data() : {};
+      const settingsData = settingsDataRaw || {};
       if (settingsData.geofenceEnabled === false || settingsData.emergencyOverrideActive === true) {
         return { allowed: true, overrideApplied: true };
       }
       const pos = await getCurrentPositionAsync(12000);
       const fallbackCentre = CANONICAL_CENTRES.find((c) => c.id === centreId) || CANONICAL_CENTRES[0];
-      const centreData = centreSnap?.exists() ? centreSnap.data() : fallbackCentre;
+      const centreData = centreDataRaw || fallbackCentre;
       const distanceMeters = haversineMetersClient(
         pos.coords.latitude,
         pos.coords.longitude,

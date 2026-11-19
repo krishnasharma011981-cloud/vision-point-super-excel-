@@ -28,7 +28,22 @@ import { StudentDatabaseView } from './components/StudentDatabaseView';
 import { ToastContainer, type ToastMessage } from './components/Toast';
 import { CENTRE_MAP, isBootstrappedOwnerEmail } from './constants/centres';
 import { extractJaunpurHeadingAndBlankColumns } from './lib/csvUtils';
-import { auth, db, handleFirestoreError, OperationType } from './lib/firebase';
+import {
+  auth,
+  db,
+  formatFirestoreUserError,
+  handleFirestoreError,
+  isFirestoreQuotaError,
+  OperationType,
+} from './lib/firebase';
+import {
+  CACHE_TTL_MS,
+  clearAllFirestoreCache,
+  fetchCollectionCached,
+  fetchDocumentCached,
+  invalidateCacheForCollections,
+  subscribeCacheInvalidation,
+} from './lib/firestoreCache';
 import { speakWelcomeMessage, stopWelcomeMessage } from './lib/voiceWelcome';
 import {
   claimPendingStaffInvite,
@@ -115,10 +130,14 @@ export default function App() {
   const [sheetConfigsLoaded, setSheetConfigsLoaded] = useState(false);
   const [onlineClassRecordsLoaded, setOnlineClassRecordsLoaded] = useState(false);
   const [feeRecordsLoaded, setFeeRecordsLoaded] = useState(false);
+  const [manualSyncing, setManualSyncing] = useState(false);
+  const [cacheVersion, setCacheVersion] = useState(0);
   const attendanceZeroMigrationRanRef = useRef(false);
   const jaunpurColsSharedMigrationRef = useRef(false);
   const fee12kCleanupMigrationRanRef = useRef(false);
   const subjectMockCleanupRanRef = useRef(false);
+  const quotaToastShownRef = useRef(false);
+  const lastInvalidatedCollectionsRef = useRef<Set<string> | null>(null);
 
   const notify = useCallback(
     (title: string, description: string, variant: ToastMessage['variant'] = 'info') => {
@@ -195,6 +214,7 @@ export default function App() {
       }).catch(() => {});
     }
     await signOut(auth);
+    clearAllFirestoreCache();
     setCurrentUser(null);
     setActiveSection('overview');
     setSelectedCentreFilter('all');
@@ -262,6 +282,9 @@ export default function App() {
         }
       } catch (err) {
         console.error('Auth restoration error:', err);
+        if (isFirestoreQuotaError(err)) {
+          setLoginError(formatFirestoreUserError(err));
+        }
       } finally {
         setAuthChecking(false);
       }
@@ -328,11 +351,70 @@ export default function App() {
     };
   }, [currentUser, systemSettings?.sessionTimeoutMinutes, handleLogout, notify]);
 
-  // Real-time Firestore listeners scoped strictly by Role, Centre, and Department
-  // Note: Non-super-admin queries omit .orderBy() when .where() is used and sort client-side
-  // so no Firestore composite index is required for Centre Head or Employee sessions.
+  const handleDataFetchError = useCallback(
+    (err: unknown, op: OperationType, path: string) => {
+      if (isFirestoreQuotaError(err)) {
+        if (!quotaToastShownRef.current) {
+          quotaToastShownRef.current = true;
+          notify(
+            'Firebase Daily Read Quota Reached',
+            formatFirestoreUserError(err),
+            'warning',
+          );
+        }
+        return;
+      }
+      handleFirestoreError(err, op, path);
+    },
+    [notify],
+  );
+
+  const activeAssignedDepartments: WorkAssignmentDepartment[] = currentUser
+    ? Array.from(
+        new Set(
+          workAssignments
+            .filter((a) => a.staffUid === currentUser.uid && a.status === 'Active')
+            .map((a) => a.department),
+        ),
+      )
+    : [];
+
+  const resolvedActiveSection: NavSection = currentUser
+    ? canUserAccessSection(currentUser, activeSection, activeAssignedDepartments)
+      ? activeSection
+      : 'overview'
+    : 'overview';
+
+  const userUid = currentUser?.uid || '';
+  const userRole = currentUser?.role || null;
+  const userCentreId = currentUser?.centreId || null;
+  const userDepartment = currentUser?.department || null;
+  const userEmail = currentUser?.email || '';
+
+  // Subscribe to write-through invalidation events from firestoreService so local edits
+  // immediately refresh ONLY the mutated collection(s) while keeping all other tabs cached (0 reads).
   useEffect(() => {
-    if (!currentUser) {
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    const pending = new Set<string>();
+    const unsub = subscribeCacheInvalidation((mutatedCols) => {
+      mutatedCols.forEach((c) => pending.add(c));
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        lastInvalidatedCollectionsRef.current = new Set(pending);
+        pending.clear();
+        setCacheVersion((v) => v + 1);
+      }, 160);
+    });
+    return () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      unsub();
+    };
+  }, []);
+
+  // 1. Core lightweight cached bootstrap (static configs = 6h TTL, operational = 10m TTL)
+  // Plus ONLY 2 tiny live onSnapshot listeners for Employees (~25 calling tasks total)
+  useEffect(() => {
+    if (!userUid || !userRole || !userCentreId) {
       setSheetConfigsLoaded(false);
       setOnlineClassRecordsLoaded(false);
       setFeeRecordsLoaded(false);
@@ -340,303 +422,571 @@ export default function App() {
       jaunpurColsSharedMigrationRef.current = false;
       fee12kCleanupMigrationRanRef.current = false;
       subjectMockCleanupRanRef.current = false;
+      quotaToastShownRef.current = false;
       return;
     }
-    setDataLoading(true);
-    setSheetConfigsLoaded(false);
-    setOnlineClassRecordsLoaded(false);
-    setFeeRecordsLoaded(false);
+
+    let cancelled = false;
     const unsubs: Unsubscribe[] = [];
+    const isSuper = userRole === 'super_admin';
+    const isHead = userRole === 'centre_head';
+    const cId = userCentreId;
 
-    const isSuper = currentUser.role === 'super_admin';
-    const isHead = currentUser.role === 'centre_head';
-    const cId = currentUser.centreId;
+    const loadCore = async () => {
+      const jobs: Array<Promise<void>> = [];
 
-    // 1. Centres
-    const centresQuery = isSuper
-      ? query(collection(db, 'centres'))
-      : query(collection(db, 'centres'), where('id', '==', cId));
-    unsubs.push(
-      onSnapshot(
-        centresQuery,
-        (snap) => setCentres(snap.docs.map((d) => d.data() as Centre)),
-        (err) => handleFirestoreError(err, OperationType.LIST, 'centres'),
-      ),
-    );
+      // Centres (max 4 docs — 6h cache)
+      jobs.push(
+        fetchCollectionCached<Centre>(
+          'centres',
+          isSuper ? 'all' : cId,
+          isSuper ? query(collection(db, 'centres')) : query(collection(db, 'centres'), where('id', '==', cId)),
+          CACHE_TTL_MS.STATIC,
+        )
+          .then((items) => {
+            if (!cancelled) setCentres(items);
+          })
+          .catch((err) => handleDataFetchError(err, OperationType.LIST, 'centres')),
+      );
 
-    // 2. Users (Super Admin sees all, Centre Head sees own centre, Employee sees self + live session revocation check)
-    unsubs.push(
-      onSnapshot(
-        doc(db, 'users', currentUser.uid),
-        (snap) => {
-          const latest = snap.exists() ? (snap.data() as UserAccount) : null;
-          if (!latest || latest.status !== 'Active') {
-            if (!isBootstrappedOwnerEmail(currentUser.email)) {
+      // Self status verification (cached 30m so page reloads cost 0 reads)
+      jobs.push(
+        fetchDocumentCached<UserAccount>(
+          'users',
+          `profile:${userUid}`,
+          doc(db, 'users', userUid),
+          CACHE_TTL_MS.PROFILE,
+        )
+          .then((latest) => {
+            if (cancelled) return;
+            if ((!latest || latest.status !== 'Active') && !isBootstrappedOwnerEmail(userEmail)) {
               void signOut(auth).catch(() => {});
+              clearAllFirestoreCache();
               setCurrentUser(null);
               setLoginError('Access denied: Your staff account has been removed or deactivated by an administrator.');
             }
-          }
-        },
-        () => {
-          // Ignore transient read error on signout
-        },
-      ),
-    );
-
-    if (isSuper || isHead) {
-      const usersQuery = isSuper
-        ? query(collection(db, 'users'))
-        : query(collection(db, 'users'), where('centreId', '==', cId));
-      unsubs.push(
-        onSnapshot(
-          usersQuery,
-          (snap) => setUsers(snap.docs.map((d) => d.data() as UserAccount)),
-          (err) => handleFirestoreError(err, OperationType.LIST, 'users'),
-        ),
+          })
+          .catch(() => {
+            // Ignore transient revocation check error
+          }),
       );
-    } else {
-      setUsers([currentUser]);
-    }
 
-    // 3. Central Students Database
-    const studentsQuery = isSuper
-      ? query(collection(db, 'students'))
-      : query(collection(db, 'students'), where('centreId', '==', cId));
-    unsubs.push(
-      onSnapshot(
-        studentsQuery,
-        (snap) => {
-          const items = snap.docs
-            .map((d) => d.data() as Student)
-            .sort((a, b) => (b.serialNumber || 0) - (a.serialNumber || 0));
-          setStudents(items);
-          setDataLoading(false);
-        },
-        (err) => {
-          setDataLoading(false);
-          handleFirestoreError(err, OperationType.LIST, 'students');
-        },
-      ),
-    );
-
-    // 4. Department-Specific Records (Strictly isolated by department for employees)
-    const subscribeDept = <T,>(
-      colName: string,
-      deptKey: string,
-      setter: (items: T[]) => void,
-      onFirstLoad?: () => void,
-    ) => {
-      if (!isSuper && !isHead && currentUser.department !== deptKey) {
-        setter([]);
-        onFirstLoad?.();
-        return;
+      // Staff directory (Super Admin / Centre Head — 6h cache, invalidated on staff add/edit/delete)
+      if (isSuper || isHead) {
+        jobs.push(
+          fetchCollectionCached<UserAccount>(
+            'users',
+            isSuper ? 'all' : cId,
+            isSuper ? query(collection(db, 'users')) : query(collection(db, 'users'), where('centreId', '==', cId)),
+            CACHE_TTL_MS.STATIC,
+          )
+            .then((items) => {
+              if (!cancelled) setUsers(items);
+            })
+            .catch((err) => handleDataFetchError(err, OperationType.LIST, 'users')),
+        );
+      } else if (currentUser) {
+        setUsers([currentUser]);
       }
-      const q = isSuper
-        ? query(collection(db, colName))
-        : query(collection(db, colName), where('centreId', '==', cId));
-      unsubs.push(
-        onSnapshot(
-          q,
-          (snap) => {
-            setter(snap.docs.map((d) => d.data() as T));
-            onFirstLoad?.();
-          },
-          (err) => {
-            onFirstLoad?.();
-            handleFirestoreError(err, OperationType.LIST, colName);
-          },
-        ),
+
+      // System Settings (1 doc — 6h cache)
+      jobs.push(
+        fetchDocumentCached<SystemSettings>(
+          'system_settings',
+          'global',
+          doc(db, 'system_settings', 'global'),
+          CACHE_TTL_MS.STATIC,
+        )
+          .then((settings) => {
+            if (!cancelled && settings) setSystemSettings(settings);
+          })
+          .catch((err) => handleDataFetchError(err, OperationType.GET, 'system_settings/global')),
       );
+
+      // Notifications (capped 15 docs — 10m cache)
+      const notifQuery = isSuper
+        ? query(collection(db, 'notifications'), orderBy('createdAt', 'desc'), limit(15))
+        : isHead
+          ? query(collection(db, 'notifications'), where('centreId', '==', cId), limit(15))
+          : query(collection(db, 'notifications'), where('recipientUid', '==', userUid), limit(12));
+      jobs.push(
+        fetchCollectionCached<NotificationItem>(
+          'notifications',
+          isSuper ? 'all' : isHead ? cId : userUid,
+          notifQuery,
+          CACHE_TTL_MS.OPERATIONAL,
+          { includeDocId: true },
+        )
+          .then((items) => {
+            if (!cancelled) {
+              setNotifications([...items].sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt)));
+            }
+          })
+          .catch((err) => handleDataFetchError(err, OperationType.LIST, 'notifications')),
+      );
+
+      // Shared Excel Sheet Column & Heading Configs (~6 docs — 6h cache)
+      jobs.push(
+        fetchCollectionCached<ExcelSheetConfig>(
+          'excel_sheet_configs',
+          'all',
+          query(collection(db, 'excel_sheet_configs')),
+          CACHE_TTL_MS.STATIC,
+        )
+          .then((items) => {
+            if (!cancelled) {
+              setSheetConfigs(items);
+              setSheetConfigsLoaded(true);
+            }
+          })
+          .catch((err) => {
+            if (!cancelled) setSheetConfigsLoaded(true);
+            handleDataFetchError(err, OperationType.LIST, 'excel_sheet_configs');
+          }),
+      );
+
+      // Work Assignments:
+      // - For Admins/Centre Heads: cache-first (10m TTL, auto-invalidated on assign/delete)
+      // - For Employees: tiny real-time onSnapshot (~1-3 docs + ~25 tasks) so new calling boxes appear live
+      if (isSuper || isHead) {
+        const waQuery = isSuper
+          ? query(collection(db, 'work_assignments'))
+          : query(collection(db, 'work_assignments'), where('centreId', '==', cId));
+        jobs.push(
+          fetchCollectionCached<WorkAssignment>(
+            'work_assignments',
+            isSuper ? 'all' : cId,
+            waQuery,
+            CACHE_TTL_MS.OPERATIONAL,
+          )
+            .then((items) => {
+              if (!cancelled) {
+                setWorkAssignments([...items].sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt)));
+              }
+            })
+            .catch((err) => handleDataFetchError(err, OperationType.LIST, 'work_assignments')),
+        );
+      }
+
+      await Promise.all(jobs);
     };
 
-    subscribeDept<FeeRecoveryRecord>(
-      'fee_recovery',
-      'fee_recovery',
-      setFeeRecords,
-      () => setFeeRecordsLoaded(true),
-    );
-    subscribeDept<PracticalRecord>('practical_records', 'practical', setPracticalRecords);
-    subscribeDept<TmaRecord>('tma_records', 'tma', setTmaRecords);
-    subscribeDept<OnlineClassRecord>(
-      'online_class_records',
-      'online_classes',
-      setOnlineClassRecords,
-      () => setOnlineClassRecordsLoaded(true),
-    );
-    subscribeDept<AdmissionRecord>('admission_records', 'admission', setAdmissionRecords);
+    void loadCore();
 
-    // 5 & 6. Activity Logs & Location Verifications (Super Admin ONLY)
-    if (isSuper) {
-      const logsQuery = query(collection(db, 'activity_logs'), orderBy('createdAt', 'desc'), limit(150));
+    // Employees get real-time delivery ONLY for their own small calling batch (~25 docs total)
+    if (!isSuper && !isHead) {
       unsubs.push(
         onSnapshot(
-          logsQuery,
+          query(collection(db, 'work_assignments'), where('staffUid', '==', userUid)),
           (snap) => {
             const sorted = snap.docs
-              .map((d) => ({ id: d.id, ...(d.data() as ActivityLog) }))
+              .map((d) => d.data() as WorkAssignment)
               .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
-            setActivityLogs(sorted);
+            setWorkAssignments(sorted);
           },
-          (err) => handleFirestoreError(err, OperationType.LIST, 'activity_logs'),
+          (err) => handleDataFetchError(err, OperationType.LIST, 'work_assignments'),
         ),
       );
-
-      const geoQuery = query(collection(db, 'location_verifications'), orderBy('createdAt', 'desc'), limit(100));
       unsubs.push(
         onSnapshot(
-          geoQuery,
+          query(collection(db, 'work_assignment_tasks'), where('staffUid', '==', userUid)),
           (snap) => {
-            const sorted = snap.docs
-              .map((d) => ({ id: d.id, ...(d.data() as LocationVerification) }))
-              .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
-            setLocationVerifications(sorted);
+            setWorkAssignmentTasks(snap.docs.map((d) => d.data() as WorkAssignmentTask));
           },
-          (err) => handleFirestoreError(err, OperationType.LIST, 'location_verifications'),
+          (err) => handleDataFetchError(err, OperationType.LIST, 'work_assignment_tasks'),
         ),
       );
-    } else {
-      setActivityLogs([]);
-      setLocationVerifications([]);
     }
-
-    // 7. System Settings
-    unsubs.push(
-      onSnapshot(
-        doc(db, 'system_settings', 'global'),
-        (snap) => {
-          if (snap.exists()) setSystemSettings(snap.data() as SystemSettings);
-        },
-        (err) => handleFirestoreError(err, OperationType.GET, 'system_settings/global'),
-      ),
-    );
-
-    // 8. Notifications
-    const notifQuery = isSuper
-      ? query(collection(db, 'notifications'), orderBy('createdAt', 'desc'), limit(30))
-      : isHead
-        ? query(collection(db, 'notifications'), where('centreId', '==', cId), limit(30))
-        : query(collection(db, 'notifications'), where('recipientUid', '==', currentUser.uid), limit(25));
-    unsubs.push(
-      onSnapshot(
-        notifQuery,
-        (snap) => {
-          const sorted = snap.docs
-            .map((d) => ({ id: d.id, ...(d.data() as NotificationItem) }))
-            .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
-          setNotifications(sorted);
-        },
-        (err) => handleFirestoreError(err, OperationType.LIST, 'notifications'),
-      ),
-    );
-
-    // 9. Staff Invites (Super Admin & Centre Head)
-    if (isSuper || isHead) {
-      const invitesQuery = isSuper
-        ? query(collection(db, 'staff_invites'))
-        : query(collection(db, 'staff_invites'), where('centreId', '==', cId));
-      unsubs.push(
-        onSnapshot(
-          invitesQuery,
-          (snap) => setStaffInvites(snap.docs.map((d) => d.data() as StaffInvite)),
-          (err) => handleFirestoreError(err, OperationType.LIST, 'staff_invites'),
-        ),
-      );
-    } else {
-      setStaffInvites([]);
-    }
-
-    // 10. Employee Daily Work Reports
-    const reportsQuery = isSuper
-      ? query(collection(db, 'employee_reports'), orderBy('createdAt', 'desc'), limit(150))
-      : isHead
-        ? query(collection(db, 'employee_reports'), where('centreId', '==', cId), limit(120))
-        : query(collection(db, 'employee_reports'), where('employeeUid', '==', currentUser.uid), limit(80));
-    unsubs.push(
-      onSnapshot(
-        reportsQuery,
-        (snap) => {
-          const sorted = snap.docs
-            .map((d) => d.data() as EmployeeReport)
-            .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
-          setEmployeeReports(sorted);
-        },
-        (err) => handleFirestoreError(err, OperationType.LIST, 'employee_reports'),
-      ),
-    );
-
-    // 11. Department Edit Permission Requests
-    const editReqQuery = isSuper
-      ? query(collection(db, 'edit_requests'), orderBy('createdAt', 'desc'), limit(120))
-      : isHead
-        ? query(collection(db, 'edit_requests'), where('centreId', '==', cId), limit(120))
-        : query(collection(db, 'edit_requests'), where('requesterUid', '==', currentUser.uid), limit(80));
-    unsubs.push(
-      onSnapshot(
-        editReqQuery,
-        (snap) => {
-          const sorted = snap.docs
-            .map((d) => d.data() as EditRequest)
-            .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
-          setEditRequests(sorted);
-        },
-        (err) => handleFirestoreError(err, OperationType.LIST, 'edit_requests'),
-      ),
-    );
-
-    // 12. Shared Excel Sheet Column & Heading Configs
-    unsubs.push(
-      onSnapshot(
-        collection(db, 'excel_sheet_configs'),
-        (snap) => {
-          setSheetConfigs(snap.docs.map((d) => d.data() as ExcelSheetConfig));
-          setSheetConfigsLoaded(true);
-        },
-        (err) => {
-          setSheetConfigsLoaded(true);
-          handleFirestoreError(err, OperationType.LIST, 'excel_sheet_configs');
-        },
-      ),
-    );
-
-    // 14. Staff Work Assignments & Calling Tasks (Fee Recovery, Practical, TMA)
-    const waQuery = isSuper
-      ? query(collection(db, 'work_assignments'))
-      : isHead
-        ? query(collection(db, 'work_assignments'), where('centreId', '==', cId))
-        : query(collection(db, 'work_assignments'), where('staffUid', '==', currentUser.uid));
-    unsubs.push(
-      onSnapshot(
-        waQuery,
-        (snap) => {
-          const sorted = snap.docs
-            .map((d) => d.data() as WorkAssignment)
-            .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
-          setWorkAssignments(sorted);
-        },
-        (err) => handleFirestoreError(err, OperationType.LIST, 'work_assignments'),
-      ),
-    );
-
-    const waTasksQuery = isSuper
-      ? query(collection(db, 'work_assignment_tasks'))
-      : isHead
-        ? query(collection(db, 'work_assignment_tasks'), where('centreId', '==', cId))
-        : query(collection(db, 'work_assignment_tasks'), where('staffUid', '==', currentUser.uid));
-    unsubs.push(
-      onSnapshot(
-        waTasksQuery,
-        (snap) => {
-          setWorkAssignmentTasks(snap.docs.map((d) => d.data() as WorkAssignmentTask));
-        },
-        (err) => handleFirestoreError(err, OperationType.LIST, 'work_assignment_tasks'),
-      ),
-    );
 
     return () => {
+      cancelled = true;
       unsubs.forEach((u) => u());
     };
-  }, [currentUser]);
+  }, [userUid, userRole, userCentreId, userEmail, cacheVersion, handleDataFetchError]);
+
+  // 2. Ultra-Low-Read Section-Aware & Branch-Scoped Cache-First Loader:
+  // - Zero bulk onSnapshot listeners! Tab switches = 0 reads (in-memory cache), F5 refresh = 0 reads (IndexedDB cache).
+  // - Overview loads ONLY students + fee_recovery for the active branch (skips Practical/TMA/Online/Admission/Logs).
+  // - Employees inside their Calling Box skip loading branch-wide students/fees entirely.
+  const isEmployeeInCallingBox =
+    userRole === 'employee' &&
+    (resolvedActiveSection === 'fee_recovery' ||
+      resolvedActiveSection === 'practical' ||
+      resolvedActiveSection === 'tma') &&
+    activeAssignedDepartments.includes(resolvedActiveSection as WorkAssignmentDepartment);
+
+  useEffect(() => {
+    if (!userUid || !userRole || !userCentreId || !userDepartment) return;
+
+    let cancelled = false;
+    const isSuper = userRole === 'super_admin';
+    const isHead = userRole === 'centre_head';
+    const needsAllCentres =
+      isSuper &&
+      (selectedCentreFilter === 'all' ||
+        resolvedActiveSection === 'centre_management' ||
+        resolvedActiveSection === 'settings');
+    const scopedCentre: CentreId | 'all' = isSuper
+      ? needsAllCentres
+        ? 'all'
+        : selectedCentreFilter
+      : userCentreId;
+
+    const scopedQuery = (colName: string) =>
+      scopedCentre === 'all'
+        ? query(collection(db, colName))
+        : query(collection(db, colName), where('centreId', '==', scopedCentre));
+
+    const sectionNeedsStudents =
+      !isEmployeeInCallingBox &&
+      resolvedActiveSection !== 'employee_management' &&
+      resolvedActiveSection !== 'activity_logs';
+
+    const sectionNeedsFee =
+      !isEmployeeInCallingBox &&
+      (resolvedActiveSection === 'overview' ||
+        resolvedActiveSection === 'centre_management' ||
+        resolvedActiveSection === 'student_database' ||
+        resolvedActiveSection === 'fee_recovery' ||
+        resolvedActiveSection === 'reports' ||
+        resolvedActiveSection === 'settings');
+
+    // Practical, TMA, Online Classes, Admission are NOT fetched on Overview — only when actually opened!
+    const sectionNeedsPractical =
+      !isEmployeeInCallingBox &&
+      (resolvedActiveSection === 'centre_management' ||
+        resolvedActiveSection === 'practical' ||
+        resolvedActiveSection === 'reports' ||
+        resolvedActiveSection === 'settings');
+
+    const sectionNeedsTma =
+      !isEmployeeInCallingBox &&
+      (resolvedActiveSection === 'centre_management' ||
+        resolvedActiveSection === 'tma' ||
+        resolvedActiveSection === 'reports' ||
+        resolvedActiveSection === 'settings');
+
+    const sectionNeedsOnline =
+      resolvedActiveSection === 'centre_management' ||
+      resolvedActiveSection === 'online_classes' ||
+      resolvedActiveSection === 'reports' ||
+      resolvedActiveSection === 'settings';
+
+    const sectionNeedsAdmission =
+      resolvedActiveSection === 'centre_management' ||
+      resolvedActiveSection === 'admission' ||
+      resolvedActiveSection === 'reports' ||
+      resolvedActiveSection === 'settings';
+
+    const sectionNeedsAdminTasks =
+      (isSuper || isHead) &&
+      (resolvedActiveSection === 'fee_recovery' ||
+        resolvedActiveSection === 'practical' ||
+        resolvedActiveSection === 'tma' ||
+        resolvedActiveSection === 'settings');
+
+    const sectionNeedsActivityLogs =
+      isSuper &&
+      (resolvedActiveSection === 'centre_management' ||
+        resolvedActiveSection === 'activity_logs');
+
+    const sectionNeedsGeoLogs = isSuper && resolvedActiveSection === 'activity_logs';
+    const sectionNeedsInvites = (isSuper || isHead) && resolvedActiveSection === 'employee_management';
+    const sectionNeedsReports = resolvedActiveSection === 'reports';
+    const sectionNeedsEditRequests =
+      resolvedActiveSection === 'student_database' ||
+      resolvedActiveSection === 'fee_recovery' ||
+      resolvedActiveSection === 'practical' ||
+      resolvedActiveSection === 'tma' ||
+      resolvedActiveSection === 'online_classes' ||
+      resolvedActiveSection === 'admission' ||
+      resolvedActiveSection === 'employee_management';
+
+    const loadSectionData = async () => {
+      const jobs: Array<Promise<void>> = [];
+
+      // 1. Students (60m cache — 0 reads on repeat visits & refreshes)
+      if (sectionNeedsStudents) {
+        if (students.length === 0) setDataLoading(true);
+        jobs.push(
+          fetchCollectionCached<Student>(
+            'students',
+            scopedCentre,
+            scopedQuery('students'),
+            CACHE_TTL_MS.BULK_DATA,
+          )
+            .then((items) => {
+              if (!cancelled) {
+                setStudents([...items].sort((a, b) => (b.serialNumber || 0) - (a.serialNumber || 0)));
+                setDataLoading(false);
+              }
+            })
+            .catch((err) => {
+              if (!cancelled) setDataLoading(false);
+              handleDataFetchError(err, OperationType.LIST, 'students');
+            }),
+        );
+      } else {
+        setDataLoading(false);
+      }
+
+      // 2. Department collections (60m cache, strictly on-demand)
+      const loadDeptIfNeeded = <T,>(
+        needed: boolean,
+        colName: string,
+        deptKey: string,
+        setter: (items: T[]) => void,
+        onFirstLoad?: () => void,
+      ) => {
+        if (!needed) return;
+        if (!isSuper && !isHead && userDepartment !== deptKey) {
+          setter([]);
+          onFirstLoad?.();
+          return;
+        }
+        jobs.push(
+          fetchCollectionCached<T>(
+            colName,
+            scopedCentre,
+            scopedQuery(colName),
+            CACHE_TTL_MS.BULK_DATA,
+          )
+            .then((items) => {
+              if (!cancelled) {
+                setter(items);
+                onFirstLoad?.();
+              }
+            })
+            .catch((err) => {
+              if (!cancelled) onFirstLoad?.();
+              handleDataFetchError(err, OperationType.LIST, colName);
+            }),
+        );
+      };
+
+      loadDeptIfNeeded<FeeRecoveryRecord>(
+        sectionNeedsFee,
+        'fee_recovery',
+        'fee_recovery',
+        setFeeRecords,
+        () => setFeeRecordsLoaded(true),
+      );
+      loadDeptIfNeeded<PracticalRecord>(
+        sectionNeedsPractical,
+        'practical_records',
+        'practical',
+        setPracticalRecords,
+      );
+      loadDeptIfNeeded<TmaRecord>(
+        sectionNeedsTma,
+        'tma_records',
+        'tma',
+        setTmaRecords,
+      );
+      loadDeptIfNeeded<OnlineClassRecord>(
+        sectionNeedsOnline,
+        'online_class_records',
+        'online_classes',
+        setOnlineClassRecords,
+        () => setOnlineClassRecordsLoaded(true),
+      );
+      loadDeptIfNeeded<AdmissionRecord>(
+        sectionNeedsAdmission,
+        'admission_records',
+        'admission',
+        setAdmissionRecords,
+      );
+
+      // 3. Admin/Centre Head Calling Tasks (10m cache, branch-scoped, only on Fee/Practical/TMA/Settings)
+      if (sectionNeedsAdminTasks) {
+        jobs.push(
+          fetchCollectionCached<WorkAssignmentTask>(
+            'work_assignment_tasks',
+            scopedCentre,
+            scopedQuery('work_assignment_tasks'),
+            CACHE_TTL_MS.OPERATIONAL,
+          )
+            .then((items) => {
+              if (!cancelled) setWorkAssignmentTasks(items);
+            })
+            .catch((err) => handleDataFetchError(err, OperationType.LIST, 'work_assignment_tasks')),
+        );
+      }
+
+      // 4. Activity Logs (only on Activity Logs / Centre Management, capped to 50)
+      if (sectionNeedsActivityLogs) {
+        const logCap = resolvedActiveSection === 'activity_logs' ? 60 : 20;
+        jobs.push(
+          fetchCollectionCached<ActivityLog>(
+            'activity_logs',
+            `cap_${logCap}`,
+            query(collection(db, 'activity_logs'), orderBy('createdAt', 'desc'), limit(logCap)),
+            CACHE_TTL_MS.OPERATIONAL,
+            { includeDocId: true },
+          )
+            .then((items) => {
+              if (!cancelled) {
+                setActivityLogs([...items].sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt)));
+              }
+            })
+            .catch((err) => handleDataFetchError(err, OperationType.LIST, 'activity_logs')),
+        );
+      }
+
+      // 5. Location Verifications (only on Activity Logs tab, capped to 40)
+      if (sectionNeedsGeoLogs) {
+        jobs.push(
+          fetchCollectionCached<LocationVerification>(
+            'location_verifications',
+            'cap_40',
+            query(collection(db, 'location_verifications'), orderBy('createdAt', 'desc'), limit(40)),
+            CACHE_TTL_MS.OPERATIONAL,
+            { includeDocId: true },
+          )
+            .then((items) => {
+              if (!cancelled) {
+                setLocationVerifications([...items].sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt)));
+              }
+            })
+            .catch((err) => handleDataFetchError(err, OperationType.LIST, 'location_verifications')),
+        );
+      }
+
+      // 6. Staff Invites (only on Employee Management tab)
+      if (sectionNeedsInvites) {
+        const invitesQuery = isSuper
+          ? query(collection(db, 'staff_invites'))
+          : query(collection(db, 'staff_invites'), where('centreId', '==', userCentreId));
+        jobs.push(
+          fetchCollectionCached<StaffInvite>(
+            'staff_invites',
+            isSuper ? 'all' : userCentreId,
+            invitesQuery,
+            CACHE_TTL_MS.OPERATIONAL,
+          )
+            .then((items) => {
+              if (!cancelled) setStaffInvites(items);
+            })
+            .catch((err) => handleDataFetchError(err, OperationType.LIST, 'staff_invites')),
+        );
+      }
+
+      // 7. Employee Daily Work Reports (only on Reports tab)
+      if (sectionNeedsReports) {
+        const reportsQuery = isSuper
+          ? query(collection(db, 'employee_reports'), orderBy('createdAt', 'desc'), limit(60))
+          : isHead
+            ? query(collection(db, 'employee_reports'), where('centreId', '==', userCentreId), limit(50))
+            : query(collection(db, 'employee_reports'), where('employeeUid', '==', userUid), limit(30));
+        jobs.push(
+          fetchCollectionCached<EmployeeReport>(
+            'employee_reports',
+            isSuper ? 'all' : isHead ? userCentreId : userUid,
+            reportsQuery,
+            CACHE_TTL_MS.OPERATIONAL,
+          )
+            .then((items) => {
+              if (!cancelled) {
+                setEmployeeReports([...items].sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt)));
+              }
+            })
+            .catch((err) => handleDataFetchError(err, OperationType.LIST, 'employee_reports')),
+        );
+      }
+
+      // 8. Edit Requests (only on department / database / employee tabs, capped to 30)
+      if (sectionNeedsEditRequests) {
+        const editReqQuery = isSuper
+          ? query(collection(db, 'edit_requests'), orderBy('createdAt', 'desc'), limit(30))
+          : isHead
+            ? query(collection(db, 'edit_requests'), where('centreId', '==', userCentreId), limit(30))
+            : query(collection(db, 'edit_requests'), where('requesterUid', '==', userUid), limit(20));
+        jobs.push(
+          fetchCollectionCached<EditRequest>(
+            'edit_requests',
+            isSuper ? 'all' : isHead ? userCentreId : userUid,
+            editReqQuery,
+            CACHE_TTL_MS.OPERATIONAL,
+          )
+            .then((items) => {
+              if (!cancelled) {
+                setEditRequests([...items].sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt)));
+              }
+            })
+            .catch((err) => handleDataFetchError(err, OperationType.LIST, 'edit_requests')),
+        );
+      }
+
+      await Promise.all(jobs);
+      if (!cancelled) {
+        setManualSyncing(false);
+      }
+    };
+
+    void loadSectionData();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    userUid,
+    userRole,
+    userCentreId,
+    userDepartment,
+    selectedCentreFilter,
+    resolvedActiveSection,
+    isEmployeeInCallingBox,
+    cacheVersion,
+    handleDataFetchError,
+  ]);
+
+  // Manual 1-click Sync: refreshes ONLY the active tab's collections fresh from Firestore
+  const handleManualSync = useCallback(() => {
+    setManualSyncing(true);
+    const colsToRefresh: string[] = ['notifications'];
+    switch (resolvedActiveSection) {
+      case 'overview':
+        colsToRefresh.push('students', 'fee_recovery');
+        break;
+      case 'student_database':
+        colsToRefresh.push('students', 'fee_recovery', 'excel_sheet_configs', 'edit_requests');
+        break;
+      case 'fee_recovery':
+        colsToRefresh.push('students', 'fee_recovery', 'work_assignments', 'work_assignment_tasks', 'edit_requests');
+        break;
+      case 'practical':
+        colsToRefresh.push('students', 'practical_records', 'work_assignments', 'work_assignment_tasks', 'edit_requests');
+        break;
+      case 'tma':
+        colsToRefresh.push('students', 'tma_records', 'work_assignments', 'work_assignment_tasks', 'edit_requests');
+        break;
+      case 'online_classes':
+        colsToRefresh.push('students', 'online_class_records', 'edit_requests');
+        break;
+      case 'admission':
+        colsToRefresh.push('students', 'admission_records', 'edit_requests');
+        break;
+      case 'employee_management':
+        colsToRefresh.push('users', 'staff_invites', 'edit_requests');
+        break;
+      case 'reports':
+        colsToRefresh.push('students', 'fee_recovery', 'practical_records', 'tma_records', 'online_class_records', 'admission_records', 'employee_reports');
+        break;
+      case 'centre_management':
+        colsToRefresh.push('centres', 'users', 'students', 'fee_recovery', 'activity_logs');
+        break;
+      case 'activity_logs':
+        colsToRefresh.push('activity_logs', 'location_verifications');
+        break;
+      case 'settings':
+        colsToRefresh.push('system_settings', 'centres', 'excel_sheet_configs');
+        break;
+      default:
+        colsToRefresh.push('students');
+    }
+    invalidateCacheForCollections(colsToRefresh);
+    setCacheVersion((v) => v + 1);
+  }, [resolvedActiveSection]);
 
   // One-time baseline reset: sets existing Online Attendance (100% default from earlier imports) to 0%
   // while leaving any future attendance updates completely untouched.
@@ -860,16 +1210,6 @@ export default function App() {
     })();
   }, [currentUser, dataLoading, sheetConfigsLoaded, sheetConfigs, students, notify]);
 
-  const activeAssignedDepartments: WorkAssignmentDepartment[] = currentUser
-    ? Array.from(
-        new Set(
-          workAssignments
-            .filter((a) => a.staffUid === currentUser.uid && a.status === 'Active')
-            .map((a) => a.department),
-        ),
-      )
-    : [];
-
   const handleSelectSection = (section: NavSection) => {
     if (!currentUser) return;
     if (!canUserAccessSection(currentUser, section, activeAssignedDepartments)) {
@@ -963,6 +1303,8 @@ export default function App() {
         onSelectSection={handleSelectSection}
         onChangeCentreFilter={handleChangeCentreFilter}
         onChangeGlobalSearch={setGlobalSearch}
+        onSync={handleManualSync}
+        syncing={manualSyncing}
         onLogout={handleLogout}
       >
         {safeSection === 'overview' && (

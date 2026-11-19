@@ -558,8 +558,9 @@ export const WorkAssignmentModal: React.FC<WorkAssignmentModalProps> = ({
                 <select
                   id="wa-centre-select"
                   value={centreId}
+                  disabled={selectedCentreFilter !== 'all'}
                   onChange={(e) => handleBranchChange(e.target.value as CentreId)}
-                  className="w-full px-3 py-2 text-xs font-semibold bg-white text-slate-900 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900"
+                  className="w-full px-3 py-2 text-xs font-semibold bg-white text-slate-900 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900 disabled:bg-slate-100 disabled:text-slate-700"
                 >
                   {CANONICAL_CENTRES.map((c) => (
                     <option key={c.id} value={c.id}>
@@ -567,6 +568,11 @@ export const WorkAssignmentModal: React.FC<WorkAssignmentModalProps> = ({
                     </option>
                   ))}
                 </select>
+                {selectedCentreFilter !== 'all' && (
+                  <p className="text-[10px] text-slate-500 mt-0.5">
+                    Doosri branch ke liye top bar se branch switch karein.
+                  </p>
+                )}
               </div>
             )}
 

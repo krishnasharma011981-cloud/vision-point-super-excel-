@@ -15,6 +15,7 @@ import {
   MonitorPlay,
   PanelLeftClose,
   PanelLeftOpen,
+  RefreshCw,
   Search,
   Settings,
   User,
@@ -43,6 +44,8 @@ interface DashboardShellProps {
   onSelectSection: (section: NavSection) => void;
   onChangeCentreFilter: (centreId: CentreId | 'all') => void;
   onChangeGlobalSearch: (value: string) => void;
+  onSync?: () => void;
+  syncing?: boolean;
   onLogout: () => void;
   children: React.ReactNode;
 }
@@ -100,6 +103,8 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
   onSelectSection,
   onChangeCentreFilter,
   onChangeGlobalSearch,
+  onSync,
+  syncing = false,
   onLogout,
   children,
 }) => {
@@ -303,6 +308,20 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
                   ))}
                 </select>
               </div>
+            )}
+
+            {onSync && (
+              <button
+                type="button"
+                onClick={onSync}
+                disabled={syncing}
+                title="Refresh latest data for this tab from server"
+                aria-label="Sync latest data"
+                className="inline-flex items-center gap-1.5 px-2.5 py-2 text-xs font-semibold text-[#0F172A] hover:bg-slate-100 bg-white rounded-xl border border-slate-200 shadow-2xs disabled:opacity-60"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 text-[#DC2626] ${syncing ? 'animate-spin' : ''}`} />
+                <span className="hidden md:inline">{syncing ? 'Syncing' : 'Sync'}</span>
+              </button>
             )}
 
             {/* Notifications */}

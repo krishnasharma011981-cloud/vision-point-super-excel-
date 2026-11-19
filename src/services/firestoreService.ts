@@ -4,6 +4,7 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocFromCache,
   getDocs,
   orderBy,
   query,
@@ -23,6 +24,11 @@ import {
 import { computeFeeSyncPlanFromStudents, isUntouchedAutoImportDefaultFee } from '../lib/analyticsMath';
 import { countStudentSubjects, isMockSubjectValue, sanitizeRealSubject } from '../lib/csvUtils';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
+import {
+  CACHE_TTL_MS,
+  emitCollectionsMutated,
+  fetchDocumentCached,
+} from '../lib/firestoreCache';
 import type {
   ActivityLog,
   AdmissionRecord,
@@ -127,6 +133,11 @@ export async function logActivity(entry: Omit<ActivityLog, 'createdAt' | 'id'>):
       ...entry,
       createdAt: serverTimestamp(),
     });
+    if (entry.targetCollection) {
+      emitCollectionsMutated([entry.targetCollection, 'activity_logs']);
+    } else {
+      emitCollectionsMutated(['activity_logs']);
+    }
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, path);
   }
@@ -139,6 +150,7 @@ export async function createNotification(entry: Omit<NotificationItem, 'createdA
       ...entry,
       createdAt: serverTimestamp(),
     });
+    emitCollectionsMutated(['notifications']);
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, path);
   }
@@ -148,16 +160,26 @@ export async function markNotificationRead(id: string): Promise<void> {
   const path = `notifications/${id}`;
   try {
     await updateDoc(doc(db, 'notifications', id), { read: true });
+    emitCollectionsMutated(['notifications']);
   } catch (err) {
     handleFirestoreError(err, OperationType.UPDATE, path);
   }
 }
 
-export async function getUserProfile(uid: string): Promise<UserAccount | null> {
+export async function getUserProfile(
+  uid: string,
+  options?: { forceServer?: boolean },
+): Promise<UserAccount | null> {
   const path = `users/${uid}`;
+  const ref = doc(db, 'users', uid);
   try {
-    const snap = await getDoc(doc(db, 'users', uid));
-    return snap.exists() ? (snap.data() as UserAccount) : null;
+    return await fetchDocumentCached<UserAccount>(
+      'users',
+      `profile:${uid}`,
+      ref,
+      CACHE_TTL_MS.PROFILE,
+      { forceServer: options?.forceServer },
+    );
   } catch (err) {
     handleFirestoreError(err, OperationType.GET, path);
   }
@@ -4327,19 +4349,17 @@ export async function updateWorkAssignmentTask(
       if (combinedRemark) {
         try {
           const deptRef = doc(db, colName, task.studentId);
-          const deptSnap = await getDoc(deptRef);
-          if (deptSnap.exists()) {
-            await updateDoc(deptRef, {
-              remarks: combinedRemark,
-              updatedBy: actor.uid,
-              updatedAt: serverTimestamp(),
-            });
-          }
+          await updateDoc(deptRef, {
+            remarks: combinedRemark,
+            updatedBy: actor.uid,
+            updatedAt: serverTimestamp(),
+          });
         } catch {
-          // Non-blocking fallback
+          // Non-blocking fallback (e.g., if department doc doesn't exist yet)
         }
       }
     }
+    emitCollectionsMutated(['work_assignment_tasks']);
   } catch (err) {
     handleFirestoreError(err, OperationType.UPDATE, path);
   }
@@ -4359,6 +4379,7 @@ export async function updateWorkAssignmentStatus(
       status,
       updatedAt: serverTimestamp(),
     });
+    emitCollectionsMutated(['work_assignments']);
   } catch (err) {
     handleFirestoreError(err, OperationType.UPDATE, path);
   }
@@ -4643,6 +4664,20 @@ export async function restoreFullDatabaseBackup(
     details: `Restored ${totalRestored} records from backup JSON (students: ${restoredCounts.students || 0}, fees: ${restoredCounts.fee_recovery || 0}, skipped: ${skippedCount}, failed: ${failedCount}).`,
     locationVerified: true,
   }).catch(() => {});
+
+  emitCollectionsMutated([
+    'centres',
+    'excel_sheet_configs',
+    'students',
+    'fee_recovery',
+    'practical_records',
+    'tma_records',
+    'online_class_records',
+    'admission_records',
+    'work_assignments',
+    'work_assignment_tasks',
+    'system_settings',
+  ]);
 
   return { restoredCounts, skippedCount, failedCount, totalRestored };
 }

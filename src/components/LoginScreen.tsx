@@ -23,7 +23,12 @@ import {
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import React, { useEffect, useState } from 'react';
 import { CENTRE_MAP, isBootstrappedOwnerEmail } from '../constants/centres';
-import { auth } from '../lib/firebase';
+import {
+  auth,
+  FIRESTORE_UPGRADE_URL,
+  formatFirestoreUserError,
+  isFirestoreQuotaError,
+} from '../lib/firebase';
 import { verifySuperAdminOwnerOnServer } from '../lib/securityClient';
 import {
   claimPendingStaffInvite,
@@ -71,6 +76,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   const [passwordTouched, setPasswordTouched] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(externalError || null);
+  const [isQuotaError, setIsQuotaError] = useState<boolean>(() => isFirestoreQuotaError(externalError));
 
   const [showResetModal, setShowResetModal] = useState(false);
   const [resetEmail, setResetEmail] = useState('');
@@ -192,6 +198,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   const handleEmailLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+    setIsQuotaError(false);
     setEmailTouched(true);
     setPasswordTouched(true);
 
@@ -272,8 +279,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
         );
       } else if (code === 'auth/too-many-requests') {
         setErrorMsg('Too many failed attempts. Please wait a few minutes or reset your password.');
+      } else if (isFirestoreQuotaError(err)) {
+        setIsQuotaError(true);
+        setErrorMsg(formatFirestoreUserError(err));
       } else {
-        setErrorMsg(err instanceof Error ? err.message : 'Authentication failed.');
+        setErrorMsg(formatFirestoreUserError(err) || 'Authentication failed.');
       }
     } finally {
       onAuthFlowChange?.(false);
@@ -451,10 +461,25 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                     className="relative z-10 mt-4 px-3.5 py-2.5 rounded-xl bg-[#FFF0F3] border border-[#C8102E]/45 shadow-sm flex items-start gap-2.5 text-xs text-[#9B0015] leading-snug"
                   >
                     <AlertTriangle className="w-4 h-4 text-[#C8102E] shrink-0 mt-0.5" />
-                    <span className="flex-1 min-w-0 font-medium break-words">{errorMsg}</span>
+                    <div className="flex-1 min-w-0 space-y-1.5">
+                      <span className="block font-medium break-words">{errorMsg}</span>
+                      {isQuotaError && (
+                        <a
+                          href={FIRESTORE_UPGRADE_URL}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 font-bold text-[#C8102E] underline underline-offset-2 hover:text-[#9B0015]"
+                        >
+                          Open Firebase Database Upgrade Console →
+                        </a>
+                      )}
+                    </div>
                     <button
                       type="button"
-                      onClick={() => setErrorMsg(null)}
+                      onClick={() => {
+                        setErrorMsg(null);
+                        setIsQuotaError(false);
+                      }}
                       className="text-[#9B0015]/70 hover:text-[#9B0015] p-0.5 shrink-0"
                       aria-label="Dismiss alert"
                     >
