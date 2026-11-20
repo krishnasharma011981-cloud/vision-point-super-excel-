@@ -25,6 +25,7 @@ import React, { useEffect, useState } from 'react';
 import { CENTRE_MAP, isBootstrappedOwnerEmail } from '../constants/centres';
 import {
   auth,
+  CURRENT_FIREBASE_PROJECT_ID,
   FIRESTORE_UPGRADE_URL,
   formatFirestoreUserError,
   isFirestoreQuotaError,
@@ -96,7 +97,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   }>({
     checked: false,
     emailPasswordEnabled: true,
-    projectId: 'database-security-32018',
+    projectId: CURRENT_FIREBASE_PROJECT_ID,
   });
   const [checkingProvider, setCheckingProvider] = useState(false);
 
@@ -122,7 +123,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
         setProviderStatus({
           checked: true,
           emailPasswordEnabled: data.emailPasswordEnabled !== false,
-          projectId: data.projectId || 'database-security-32018',
+          projectId: data.projectId || CURRENT_FIREBASE_PROJECT_ID,
         });
         if (data.emailPasswordEnabled !== false) {
           setErrorMsg(null);

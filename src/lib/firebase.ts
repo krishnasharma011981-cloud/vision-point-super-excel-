@@ -33,6 +33,7 @@ try {
 export const db: Firestore = dbInstance;
 export const auth = getAuth(app);
 
+export const CURRENT_FIREBASE_PROJECT_ID = firebaseConfig.projectId || 'unknown';
 export const FIRESTORE_UPGRADE_URL = `https://console.firebase.google.com/project/${firebaseConfig.projectId}/firestore/databases/${firebaseConfig.firestoreDatabaseId}/data?openUpgradeDialog=true`;
 
 export enum OperationType {

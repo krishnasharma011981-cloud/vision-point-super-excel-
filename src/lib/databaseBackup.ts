@@ -1,13 +1,17 @@
-import { CANONICAL_CENTRES, CENTRE_MAP } from '../constants/centres';
+import * as XLSX from 'xlsx';
+import { CANONICAL_CENTRES, CENTRE_MAP, DEPARTMENT_LABELS, ROLE_LABELS } from '../constants/centres';
 import { sanitizeFirestoreDocId } from './workAssignment';
 import type {
   AdmissionRecord,
   Centre,
   CentreId,
+  EditRequest,
+  EmployeeReport,
   ExcelSheetConfig,
   FeeRecoveryRecord,
   OnlineClassRecord,
   PracticalRecord,
+  StaffInvite,
   Student,
   SystemSettings,
   TmaRecord,
@@ -19,7 +23,7 @@ import type {
 } from '../types/domain';
 
 export interface FullDatabaseBackupPayload {
-  version: 2;
+  version: 2 | 3;
   exportedAt: string;
   exportedBy: string;
   centres: Record<string, unknown>[];
@@ -33,6 +37,9 @@ export interface FullDatabaseBackupPayload {
   work_assignments: Record<string, unknown>[];
   work_assignment_tasks: Record<string, unknown>[];
   users: Record<string, unknown>[];
+  staff_invites: Record<string, unknown>[];
+  employee_reports: Record<string, unknown>[];
+  edit_requests: Record<string, unknown>[];
   settings: Record<string, unknown> | null;
 }
 
@@ -48,11 +55,15 @@ export interface BackupSummaryCounts {
   work_assignments: number;
   work_assignment_tasks: number;
   users: number;
+  staff_invites: number;
+  employee_reports: number;
+  edit_requests: number;
   hasSettings: boolean;
   totalDocuments: number;
 }
 
 export interface RestorableStaffProfile {
+  legacyUid?: string;
   fullName: string;
   email: string;
   mobileNumber: string;
@@ -157,6 +168,44 @@ function normalizeCollectionArray(raw: unknown): Record<string, unknown>[] {
   return [];
 }
 
+export function computeBackupSummary(backup: FullDatabaseBackupPayload): BackupSummaryCounts {
+  const totalDocuments =
+    backup.centres.length +
+    backup.students.length +
+    backup.fee_recovery.length +
+    backup.practical_records.length +
+    backup.tma_records.length +
+    backup.online_class_records.length +
+    backup.admission_records.length +
+    backup.excel_sheet_configs.length +
+    backup.work_assignments.length +
+    backup.work_assignment_tasks.length +
+    backup.users.length +
+    backup.staff_invites.length +
+    backup.employee_reports.length +
+    backup.edit_requests.length +
+    (backup.settings ? 1 : 0);
+
+  return {
+    centres: backup.centres.length,
+    students: backup.students.length,
+    fee_recovery: backup.fee_recovery.length,
+    practical_records: backup.practical_records.length,
+    tma_records: backup.tma_records.length,
+    online_class_records: backup.online_class_records.length,
+    admission_records: backup.admission_records.length,
+    excel_sheet_configs: backup.excel_sheet_configs.length,
+    work_assignments: backup.work_assignments.length,
+    work_assignment_tasks: backup.work_assignment_tasks.length,
+    users: backup.users.length,
+    staff_invites: backup.staff_invites.length,
+    employee_reports: backup.employee_reports.length,
+    edit_requests: backup.edit_requests.length,
+    hasSettings: Boolean(backup.settings),
+    totalDocuments,
+  };
+}
+
 export function buildFullDatabaseBackupPayload(params: {
   exportedBy: string;
   centres: Centre[];
@@ -170,10 +219,13 @@ export function buildFullDatabaseBackupPayload(params: {
   workAssignments: WorkAssignment[];
   workAssignmentTasks: WorkAssignmentTask[];
   users: UserAccount[];
+  staffInvites?: StaffInvite[];
+  employeeReports?: EmployeeReport[];
+  editRequests?: EditRequest[];
   settings: SystemSettings | null;
 }): FullDatabaseBackupPayload {
   return {
-    version: 2,
+    version: 3,
     exportedAt: new Date().toISOString(),
     exportedBy: params.exportedBy,
     centres: params.centres.map((c) => serializeValueForExport(c) as Record<string, unknown>),
@@ -189,18 +241,25 @@ export function buildFullDatabaseBackupPayload(params: {
     work_assignments: params.workAssignments.map((w) => serializeValueForExport(w) as Record<string, unknown>),
     work_assignment_tasks: params.workAssignmentTasks.map((t) => serializeValueForExport(t) as Record<string, unknown>),
     users: params.users.map((u) => serializeValueForExport(u) as Record<string, unknown>),
+    staff_invites: (params.staffInvites || []).map((inv) => serializeValueForExport(inv) as Record<string, unknown>),
+    employee_reports: (params.employeeReports || []).map((rep) => serializeValueForExport(rep) as Record<string, unknown>),
+    edit_requests: (params.editRequests || []).map((req) => serializeValueForExport(req) as Record<string, unknown>),
     settings: params.settings ? (serializeValueForExport(params.settings) as Record<string, unknown>) : null,
   };
 }
 
-export function extractRestorableStaffProfiles(usersRaw: Record<string, unknown>[]): RestorableStaffProfile[] {
+export function extractRestorableStaffProfiles(
+  usersRaw: Record<string, unknown>[],
+  invitesRaw: Record<string, unknown>[] = [],
+): RestorableStaffProfile[] {
   const seenEmails = new Set<string>();
   const list: RestorableStaffProfile[] = [];
-  for (const raw of usersRaw) {
+
+  const ingest = (raw: Record<string, unknown>, isInvite: boolean) => {
     const roleRaw = String(raw.role || '').trim();
-    if (roleRaw !== 'centre_head' && roleRaw !== 'employee') continue;
+    if (roleRaw !== 'centre_head' && roleRaw !== 'employee') return;
     const email = cleanStr(raw.email, 160).toLowerCase();
-    if (!email || !email.includes('@') || seenEmails.has(email)) continue;
+    if (!email || !email.includes('@') || seenEmails.has(email)) return;
     seenEmails.add(email);
     const centreId = resolveCentreId(raw.centreId);
     const deptRaw = String(raw.department || '').trim();
@@ -210,8 +269,10 @@ export function extractRestorableStaffProfiles(usersRaw: Record<string, unknown>
         : VALID_DEPARTMENTS.has(deptRaw) && deptRaw !== 'all'
           ? (deptRaw as UserDepartment)
           : 'fee_recovery';
+    const rawUid = !isInvite ? sanitizeFirestoreDocId(String(raw.uid || raw._docId || ''), 128) : '';
 
     list.push({
+      legacyUid: rawUid || undefined,
       fullName: cleanMinStr(raw.fullName, 2, 100, email.split('@')[0] || 'Staff Member'),
       email,
       mobileNumber: cleanStr(raw.mobileNumber, 20),
@@ -222,7 +283,10 @@ export function extractRestorableStaffProfiles(usersRaw: Record<string, unknown>
       joiningDate: cleanMinStr(raw.joiningDate, 4, 30, new Date().toISOString().slice(0, 10)),
       status: raw.status === 'Inactive' ? 'Inactive' : 'Active',
     });
-  }
+  };
+
+  for (const raw of usersRaw) ingest(raw, false);
+  for (const raw of invitesRaw) ingest(raw, true);
   return list;
 }
 
@@ -267,6 +331,9 @@ export function parseBackupJson(rawText: string): ParseBackupResult {
   const work_assignments = pick('work_assignments', 'workAssignments');
   const work_assignment_tasks = pick('work_assignment_tasks', 'workAssignmentTasks');
   const users = pick('users');
+  const staff_invites = pick('staff_invites', 'staffInvites');
+  const employee_reports = pick('employee_reports', 'employeeReports');
+  const edit_requests = pick('edit_requests', 'editRequests');
   const settingsRaw = nestedCollections.system_settings ?? obj.settings ?? obj.systemSettings ?? null;
   let settings: Record<string, unknown> | null = null;
   if (settingsRaw && typeof settingsRaw === 'object' && !Array.isArray(settingsRaw)) {
@@ -277,28 +344,8 @@ export function parseBackupJson(rawText: string): ParseBackupResult {
         : sObj;
   }
 
-  const totalDocuments =
-    centres.length +
-    students.length +
-    fee_recovery.length +
-    practical_records.length +
-    tma_records.length +
-    online_class_records.length +
-    admission_records.length +
-    excel_sheet_configs.length +
-    work_assignments.length +
-    work_assignment_tasks.length +
-    (settings ? 1 : 0);
-
-  if (totalDocuments === 0 && users.length === 0) {
-    return {
-      ok: false,
-      error: 'No recognizable database collections (students, centres, fee_recovery, etc.) found inside this JSON file.',
-    };
-  }
-
   const backup: FullDatabaseBackupPayload = {
-    version: 2,
+    version: 3,
     exportedAt: cleanStr(obj.exportedAt, 40, new Date().toISOString()),
     exportedBy: cleanStr(obj.exportedBy, 160, 'unknown'),
     centres,
@@ -312,28 +359,26 @@ export function parseBackupJson(rawText: string): ParseBackupResult {
     work_assignments,
     work_assignment_tasks,
     users,
+    staff_invites,
+    employee_reports,
+    edit_requests,
     settings,
   };
+
+  const summary = computeBackupSummary(backup);
+
+  if (summary.totalDocuments === 0) {
+    return {
+      ok: false,
+      error: 'No recognizable database collections (students, employees, centres, fee_recovery, etc.) found inside this JSON file.',
+    };
+  }
 
   return {
     ok: true,
     backup,
-    summary: {
-      centres: centres.length,
-      students: students.length,
-      fee_recovery: fee_recovery.length,
-      practical_records: practical_records.length,
-      tma_records: tma_records.length,
-      online_class_records: online_class_records.length,
-      admission_records: admission_records.length,
-      excel_sheet_configs: excel_sheet_configs.length,
-      work_assignments: work_assignments.length,
-      work_assignment_tasks: work_assignment_tasks.length,
-      users: users.length,
-      hasSettings: Boolean(settings),
-      totalDocuments,
-    },
-    staffProfiles: extractRestorableStaffProfiles(users),
+    summary,
+    staffProfiles: extractRestorableStaffProfiles(users, staff_invites),
   };
 }
 
@@ -662,4 +707,391 @@ export function sanitizeWorkAssignmentTaskForRestore(
       updatedBy: cleanMinStr(actorUid, 1, 128, 'system'),
     },
   };
+}
+
+export function sanitizeUserForRestore(
+  raw: Record<string, unknown>,
+  actorUid: string,
+): { id: string; data: Record<string, unknown> } | null {
+  const email = cleanStr(raw.email, 160).toLowerCase();
+  if (!email || !email.includes('@') || email.length < 5) return null;
+  const roleRaw = String(raw.role || '').trim();
+  const role: UserRole =
+    roleRaw === 'super_admin' || roleRaw === 'centre_head' || roleRaw === 'employee'
+      ? roleRaw
+      : 'employee';
+  const centreId = resolveCentreId(raw.centreId);
+  const deptRaw = String(raw.department || '').trim();
+  const department: UserDepartment =
+    role === 'super_admin' || role === 'centre_head'
+      ? 'all'
+      : VALID_DEPARTMENTS.has(deptRaw) && deptRaw !== 'all'
+        ? (deptRaw as UserDepartment)
+        : 'fee_recovery';
+
+  const id = resolveValidDocId(raw.uid || raw._docId, 'staff');
+  const today = new Date().toISOString().slice(0, 10);
+
+  return {
+    id,
+    data: {
+      uid: id,
+      fullName: cleanMinStr(raw.fullName, 2, 100, email.split('@')[0] || 'Staff Member'),
+      email,
+      mobileNumber: cleanStr(raw.mobileNumber, 20),
+      role,
+      centreId,
+      centreName: cleanMinStr(raw.centreName, 2, 120, CENTRE_MAP[centreId].name),
+      department,
+      status: raw.status === 'Inactive' ? 'Inactive' : 'Active',
+      joiningDate: cleanMinStr(raw.joiningDate, 4, 30, today),
+      createdBy: cleanMinStr(raw.createdBy, 1, 128, actorUid),
+      updatedBy: cleanMinStr(actorUid, 1, 128, 'system'),
+    },
+  };
+}
+
+export function sanitizeStaffInviteForRestore(
+  raw: Record<string, unknown>,
+  actorUid: string,
+  actorName: string,
+): { id: string; data: Record<string, unknown> } | null {
+  const email = cleanStr(raw.email, 160).toLowerCase();
+  if (!email || !email.includes('@') || email.length < 5) return null;
+  const roleRaw = String(raw.role || '').trim();
+  if (roleRaw !== 'centre_head' && roleRaw !== 'employee') return null;
+
+  const centreId = resolveCentreId(raw.centreId);
+  const deptRaw = String(raw.department || '').trim();
+  const department: UserDepartment =
+    roleRaw === 'centre_head'
+      ? 'all'
+      : VALID_DEPARTMENTS.has(deptRaw) && deptRaw !== 'all'
+        ? (deptRaw as UserDepartment)
+        : 'fee_recovery';
+
+  const id = resolveValidDocId(raw.inviteId || raw._docId, 'inv');
+  const today = new Date().toISOString().slice(0, 10);
+
+  // firestore.rules requires status == 'Pending' and claimedUid == '' on create
+  return {
+    id,
+    data: {
+      inviteId: id,
+      fullName: cleanMinStr(raw.fullName, 2, 100, email.split('@')[0] || 'Staff Member'),
+      email,
+      mobileNumber: cleanStr(raw.mobileNumber, 20),
+      role: roleRaw,
+      centreId,
+      centreName: cleanMinStr(raw.centreName, 2, 120, CENTRE_MAP[centreId].name),
+      department,
+      joiningDate: cleanMinStr(raw.joiningDate, 4, 30, today),
+      status: 'Pending',
+      claimedUid: '',
+      invitedBy: cleanMinStr(actorUid, 1, 128, 'system'),
+      invitedByName: cleanMinStr(raw.invitedByName, 1, 100, actorName || 'Super Admin'),
+    },
+  };
+}
+
+export function sanitizeEmployeeReportForRestore(
+  raw: Record<string, unknown>,
+  actorUid: string,
+): { id: string; data: Record<string, unknown> } {
+  const id = resolveValidDocId(raw.reportId || raw._docId, 'rep');
+  const centreId = resolveCentreId(raw.centreId);
+  const roleRaw = String(raw.role || '').trim();
+  const role: UserRole =
+    roleRaw === 'super_admin' || roleRaw === 'centre_head' || roleRaw === 'employee'
+      ? roleRaw
+      : 'employee';
+  const deptRaw = String(raw.department || '').trim();
+  const department: UserDepartment = VALID_DEPARTMENTS.has(deptRaw) ? (deptRaw as UserDepartment) : 'all';
+  const today = new Date().toISOString().slice(0, 10);
+
+  // firestore.rules requires employeeUid == request.auth.uid and status == 'Submitted' on create
+  return {
+    id,
+    data: {
+      reportId: id,
+      employeeUid: cleanMinStr(actorUid, 1, 128, 'system'),
+      employeeName: cleanMinStr(raw.employeeName, 2, 100, 'Staff Member'),
+      employeeEmail: cleanMinStr(raw.employeeEmail, 5, 160, 'staff@visionpoint.edu'),
+      role,
+      centreId,
+      centreName: cleanMinStr(raw.centreName, 2, 120, CENTRE_MAP[centreId].name),
+      department,
+      reportDate: cleanMinStr(raw.reportDate, 4, 30, today),
+      title: cleanMinStr(raw.title, 3, 160, 'Daily Work Report'),
+      summary: cleanMinStr(raw.summary, 5, 2000, 'Restored report summary'),
+      tasksCompleted: Math.round(cleanNum(raw.tasksCompleted, 0, 10000, 0)),
+      studentsHandled: Math.round(cleanNum(raw.studentsHandled, 0, 10000, 0)),
+      pendingIssues: cleanStr(raw.pendingIssues, 1000),
+      status: 'Submitted',
+      reviewerName: cleanStr(raw.reviewerName, 100),
+      reviewerNote: cleanStr(raw.reviewerNote, 1000),
+    },
+  };
+}
+
+function appendSheetWithWidths(
+  wb: XLSX.WorkBook,
+  sheetName: string,
+  rows: Record<string, unknown>[],
+): void {
+  const safeName = sheetName.replace(/[\\/?*[\]:]/g, '').slice(0, 31) || 'Sheet';
+  const safeRows = rows.length > 0 ? rows : [{ Info: 'No records' }];
+  const ws = XLSX.utils.json_to_sheet(safeRows);
+  const headers = Object.keys(safeRows[0] || {});
+  ws['!cols'] = headers.map((header) => {
+    let maxLen = header.length;
+    for (let i = 0; i < Math.min(safeRows.length, 250); i += 1) {
+      const val = safeRows[i][header];
+      const len = val == null ? 0 : String(val).length;
+      if (len > maxLen) maxLen = len;
+    }
+    return { wch: Math.min(48, Math.max(12, maxLen + 3)) };
+  });
+  XLSX.utils.book_append_sheet(wb, ws, safeName);
+}
+
+/**
+ * Exports the entire institution (Employee Management + All Students with dynamic Excel columns +
+ * all 5 Departments + Calling Work + Daily Reports + Centres) as a clean multi-sheet .xlsx workbook.
+ */
+export function exportFullInstitutionalWorkbookXlsx(
+  backup: FullDatabaseBackupPayload,
+  fileName?: string,
+): void {
+  const wb = XLSX.utils.book_new();
+
+  // 1. Employee Management (Active/Inactive Accounts + Pending Invites)
+  const employeeRows: Record<string, unknown>[] = [];
+  for (const u of backup.users) {
+    const role = String(u.role || 'employee') as UserRole;
+    const dept = String(u.department || 'all') as UserDepartment;
+    employeeRows.push({
+      'Record Type': 'Staff Account',
+      UID: u.uid ?? '',
+      'Full Name': u.fullName ?? '',
+      Email: u.email ?? '',
+      'Mobile Number': u.mobileNumber ?? '',
+      Role: ROLE_LABELS[role] || role,
+      Branch: u.centreName ?? u.centreId ?? '',
+      Department: DEPARTMENT_LABELS[dept] || dept,
+      Status: u.status ?? 'Active',
+      'Joining Date': u.joiningDate ?? '',
+    });
+  }
+  for (const inv of backup.staff_invites) {
+    const role = String(inv.role || 'employee') as UserRole;
+    const dept = String(inv.department || 'all') as UserDepartment;
+    employeeRows.push({
+      'Record Type': 'Pending Staff Invite',
+      UID: inv.inviteId ?? '',
+      'Full Name': inv.fullName ?? '',
+      Email: inv.email ?? '',
+      'Mobile Number': inv.mobileNumber ?? '',
+      Role: ROLE_LABELS[role] || role,
+      Branch: inv.centreName ?? inv.centreId ?? '',
+      Department: DEPARTMENT_LABELS[dept] || dept,
+      Status: inv.status ?? 'Pending',
+      'Joining Date': inv.joiningDate ?? '',
+    });
+  }
+  appendSheetWithWidths(wb, 'Employee Management', employeeRows);
+
+  // 2. All Students (with ALL dynamic Excel extraColumns!)
+  const extraColumnKeys = new Set<string>();
+  for (const cfg of backup.excel_sheet_configs) {
+    if (Array.isArray(cfg.customColumns)) {
+      for (const col of cfg.customColumns) {
+        const key = String(col || '').trim();
+        if (key) extraColumnKeys.add(key);
+      }
+    }
+  }
+  for (const s of backup.students) {
+    if (s.extraColumns && typeof s.extraColumns === 'object' && !Array.isArray(s.extraColumns)) {
+      for (const key of Object.keys(s.extraColumns as Record<string, unknown>)) {
+        if (key.trim()) extraColumnKeys.add(key.trim());
+      }
+    }
+  }
+  const orderedExtraCols = Array.from(extraColumnKeys);
+
+  const sortedStudents = [...backup.students].sort(
+    (a, b) => Number(a.serialNumber || 0) - Number(b.serialNumber || 0),
+  );
+  const studentRows = sortedStudents.map((s) => {
+    const extras =
+      s.extraColumns && typeof s.extraColumns === 'object' && !Array.isArray(s.extraColumns)
+        ? (s.extraColumns as Record<string, unknown>)
+        : {};
+    const row: Record<string, unknown> = {
+      'S.No': s.serialNumber ?? '',
+      'Student ID': s.studentId ?? '',
+      'Student Name': s.studentName ?? '',
+      'Mobile Number': s.mobileNumber ?? '',
+      Branch: s.centreName ?? s.centreId ?? '',
+      Subject: s.subject ?? '',
+      'Admission Date': s.admissionDate ?? '',
+      'TC Status': s.tcStatus ?? '',
+      'Book Status': s.bookStatus ?? '',
+      'Online Attendance': s.classAttendanceStatus ?? '',
+      'TMA Status': s.tmaStatus ?? '',
+      'Practical Status': s.practicalStatus ?? '',
+      'Exam Status': s.examinationStatus ?? '',
+      'TMA Fee': s.tmaFee ?? '',
+      'Exam Fee': s.examFee ?? '',
+      'Why NIOS': s.whyNios ?? '',
+      'Current Education': s.currentEducationStatus ?? '',
+      'Future Planning': s.futurePlanning ?? '',
+      'Assigned Staff': s.assignedEmployeeName ?? '',
+      Remarks: s.additionalRemarks ?? '',
+    };
+    for (const col of orderedExtraCols) {
+      row[col] = extras[col] ?? '';
+    }
+    if (s.rowColor) row['Row Color'] = s.rowColor;
+    return row;
+  });
+  appendSheetWithWidths(wb, 'All Students (Excel)', studentRows);
+
+  // 3. Fee Recovery
+  const feeRows = backup.fee_recovery.map((f) => ({
+    'Student ID': f.studentId ?? '',
+    'Student Name': f.studentName ?? '',
+    'Mobile Number': f.mobileNumber ?? '',
+    Branch: CENTRE_MAP[resolveCentreId(f.centreId)]?.name ?? f.centreId ?? '',
+    'Total Fee': f.totalFee ?? 0,
+    'Paid Amount': f.paidAmount ?? 0,
+    'Pending Amount': f.pendingAmount ?? 0,
+    'TMA Fee': f.tmaFee ?? 0,
+    'Exam Fee': f.examFee ?? 0,
+    'Recovery Status': f.recoveryStatus ?? '',
+    'Follow-Up Status': f.followUpStatus ?? '',
+    'Last Contact': f.lastContactDate ?? '',
+    'Next Follow-Up': f.nextFollowUpDate ?? '',
+    'Follow-Up Notes': f.followUpNotes ?? '',
+    'Assigned Staff': f.assignedEmployeeName ?? '',
+  }));
+  appendSheetWithWidths(wb, 'Fee Recovery', feeRows);
+
+  // 4. Practical
+  const practicalRows = backup.practical_records.map((p) => ({
+    'Student ID': p.studentId ?? '',
+    'Student Name': p.studentName ?? '',
+    Branch: CENTRE_MAP[resolveCentreId(p.centreId)]?.name ?? p.centreId ?? '',
+    'Practical Status': p.practicalStatus ?? '',
+    'Submission Status': p.submissionStatus ?? '',
+    'Completion %': p.completionPercentage ?? 0,
+    'Assigned Staff': p.assignedEmployeeName ?? '',
+    Remarks: p.remarks ?? '',
+  }));
+  appendSheetWithWidths(wb, 'Practical', practicalRows);
+
+  // 5. TMA
+  const tmaRows = backup.tma_records.map((t) => ({
+    'Student ID': t.studentId ?? '',
+    'Student Name': t.studentName ?? '',
+    Branch: CENTRE_MAP[resolveCentreId(t.centreId)]?.name ?? t.centreId ?? '',
+    'TMA Status': t.tmaStatus ?? '',
+    'Subjects Submitted': t.subjectsSubmittedCount ?? 0,
+    'Total Subjects': t.totalSubjectsCount ?? 0,
+    'Submission Date': t.submissionDate ?? '',
+    'Assigned Staff': t.assignedEmployeeName ?? '',
+    Remarks: t.remarks ?? '',
+  }));
+  appendSheetWithWidths(wb, 'TMA', tmaRows);
+
+  // 6. Online Classes
+  const onlineRows = backup.online_class_records.map((o) => ({
+    'Student ID': o.studentId ?? '',
+    'Student Name': o.studentName ?? '',
+    Branch: CENTRE_MAP[resolveCentreId(o.centreId)]?.name ?? o.centreId ?? '',
+    'Attendance Status': o.attendanceStatus ?? '',
+    'Participation Level': o.participationLevel ?? '',
+    'Attendance %': o.attendancePercentage ?? 0,
+    'Last Update': o.lastAttendanceUpdate ?? '',
+    'Assigned Staff': o.assignedEmployeeName ?? '',
+    'Follow-Up Notes': o.followUpNotes ?? '',
+  }));
+  appendSheetWithWidths(wb, 'Online Classes', onlineRows);
+
+  // 7. Admission
+  const admissionRows = backup.admission_records.map((a) => ({
+    'Student ID': a.studentId ?? '',
+    'Student Name': a.studentName ?? '',
+    Branch: CENTRE_MAP[resolveCentreId(a.centreId)]?.name ?? a.centreId ?? '',
+    'Admission Status': a.admissionStatus ?? '',
+    Stream: a.stream ?? '',
+    'NIOS Purpose': a.niosPurpose ?? '',
+    'Academic Background': a.academicBackground ?? '',
+    'Follow-Up Status': a.followUpStatus ?? '',
+    'Admission Date': a.admissionDate ?? '',
+    'Assigned Staff': a.assignedEmployeeName ?? '',
+    Remarks: a.remarks ?? '',
+  }));
+  appendSheetWithWidths(wb, 'Admission', admissionRows);
+
+  // 8. Calling Work & Tasks
+  const taskRows = backup.work_assignment_tasks.map((t) => ({
+    'Batch ID': t.assignmentId ?? '',
+    Branch: CENTRE_MAP[resolveCentreId(t.centreId)]?.name ?? t.centreId ?? '',
+    Department: t.department ?? '',
+    'Assigned Staff': t.staffName ?? '',
+    'S.No': t.serialNumber ?? '',
+    'Student Name': t.studentName ?? '',
+    'Father Name': t.fatherName ?? '',
+    'Mobile Number': t.mobileNumber ?? '',
+    'Calling Number': t.callingNumber ?? '',
+    Subject: t.subject ?? '',
+    'Pending Fee': t.pendingFee ?? 0,
+    'Total Fee': t.totalFee ?? 0,
+    'Call Status': t.callStatus ?? '',
+    'Follow-Up Date': t.followUpDate ?? '',
+    'Follow-Up Time': t.followUpTime ?? '',
+    Remark: t.remark ?? '',
+    'Last Called At': t.lastCalledAt ?? '',
+  }));
+  appendSheetWithWidths(wb, 'Calling Work & Tasks', taskRows);
+
+  // 9. Employee Reports
+  const reportRows = backup.employee_reports.map((r) => ({
+    'Report Date': r.reportDate ?? '',
+    'Employee Name': r.employeeName ?? '',
+    Email: r.employeeEmail ?? '',
+    Role: r.role ?? '',
+    Branch: r.centreName ?? r.centreId ?? '',
+    Department: r.department ?? '',
+    Title: r.title ?? '',
+    Summary: r.summary ?? '',
+    'Tasks Completed': r.tasksCompleted ?? 0,
+    'Students Handled': r.studentsHandled ?? 0,
+    'Pending Issues': r.pendingIssues ?? '',
+    Status: r.status ?? '',
+    Reviewer: r.reviewerName ?? '',
+    'Reviewer Note': r.reviewerNote ?? '',
+  }));
+  appendSheetWithWidths(wb, 'Employee Reports', reportRows);
+
+  // 10. Centres
+  const centreRows = backup.centres.map((c) => ({
+    'Centre ID': c.id ?? '',
+    Name: c.name ?? '',
+    Code: c.code ?? '',
+    City: c.city ?? '',
+    Address: c.address ?? '',
+    'Centre Head': c.headName ?? '',
+    Latitude: c.latitude ?? '',
+    Longitude: c.longitude ?? '',
+    'Geofence Radius (m)': c.geofenceRadiusMeters ?? '',
+    Status: c.status ?? '',
+  }));
+  appendSheetWithWidths(wb, 'Centres', centreRows);
+
+  const outName =
+    fileName || `shukra-complete-data-excel-${new Date().toISOString().slice(0, 10)}.xlsx`;
+  XLSX.writeFile(wb, outName);
 }

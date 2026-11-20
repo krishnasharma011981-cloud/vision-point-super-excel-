@@ -6,6 +6,7 @@ import {
   getDoc,
   getDocFromCache,
   getDocs,
+  getDocsFromCache,
   orderBy,
   query,
   serverTimestamp,
@@ -27,6 +28,7 @@ import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import {
   CACHE_TTL_MS,
   emitCollectionsMutated,
+  fetchCollectionCached,
   fetchDocumentCached,
 } from '../lib/firestoreCache';
 import type {
@@ -73,15 +75,22 @@ import {
   WORK_ASSIGNMENT_DEPARTMENT_LABELS,
 } from '../lib/workAssignment';
 import {
+  buildFullDatabaseBackupPayload,
+  computeBackupSummary,
+  type BackupSummaryCounts,
   type FullDatabaseBackupPayload,
+  type RestorableStaffProfile,
   sanitizeAdmissionForRestore,
   sanitizeCentreForRestore,
+  sanitizeEmployeeReportForRestore,
   sanitizeExcelSheetConfigForRestore,
   sanitizeFeeRecoveryForRestore,
   sanitizeOnlineClassForRestore,
   sanitizePracticalForRestore,
+  sanitizeStaffInviteForRestore,
   sanitizeStudentForRestore,
   sanitizeTmaForRestore,
+  sanitizeUserForRestore,
   sanitizeWorkAssignmentForRestore,
   sanitizeWorkAssignmentTaskForRestore,
 } from '../lib/databaseBackup';
@@ -4438,6 +4447,141 @@ export interface RestoreDatabaseResult {
   totalRestored: number;
 }
 
+export interface CompleteSnapshotCollectionResult {
+  backup: FullDatabaseBackupPayload;
+  summary: BackupSummaryCounts;
+  usedCacheFallback: boolean;
+}
+
+/**
+ * Collects EVERY institutional collection across ALL 4 centres (Employee Management + Students +
+ * all 5 Departments + Excel Configs + Calling Work + Reports + Edit Requests + Centres + Settings).
+ * Uses 3-tier cache-first + IndexedDB fallback + React state merge so it works reliably with minimal
+ * reads and even if Firestore free daily quota is currently exhausted.
+ */
+export async function collectCompleteSnapshotForBackup(params: {
+  actor: UserAccount;
+  fallbackState: {
+    centres: Centre[];
+    students: Student[];
+    feeRecords: FeeRecoveryRecord[];
+    practicalRecords: PracticalRecord[];
+    tmaRecords: TmaRecord[];
+    onlineClassRecords: OnlineClassRecord[];
+    admissionRecords: AdmissionRecord[];
+    sheetConfigs: ExcelSheetConfig[];
+    workAssignments: WorkAssignment[];
+    workAssignmentTasks: WorkAssignmentTask[];
+    users: UserAccount[];
+    staffInvites: StaffInvite[];
+    employeeReports: EmployeeReport[];
+    editRequests: EditRequest[];
+    settings: SystemSettings | null;
+  };
+  onProgress?: (stage: string) => void;
+}): Promise<CompleteSnapshotCollectionResult> {
+  let usedCacheFallback = false;
+
+  const fetchAllSafe = async <T,>(
+    colName: string,
+    label: string,
+    fallbackItems: T[],
+    ttlMs: number,
+  ): Promise<T[]> => {
+    params.onProgress?.(`Collecting ${label}...`);
+    const q = query(collection(db, colName));
+    try {
+      const items = await fetchCollectionCached<T>(colName, 'backup_all', q, ttlMs);
+      if (items.length >= fallbackItems.length) {
+        return items;
+      }
+      return fallbackItems;
+    } catch {
+      usedCacheFallback = true;
+      try {
+        const cachedSnap = await getDocsFromCache(q);
+        const cachedItems = cachedSnap.docs.map((d) => d.data() as T);
+        if (cachedItems.length >= fallbackItems.length) {
+          return cachedItems;
+        }
+      } catch {
+        // Use in-memory React state fallback below
+      }
+      return fallbackItems;
+    }
+  };
+
+  const [
+    centres,
+    users,
+    staffInvites,
+    students,
+    feeRecords,
+    practicalRecords,
+    tmaRecords,
+    onlineClassRecords,
+    admissionRecords,
+    sheetConfigs,
+    workAssignments,
+    workAssignmentTasks,
+    employeeReports,
+    editRequests,
+  ] = await Promise.all([
+    fetchAllSafe<Centre>('centres', 'Centres', params.fallbackState.centres, CACHE_TTL_MS.STATIC),
+    fetchAllSafe<UserAccount>('users', 'Employee Management', params.fallbackState.users, CACHE_TTL_MS.STATIC),
+    fetchAllSafe<StaffInvite>('staff_invites', 'Staff Invites', params.fallbackState.staffInvites, CACHE_TTL_MS.OPERATIONAL),
+    fetchAllSafe<Student>('students', 'Students & Excel Data', params.fallbackState.students, CACHE_TTL_MS.BULK_DATA),
+    fetchAllSafe<FeeRecoveryRecord>('fee_recovery', 'Fee Recovery', params.fallbackState.feeRecords, CACHE_TTL_MS.BULK_DATA),
+    fetchAllSafe<PracticalRecord>('practical_records', 'Practical Records', params.fallbackState.practicalRecords, CACHE_TTL_MS.BULK_DATA),
+    fetchAllSafe<TmaRecord>('tma_records', 'TMA Records', params.fallbackState.tmaRecords, CACHE_TTL_MS.BULK_DATA),
+    fetchAllSafe<OnlineClassRecord>('online_class_records', 'Online Classes', params.fallbackState.onlineClassRecords, CACHE_TTL_MS.BULK_DATA),
+    fetchAllSafe<AdmissionRecord>('admission_records', 'Admission Records', params.fallbackState.admissionRecords, CACHE_TTL_MS.BULK_DATA),
+    fetchAllSafe<ExcelSheetConfig>('excel_sheet_configs', 'Excel Sheet Configs', params.fallbackState.sheetConfigs, CACHE_TTL_MS.STATIC),
+    fetchAllSafe<WorkAssignment>('work_assignments', 'Work Assignments', params.fallbackState.workAssignments, CACHE_TTL_MS.OPERATIONAL),
+    fetchAllSafe<WorkAssignmentTask>('work_assignment_tasks', 'Calling Work Tasks', params.fallbackState.workAssignmentTasks, CACHE_TTL_MS.OPERATIONAL),
+    fetchAllSafe<EmployeeReport>('employee_reports', 'Employee Reports', params.fallbackState.employeeReports, CACHE_TTL_MS.OPERATIONAL),
+    fetchAllSafe<EditRequest>('edit_requests', 'Edit Requests', params.fallbackState.editRequests, CACHE_TTL_MS.OPERATIONAL),
+  ]);
+
+  let settings: SystemSettings | null = params.fallbackState.settings;
+  try {
+    const fetchedSettings = await fetchDocumentCached<SystemSettings>(
+      'system_settings',
+      'global',
+      doc(db, 'system_settings', 'global'),
+      CACHE_TTL_MS.STATIC,
+    );
+    if (fetchedSettings) settings = fetchedSettings;
+  } catch {
+    usedCacheFallback = true;
+  }
+
+  const backup = buildFullDatabaseBackupPayload({
+    exportedBy: params.actor.email,
+    centres,
+    students,
+    feeRecords,
+    practicalRecords,
+    tmaRecords,
+    onlineClassRecords,
+    admissionRecords,
+    sheetConfigs,
+    workAssignments,
+    workAssignmentTasks,
+    users,
+    staffInvites,
+    employeeReports,
+    editRequests,
+    settings,
+  });
+
+  return {
+    backup,
+    summary: computeBackupSummary(backup),
+    usedCacheFallback,
+  };
+}
+
 export async function restoreFullDatabaseBackup(
   backup: FullDatabaseBackupPayload,
   actor: UserAccount,
@@ -4447,10 +4591,16 @@ export async function restoreFullDatabaseBackup(
     throw new Error('Only Super Admin can restore a full institutional database backup.');
   }
 
+  const staffInvitesArr = Array.isArray(backup.staff_invites) ? backup.staff_invites : [];
+  const employeeReportsArr = Array.isArray(backup.employee_reports) ? backup.employee_reports : [];
+  const usersArr = Array.isArray(backup.users) ? backup.users : [];
+
   const totalDocs = Math.max(
     1,
     backup.centres.length +
       backup.excel_sheet_configs.length +
+      usersArr.length +
+      staffInvitesArr.length +
       backup.students.length +
       backup.fee_recovery.length +
       backup.practical_records.length +
@@ -4459,6 +4609,7 @@ export async function restoreFullDatabaseBackup(
       backup.admission_records.length +
       backup.work_assignments.length +
       backup.work_assignment_tasks.length +
+      employeeReportsArr.length +
       (backup.settings ? 1 : 0),
   );
 
@@ -4556,9 +4707,48 @@ export async function restoreFullDatabaseBackup(
     hasCreatedBy: false,
   });
 
-  // 3. Students (prerequisite for all 5 department collections)
+  // 3. Employee Management — Restore all Staff & Centre Head profiles into `users`
+  // Skip overwriting the currently signed-in Super Admin doc so their active session stays untouched
+  const actorEmailLower = actor.email.trim().toLowerCase();
+  const userItems: Array<{ id: string; data: Record<string, unknown> }> = [];
+  for (const raw of usersArr) {
+    const sanitized = sanitizeUserForRestore(raw, actor.uid);
+    if (!sanitized) {
+      skippedCount += 1;
+      processed += 1;
+      continue;
+    }
+    if (sanitized.id === actor.uid || String(sanitized.data.email || '').toLowerCase() === actorEmailLower) {
+      skippedCount += 1;
+      processed += 1;
+      continue;
+    }
+    userItems.push(sanitized);
+  }
+  await writeCollectionChunked('users', 'Employee Management Profiles', userItems, {
+    hasCreatedAt: true,
+    hasCreatedBy: true,
+  });
+
+  // 4. Employee Management — Restore Pending Staff Invites
+  const inviteItems: Array<{ id: string; data: Record<string, unknown> }> = [];
+  for (const raw of staffInvitesArr) {
+    const sanitized = sanitizeStaffInviteForRestore(raw, actor.uid, actor.fullName);
+    if (!sanitized) {
+      skippedCount += 1;
+      processed += 1;
+      continue;
+    }
+    inviteItems.push(sanitized);
+  }
+  await writeCollectionChunked('staff_invites', 'Staff Invites', inviteItems, {
+    hasCreatedAt: true,
+    hasCreatedBy: false,
+  });
+
+  // 5. Students (prerequisite for all 5 department collections)
   const studentItems = backup.students.map((raw, idx) => sanitizeStudentForRestore(raw, actor.uid, idx + 1));
-  const validStudentIds = await writeCollectionChunked('students', 'Students', studentItems, {
+  const validStudentIds = await writeCollectionChunked('students', 'Students & Excel Data', studentItems, {
     hasCreatedAt: true,
     hasCreatedBy: true,
   });
@@ -4576,7 +4766,7 @@ export async function restoreFullDatabaseBackup(
     return valid;
   };
 
-  // 4. Department Records (requires studentId existence per firestore.rules)
+  // 6. Department Records (requires studentId existence per firestore.rules)
   await writeCollectionChunked(
     'fee_recovery',
     'Fee Recovery Records',
@@ -4612,7 +4802,7 @@ export async function restoreFullDatabaseBackup(
     { hasCreatedAt: true, hasCreatedBy: true },
   );
 
-  // 5. Work Assignments & Tasks
+  // 7. Work Assignments & Calling Tasks
   await writeCollectionChunked(
     'work_assignments',
     'Staff Work Assignments',
@@ -4627,7 +4817,15 @@ export async function restoreFullDatabaseBackup(
     { hasCreatedAt: true, hasCreatedBy: false },
   );
 
-  // 6. Global System Settings
+  // 8. Employee Daily Reports
+  await writeCollectionChunked(
+    'employee_reports',
+    'Employee Reports',
+    employeeReportsArr.map((raw) => sanitizeEmployeeReportForRestore(raw, actor.uid)),
+    { hasCreatedAt: true, hasCreatedBy: false },
+  );
+
+  // 9. Global System Settings
   if (backup.settings) {
     emitProgress('Restoring System Settings...');
     try {
@@ -4661,13 +4859,15 @@ export async function restoreFullDatabaseBackup(
     action: 'DATABASE_BACKUP_RESTORED',
     targetCollection: 'system_settings',
     targetId: 'global',
-    details: `Restored ${totalRestored} records from backup JSON (students: ${restoredCounts.students || 0}, fees: ${restoredCounts.fee_recovery || 0}, skipped: ${skippedCount}, failed: ${failedCount}).`,
+    details: `Restored ${totalRestored} records from backup (employees: ${restoredCounts.users || 0}, invites: ${restoredCounts.staff_invites || 0}, students: ${restoredCounts.students || 0}, fees: ${restoredCounts.fee_recovery || 0}, skipped: ${skippedCount}, failed: ${failedCount}).`,
     locationVerified: true,
   }).catch(() => {});
 
   emitCollectionsMutated([
     'centres',
     'excel_sheet_configs',
+    'users',
+    'staff_invites',
     'students',
     'fee_recovery',
     'practical_records',
@@ -4676,11 +4876,104 @@ export async function restoreFullDatabaseBackup(
     'admission_records',
     'work_assignments',
     'work_assignment_tasks',
+    'employee_reports',
     'system_settings',
   ]);
 
   return { restoredCounts, skippedCount, failedCount, totalRestored };
 }
+
+/**
+ * After provisioning a restored staff member in a new Firebase Auth project (which assigns a new UID),
+ * saves `users/{newUid}`, removes the temporary legacy `users/{legacyUid}` doc to avoid duplicate rows
+ * in Employee Management, and re-links any restored calling work batches/tasks to the new UID.
+ */
+export async function finalizeRestoredStaffAuthUid(params: {
+  staff: RestorableStaffProfile;
+  newUid: string;
+  actor: UserAccount;
+}): Promise<void> {
+  const { staff, newUid, actor } = params;
+
+  await saveUserAccountDoc(
+    {
+      uid: newUid,
+      fullName: staff.fullName,
+      email: staff.email,
+      mobileNumber: staff.mobileNumber,
+      role: staff.role,
+      centreId: staff.centreId,
+      centreName: CENTRE_MAP[staff.centreId].name,
+      department: staff.department,
+      status: staff.status,
+      joiningDate: staff.joiningDate,
+      createdBy: actor.uid,
+      updatedBy: actor.uid,
+    },
+    actor,
+  );
+
+  // Remove any legacy UID doc with the same email so Employee Management never shows duplicates
+  try {
+    const legacySnap = await getDocs(
+      query(collection(db, 'users'), where('email', '==', staff.email.toLowerCase())),
+    );
+    const oldUids = new Set<string>();
+    if (staff.legacyUid && staff.legacyUid !== newUid) {
+      oldUids.add(staff.legacyUid);
+    }
+    legacySnap.forEach((d) => {
+      if (d.id !== newUid && d.id !== actor.uid) {
+        oldUids.add(d.id);
+      }
+    });
+
+    for (const oldUid of oldUids) {
+      await deleteDoc(doc(db, 'users', oldUid)).catch(() => {});
+
+      // Re-link restored work assignments & tasks from legacyUid -> newUid so calling box opens immediately
+      try {
+        const waSnap = await getDocs(
+          query(collection(db, 'work_assignments'), where('staffUid', '==', oldUid)),
+        );
+        for (const waDoc of waSnap.docs) {
+          await updateDoc(doc(db, 'work_assignments', waDoc.id), {
+            staffUid: newUid,
+            updatedAt: serverTimestamp(),
+          }).catch(() => {});
+        }
+      } catch {
+        // Best-effort re-link
+      }
+
+      try {
+        const wtSnap = await getDocs(
+          query(collection(db, 'work_assignment_tasks'), where('staffUid', '==', oldUid)),
+        );
+        const batch = writeBatch(db);
+        let ops = 0;
+        for (const wtDoc of wtSnap.docs) {
+          batch.update(doc(db, 'work_assignment_tasks', wtDoc.id), {
+            staffUid: newUid,
+            updatedAt: serverTimestamp(),
+          });
+          ops += 1;
+          if (ops >= 400) break;
+        }
+        if (ops > 0) {
+          await batch.commit().catch(() => {});
+        }
+      } catch {
+        // Best-effort re-link
+      }
+    }
+  } catch {
+    // Best-effort cleanup
+  }
+
+  emitCollectionsMutated(['users', 'staff_invites', 'work_assignments', 'work_assignment_tasks']);
+}
+
 
 
 

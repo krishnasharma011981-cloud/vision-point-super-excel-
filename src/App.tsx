@@ -692,8 +692,11 @@ export default function App() {
         resolvedActiveSection === 'activity_logs');
 
     const sectionNeedsGeoLogs = isSuper && resolvedActiveSection === 'activity_logs';
-    const sectionNeedsInvites = (isSuper || isHead) && resolvedActiveSection === 'employee_management';
-    const sectionNeedsReports = resolvedActiveSection === 'reports';
+    const sectionNeedsInvites =
+      (isSuper || isHead) &&
+      (resolvedActiveSection === 'employee_management' || (isSuper && resolvedActiveSection === 'settings'));
+    const sectionNeedsReports =
+      resolvedActiveSection === 'reports' || (isSuper && resolvedActiveSection === 'settings');
     const sectionNeedsEditRequests =
       resolvedActiveSection === 'student_database' ||
       resolvedActiveSection === 'fee_recovery' ||
@@ -701,7 +704,8 @@ export default function App() {
       resolvedActiveSection === 'tma' ||
       resolvedActiveSection === 'online_classes' ||
       resolvedActiveSection === 'admission' ||
-      resolvedActiveSection === 'employee_management';
+      resolvedActiveSection === 'employee_management' ||
+      (isSuper && resolvedActiveSection === 'settings');
 
     const loadSectionData = async () => {
       const jobs: Array<Promise<void>> = [];
@@ -980,7 +984,7 @@ export default function App() {
         colsToRefresh.push('activity_logs', 'location_verifications');
         break;
       case 'settings':
-        colsToRefresh.push('system_settings', 'centres', 'excel_sheet_configs');
+        colsToRefresh.push('system_settings', 'centres', 'excel_sheet_configs', 'users', 'staff_invites', 'employee_reports');
         break;
       default:
         colsToRefresh.push('students');
@@ -1471,6 +1475,9 @@ export default function App() {
             workAssignments={workAssignments}
             workAssignmentTasks={workAssignmentTasks}
             users={users}
+            staffInvites={staffInvites}
+            employeeReports={employeeReports}
+            editRequests={editRequests}
             onNotify={notify}
           />
         )}
