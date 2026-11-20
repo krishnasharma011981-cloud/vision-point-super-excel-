@@ -154,7 +154,7 @@ export default function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  const triggerSirWelcome = useCallback(() => {
+  const triggerSirWelcome = useCallback((userProfile?: UserAccount | null) => {
     if (sirAutoCloseTimerRef.current) {
       clearTimeout(sirAutoCloseTimerRef.current);
       sirAutoCloseTimerRef.current = null;
@@ -165,22 +165,26 @@ export default function App() {
     setSirAutoplayBlocked(false);
     setSirProgress(0);
 
-    speakWelcomeMessage(true, {
-      onProgress: (pct) => setSirProgress(pct),
-      onAutoplayBlocked: () => {
-        setSirSpeaking(false);
-        setSirAutoplayBlocked(true);
+    speakWelcomeMessage(
+      true,
+      {
+        onProgress: (pct) => setSirProgress(pct),
+        onAutoplayBlocked: () => {
+          setSirSpeaking(false);
+          setSirAutoplayBlocked(true);
+        },
+        onEnded: () => {
+          setSirSpeaking(false);
+          setSirAutoplayBlocked(false);
+          setSirProgress(100);
+          setSirAudioCompleted(true);
+          sirAutoCloseTimerRef.current = setTimeout(() => {
+            setShowSirWelcome(false);
+          }, 900);
+        },
       },
-      onEnded: () => {
-        setSirSpeaking(false);
-        setSirAutoplayBlocked(false);
-        setSirProgress(100);
-        setSirAudioCompleted(true);
-        sirAutoCloseTimerRef.current = setTimeout(() => {
-          setShowSirWelcome(false);
-        }, 900);
-      },
-    });
+      userProfile,
+    );
   }, []);
 
   const dismissSirWelcome = useCallback(() => {
@@ -1284,7 +1288,7 @@ export default function App() {
               }
             }
             setActiveSection(profile.role === 'employee' ? (profile.department as NavSection) : 'overview');
-            triggerSirWelcome();
+            triggerSirWelcome(profile);
           }}
         />
         <ToastContainer toasts={toasts} onDismiss={dismissToast} />
@@ -1497,7 +1501,7 @@ export default function App() {
         audioCompleted={sirAudioCompleted}
         autoplayBlocked={sirAutoplayBlocked}
         progress={sirProgress}
-        onPlayNow={triggerSirWelcome}
+        onPlayNow={() => triggerSirWelcome(currentUser)}
         onDismiss={dismissSirWelcome}
       />
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />

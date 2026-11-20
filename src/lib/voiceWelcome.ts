@@ -1,10 +1,91 @@
-const SIR_WELCOME_AUDIO =
+import type { UserAccount } from '../types/domain';
+
+export const DEFAULT_SIR_WELCOME_AUDIO =
   '/assets/aistudio/cartesia_2026-11-15T07_19_16Z_ASHISH-SSIR_sonic-3.6_hi-IN_4315358c.wav';
+
+export const CENTRE_HEAD_WELCOME_VOICES = {
+  nancy: {
+    audioUrl: '/assets/aistudio/cartesia_2026-11-20T06_33_46Z_ASHISH-SSIR_sonic-3.6_hi-IN_83bd4a3b.wav',
+    recipientLabel: 'Nancy Mam',
+    fallbackText: 'Hello Nancy Mam, aapka swagat hai. Chaliye aaj ka kaam shuru karte hain.',
+  },
+  nishu: {
+    audioUrl: '/assets/aistudio/cartesia_2026-11-20T06_34_00Z_ASHISH-SSIR_sonic-3.6_hi-IN_d025054a.wav',
+    recipientLabel: 'Nishu Mam',
+    fallbackText: 'Hello Nishu Mam, aapka swagat hai. Chaliye aaj ka kaam shuru karte hain.',
+  },
+  ekram: {
+    audioUrl: '/assets/aistudio/cartesia_2026-11-20T06_34_21Z_ASHISH-SSIR_sonic-3.6_hi-IN_34f58ef2.wav',
+    recipientLabel: 'Ekram Sir',
+    fallbackText: 'Hello Ekram Sir, aapka swagat hai. Chaliye aaj ka kaam shuru karte hain.',
+  },
+  pankaj: {
+    audioUrl: '/assets/aistudio/cartesia_2026-11-20T06_34_46Z_ASHISH-SSIR_sonic-3.6_hi-IN_6ae74d4d.wav',
+    recipientLabel: 'Pankaj Sir',
+    fallbackText: 'Hello Pankaj Sir, aapka swagat hai. Chaliye aaj ka kaam shuru karte hain.',
+  },
+} as const;
 
 export const SIR_PORTRAIT_PATH = '/assets/aistudio/image_c7733cd1.png';
 
+export type WelcomeUserIdentity = Pick<UserAccount, 'fullName' | 'email' | 'role' | 'centreId'>;
+
+export interface ResolvedWelcomeVoice {
+  key: 'nancy' | 'nishu' | 'ekram' | 'pankaj' | 'default';
+  audioUrl: string;
+  recipientLabel?: string;
+  fallbackText: string;
+}
+
+/**
+ * Resolves the exact personalized Ashish Sir login voice for each Centre Head
+ * (Nancy Mam, Nishu Mam, Ekram Sir, Pankaj Sir) and falls back to the standard
+ * Database Security welcome voice for Super Admin and other staff.
+ */
+export function resolveWelcomeVoiceForUser(user?: WelcomeUserIdentity | null): ResolvedWelcomeVoice {
+  if (!user || user.role === 'super_admin') {
+    return {
+      key: 'default',
+      audioUrl: DEFAULT_SIR_WELCOME_AUDIO,
+      fallbackText:
+        'Security database mein aapka swagat hai. Main hoon Ashish Pandey. Chaliye aaj ka kaam shuru karte hain.',
+    };
+  }
+
+  const nameLower = String(user.fullName || '').trim().toLowerCase();
+  const emailLower = String(user.email || '').trim().toLowerCase();
+  const combined = `${nameLower} ${emailLower}`;
+
+  if (
+    combined.includes('nancy') ||
+    (user.role === 'centre_head' && emailLower === 'visionpointcivillines@gmail.com')
+  ) {
+    return { key: 'nancy', ...CENTRE_HEAD_WELCOME_VOICES.nancy };
+  }
+
+  if (combined.includes('nishu')) {
+    return { key: 'nishu', ...CENTRE_HEAD_WELCOME_VOICES.nishu };
+  }
+
+  if (combined.includes('ekram') || combined.includes('ikram')) {
+    return { key: 'ekram', ...CENTRE_HEAD_WELCOME_VOICES.ekram };
+  }
+
+  if (combined.includes('pankaj')) {
+    return { key: 'pankaj', ...CENTRE_HEAD_WELCOME_VOICES.pankaj };
+  }
+
+  return {
+    key: 'default',
+    audioUrl: DEFAULT_SIR_WELCOME_AUDIO,
+    fallbackText:
+      'Security database mein aapka swagat hai. Main hoon Ashish Pandey. Chaliye aaj ka kaam shuru karte hain.',
+  };
+}
+
 let lastPlayedAt = 0;
-let cachedAudio: HTMLAudioElement | null = null;
+let activeAudio: HTMLAudioElement | null = null;
+const audioCacheByUrl = new Map<string, HTMLAudioElement>();
 let fallbackEndTimer: ReturnType<typeof setTimeout> | null = null;
 
 export interface WelcomePlaybackCallbacks {
@@ -13,13 +94,15 @@ export interface WelcomePlaybackCallbacks {
   onAutoplayBlocked?: () => void;
 }
 
-function getAudioPlayer(): HTMLAudioElement | null {
+function getAudioPlayerForUrl(audioUrl: string): HTMLAudioElement | null {
   if (typeof window === 'undefined') return null;
-  if (!cachedAudio) {
-    cachedAudio = new Audio(SIR_WELCOME_AUDIO);
-    cachedAudio.preload = 'auto';
+  let player = audioCacheByUrl.get(audioUrl);
+  if (!player) {
+    player = new Audio(audioUrl);
+    player.preload = 'auto';
+    audioCacheByUrl.set(audioUrl, player);
   }
-  return cachedAudio;
+  return player;
 }
 
 export function stopWelcomeMessage(): void {
@@ -28,16 +111,17 @@ export function stopWelcomeMessage(): void {
     clearTimeout(fallbackEndTimer);
     fallbackEndTimer = null;
   }
-  if (cachedAudio) {
+  if (activeAudio) {
     try {
-      cachedAudio.pause();
-      cachedAudio.currentTime = 0;
-      cachedAudio.ontimeupdate = null;
-      cachedAudio.onended = null;
-      cachedAudio.onerror = null;
+      activeAudio.pause();
+      activeAudio.currentTime = 0;
+      activeAudio.ontimeupdate = null;
+      activeAudio.onended = null;
+      activeAudio.onerror = null;
     } catch {
       // Ignore audio pause errors
     }
+    activeAudio = null;
   }
   if ('speechSynthesis' in window) {
     try {
@@ -51,6 +135,7 @@ export function stopWelcomeMessage(): void {
 export function speakWelcomeMessage(
   force = false,
   callbacksOrOnEnded?: WelcomePlaybackCallbacks | (() => void),
+  user?: WelcomeUserIdentity | null,
 ): void {
   if (typeof window === 'undefined') return;
   const callbacks: WelcomePlaybackCallbacks =
@@ -60,13 +145,14 @@ export function speakWelcomeMessage(
   if (!force && now - lastPlayedAt < 5000) return;
   lastPlayedAt = now;
 
-  if (fallbackEndTimer) {
-    clearTimeout(fallbackEndTimer);
-    fallbackEndTimer = null;
-  }
+  // Stop any previously playing voice clip cleanly before starting the new user's voice
+  stopWelcomeMessage();
 
-  const player = getAudioPlayer();
+  const resolved = resolveWelcomeVoiceForUser(user);
+  const player = getAudioPlayerForUrl(resolved.audioUrl);
+
   if (player) {
+    activeAudio = player;
     try {
       player.pause();
       player.currentTime = 0;
@@ -85,7 +171,7 @@ export function speakWelcomeMessage(
       };
 
       player.ontimeupdate = () => {
-        const dur = Number.isFinite(player.duration) && player.duration > 0 ? player.duration : 5.6;
+        const dur = Number.isFinite(player.duration) && player.duration > 0 ? player.duration : 4.2;
         const pct = Math.min(99, Math.max(0, Math.round((player.currentTime / dur) * 100)));
         callbacks.onProgress?.(pct);
       };
@@ -93,7 +179,7 @@ export function speakWelcomeMessage(
       player.onended = finishOnce;
       player.onerror = () => {
         if (finished) return;
-        fallbackSpeech(callbacks);
+        fallbackSpeech(callbacks, resolved.fallbackText);
       };
 
       const playPromise = player.play();
@@ -108,7 +194,7 @@ export function speakWelcomeMessage(
             if (callbacks.onAutoplayBlocked) {
               callbacks.onAutoplayBlocked();
             } else {
-              fallbackSpeech(callbacks);
+              fallbackSpeech(callbacks, resolved.fallbackText);
             }
           });
       } else {
@@ -116,14 +202,14 @@ export function speakWelcomeMessage(
       }
       return;
     } catch {
-      fallbackSpeech(callbacks);
+      fallbackSpeech(callbacks, resolved.fallbackText);
       return;
     }
   }
-  fallbackSpeech(callbacks);
+  fallbackSpeech(callbacks, resolved.fallbackText);
 }
 
-function fallbackSpeech(callbacks: WelcomePlaybackCallbacks): void {
+function fallbackSpeech(callbacks: WelcomePlaybackCallbacks, speechText: string): void {
   if (!('speechSynthesis' in window)) {
     callbacks.onProgress?.(100);
     callbacks.onEnded?.();
@@ -131,9 +217,7 @@ function fallbackSpeech(callbacks: WelcomePlaybackCallbacks): void {
   }
   try {
     window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(
-      'Security database mein aapka swagat hai. Main hoon Ashish Pandey. Chaliye aaj ka kaam shuru karte hain.',
-    );
+    const utterance = new SpeechSynthesisUtterance(speechText);
     utterance.lang = 'hi-IN';
     utterance.rate = 0.95;
     utterance.volume = 1.0;
