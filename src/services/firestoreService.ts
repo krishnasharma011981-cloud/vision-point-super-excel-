@@ -30,6 +30,7 @@ import {
   emitCollectionsMutated,
   fetchCollectionCached,
   fetchDocumentCached,
+  getDocCacheFirst,
 } from '../lib/firestoreCache';
 import type {
   ActivityLog,
@@ -203,9 +204,9 @@ export async function ensureInitialPlatformSetup(params: {
   const { uid, email, fullName, mobileNumber = '' } = params;
   const lookerganj = CENTRE_MAP.vp_lookerganj;
 
-  // 1. Create or confirm Super Admin user document
+  // 1. Create or confirm Super Admin user document (cache-first lookup)
   const userRef = doc(db, 'users', uid);
-  const existingUser = await getDoc(userRef).catch((e) =>
+  const existingUser = await getDocCacheFirst(userRef).catch((e) =>
     handleFirestoreError(e, OperationType.GET, `users/${uid}`),
   );
 
@@ -262,7 +263,7 @@ export async function ensureInitialPlatformSetup(params: {
   // 2. Initialize or synchronize all 4 canonical centres (e.g. XIS -> Axis Academy rename)
   for (const c of CANONICAL_CENTRES) {
     const cRef = doc(db, 'centres', c.id);
-    const cSnap = await getDoc(cRef).catch(() => null);
+    const cSnap = await getDocCacheFirst(cRef).catch(() => null);
     if (!cSnap || !cSnap.exists()) {
       try {
         await setDoc(cRef, {
@@ -289,7 +290,7 @@ export async function ensureInitialPlatformSetup(params: {
 
   // 3. Initialize or sync global system settings for Super Admin
   const settingsRef = doc(db, 'system_settings', 'global');
-  const settingsSnap = await getDoc(settingsRef).catch(() => null);
+  const settingsSnap = await getDocCacheFirst(settingsRef).catch(() => null);
   if (!settingsSnap || !settingsSnap.exists()) {
     try {
       await setDoc(settingsRef, {
@@ -936,7 +937,7 @@ export async function bulkImportStudentsBatch(
       const canonical = CANONICAL_CENTRES.find((c) => c.id === cId);
       if (!canonical) continue;
       const cRef = doc(db, 'centres', cId);
-      const snap = await getDoc(cRef).catch(() => null);
+      const snap = await getDocCacheFirst(cRef).catch(() => null);
       if (!snap || !snap.exists()) {
         await setDoc(cRef, {
           ...canonical,
@@ -2145,7 +2146,7 @@ export async function saveExcelSheetConfig(
 
   try {
     const ref = doc(db, 'excel_sheet_configs', cleanId);
-    const existing = await getDoc(ref).catch(() => null);
+    const existing = await getDocCacheFirst(ref).catch(() => null);
     if (existing && existing.exists()) {
       await updateDoc(ref, payload);
     } else {
@@ -2523,7 +2524,7 @@ export async function upsertFeeRecoveryRecord(
   const path = `fee_recovery/${record.studentId}`;
   try {
     const ref = doc(db, 'fee_recovery', record.studentId);
-    const snap = await getDoc(ref);
+    const snap = await getDocCacheFirst(ref);
     const empLockMeta =
       actor.role === 'employee'
         ? {
@@ -2995,7 +2996,7 @@ export async function upsertPracticalRecord(
   const path = `practical_records/${record.studentId}`;
   try {
     const ref = doc(db, 'practical_records', record.studentId);
-    const snap = await getDoc(ref);
+    const snap = await getDocCacheFirst(ref);
     const empLockMeta =
       actor.role === 'employee'
         ? {
@@ -3060,7 +3061,7 @@ export async function upsertTmaRecord(
   const path = `tma_records/${record.studentId}`;
   try {
     const ref = doc(db, 'tma_records', record.studentId);
-    const snap = await getDoc(ref);
+    const snap = await getDocCacheFirst(ref);
     const empLockMeta =
       actor.role === 'employee'
         ? {
@@ -3124,7 +3125,7 @@ export async function upsertOnlineClassRecord(
   const path = `online_class_records/${record.studentId}`;
   try {
     const ref = doc(db, 'online_class_records', record.studentId);
-    const snap = await getDoc(ref);
+    const snap = await getDocCacheFirst(ref);
     const empLockMeta =
       actor.role === 'employee'
         ? {
@@ -3306,7 +3307,7 @@ export async function upsertAdmissionRecord(
   const path = `admission_records/${record.studentId}`;
   try {
     const ref = doc(db, 'admission_records', record.studentId);
-    const snap = await getDoc(ref);
+    const snap = await getDocCacheFirst(ref);
     const empLockMeta =
       actor.role === 'employee'
         ? {
@@ -4304,7 +4305,7 @@ export async function updateWorkAssignmentTask(
     if (task.department === 'fee_recovery') {
       const feeRef = doc(db, 'fee_recovery', task.studentId);
       try {
-        const feeSnap = await getDoc(feeRef);
+        const feeSnap = await getDocCacheFirst(feeRef);
         const mappedFollowUp = mapCallStatusToFeeFollowUp(
           updates.callStatus,
           feeSnap.exists() ? (feeSnap.data().followUpStatus as FeeFollowUpStatus | undefined) : undefined,
@@ -4491,7 +4492,9 @@ export async function collectCompleteSnapshotForBackup(params: {
     params.onProgress?.(`Collecting ${label}...`);
     const q = query(collection(db, colName));
     try {
-      const items = await fetchCollectionCached<T>(colName, 'backup_all', q, ttlMs);
+      const items = await fetchCollectionCached<T>(colName, 'backup_all', q, ttlMs, {
+        deltaSyncField: 'updatedAt',
+      });
       if (items.length >= fallbackItems.length) {
         return items;
       }

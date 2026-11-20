@@ -4,6 +4,7 @@ import {
   CACHE_TTL_MS,
   expandMutatedCollections,
   isCacheEntryFresh,
+  shouldUseDeltaSync,
 } from './firestoreCache';
 
 test('isCacheEntryFresh validates cache timestamps accurately within and beyond TTL', () => {
@@ -14,6 +15,15 @@ test('isCacheEntryFresh validates cache timestamps accurately within and beyond 
   assert.equal(isCacheEntryFresh(now - (CACHE_TTL_MS.BULK_DATA + 60_000), CACHE_TTL_MS.BULK_DATA, now), false);
   assert.equal(isCacheEntryFresh(null, CACHE_TTL_MS.STATIC, now), false);
   assert.equal(isCacheEntryFresh(0, CACHE_TTL_MS.STATIC, now), false);
+});
+
+test('shouldUseDeltaSync enables incremental updatedAt sync only when a valid cached baseline exists', () => {
+  assert.equal(shouldUseDeltaSync({ ts: 1_700_000_000_000, count: 450 }, 'updatedAt', false), true);
+  assert.equal(shouldUseDeltaSync({ ts: 1_700_000_000_000, count: 0 }, 'updatedAt', false), false);
+  assert.equal(shouldUseDeltaSync({ ts: 0, count: 450 }, 'updatedAt', false), false);
+  assert.equal(shouldUseDeltaSync(null, 'updatedAt', false), false);
+  assert.equal(shouldUseDeltaSync({ ts: 1_700_000_000_000, count: 450 }, undefined, false), false);
+  assert.equal(shouldUseDeltaSync({ ts: 1_700_000_000_000, count: 450 }, 'updatedAt', true), false);
 });
 
 test('expandMutatedCollections propagates invalidation across coupled institutional collections', () => {

@@ -440,13 +440,14 @@ export default function App() {
     const loadCore = async () => {
       const jobs: Array<Promise<void>> = [];
 
-      // Centres (max 4 docs — 6h cache)
+      // Centres (max 4 docs — 24h cache + delta sync)
       jobs.push(
         fetchCollectionCached<Centre>(
           'centres',
           isSuper ? 'all' : cId,
           isSuper ? query(collection(db, 'centres')) : query(collection(db, 'centres'), where('id', '==', cId)),
           CACHE_TTL_MS.STATIC,
+          { deltaSyncField: 'updatedAt' },
         )
           .then((items) => {
             if (!cancelled) setCentres(items);
@@ -454,7 +455,7 @@ export default function App() {
           .catch((err) => handleDataFetchError(err, OperationType.LIST, 'centres')),
       );
 
-      // Self status verification (cached 30m so page reloads cost 0 reads)
+      // Self status verification (cached 4h so page reloads cost 0 reads)
       jobs.push(
         fetchDocumentCached<UserAccount>(
           'users',
@@ -476,7 +477,7 @@ export default function App() {
           }),
       );
 
-      // Staff directory (Super Admin / Centre Head — 6h cache, invalidated on staff add/edit/delete)
+      // Staff directory (Super Admin / Centre Head — 24h cache + delta sync)
       if (isSuper || isHead) {
         jobs.push(
           fetchCollectionCached<UserAccount>(
@@ -484,6 +485,7 @@ export default function App() {
             isSuper ? 'all' : cId,
             isSuper ? query(collection(db, 'users')) : query(collection(db, 'users'), where('centreId', '==', cId)),
             CACHE_TTL_MS.STATIC,
+            { deltaSyncField: 'updatedAt' },
           )
             .then((items) => {
               if (!cancelled) setUsers(items);
@@ -530,13 +532,14 @@ export default function App() {
           .catch((err) => handleDataFetchError(err, OperationType.LIST, 'notifications')),
       );
 
-      // Shared Excel Sheet Column & Heading Configs (~6 docs — 6h cache)
+      // Shared Excel Sheet Column & Heading Configs (~6 docs — 24h cache + delta sync)
       jobs.push(
         fetchCollectionCached<ExcelSheetConfig>(
           'excel_sheet_configs',
           'all',
           query(collection(db, 'excel_sheet_configs')),
           CACHE_TTL_MS.STATIC,
+          { deltaSyncField: 'updatedAt' },
         )
           .then((items) => {
             if (!cancelled) {
@@ -551,8 +554,7 @@ export default function App() {
       );
 
       // Work Assignments:
-      // - For Admins/Centre Heads: cache-first (10m TTL, auto-invalidated on assign/delete)
-      // - For Employees: tiny real-time onSnapshot (~1-3 docs + ~25 tasks) so new calling boxes appear live
+      // - For Admins/Centre Heads: cache-first (30m TTL + delta sync)
       if (isSuper || isHead) {
         const waQuery = isSuper
           ? query(collection(db, 'work_assignments'))
@@ -563,6 +565,7 @@ export default function App() {
             isSuper ? 'all' : cId,
             waQuery,
             CACHE_TTL_MS.OPERATIONAL,
+            { deltaSyncField: 'updatedAt' },
           )
             .then((items) => {
               if (!cancelled) {
@@ -578,36 +581,39 @@ export default function App() {
 
     void loadCore();
 
-    // Employees get real-time delivery ONLY for their own small calling batch (~25 docs total)
-    if (!isSuper && !isHead) {
-      unsubs.push(
-        onSnapshot(
-          query(collection(db, 'work_assignments'), where('staffUid', '==', userUid)),
-          (snap) => {
-            const sorted = snap.docs
-              .map((d) => d.data() as WorkAssignment)
-              .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
-            setWorkAssignments(sorted);
-          },
-          (err) => handleDataFetchError(err, OperationType.LIST, 'work_assignments'),
-        ),
-      );
-      unsubs.push(
-        onSnapshot(
-          query(collection(db, 'work_assignment_tasks'), where('staffUid', '==', userUid)),
-          (snap) => {
-            setWorkAssignmentTasks(snap.docs.map((d) => d.data() as WorkAssignmentTask));
-          },
-          (err) => handleDataFetchError(err, OperationType.LIST, 'work_assignment_tasks'),
-        ),
-      );
-    }
-
     return () => {
       cancelled = true;
       unsubs.forEach((u) => u());
     };
   }, [userUid, userRole, userCentreId, userEmail, cacheVersion, handleDataFetchError]);
+
+  // Dedicated Employee Calling Box Listener — attaches ONCE per login (NEVER re-subscribes on cacheVersion bumps!)
+  useEffect(() => {
+    if (!userUid || !userRole || userRole === 'super_admin' || userRole === 'centre_head') {
+      return;
+    }
+    const unsubWa = onSnapshot(
+      query(collection(db, 'work_assignments'), where('staffUid', '==', userUid)),
+      (snap) => {
+        const sorted = snap.docs
+          .map((d) => d.data() as WorkAssignment)
+          .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+        setWorkAssignments(sorted);
+      },
+      (err) => handleDataFetchError(err, OperationType.LIST, 'work_assignments'),
+    );
+    const unsubTasks = onSnapshot(
+      query(collection(db, 'work_assignment_tasks'), where('staffUid', '==', userUid)),
+      (snap) => {
+        setWorkAssignmentTasks(snap.docs.map((d) => d.data() as WorkAssignmentTask));
+      },
+      (err) => handleDataFetchError(err, OperationType.LIST, 'work_assignment_tasks'),
+    );
+    return () => {
+      unsubWa();
+      unsubTasks();
+    };
+  }, [userUid, userRole, handleDataFetchError]);
 
   // 2. Ultra-Low-Read Section-Aware & Branch-Scoped Cache-First Loader:
   // - Zero bulk onSnapshot listeners! Tab switches = 0 reads (in-memory cache), F5 refresh = 0 reads (IndexedDB cache).
@@ -714,7 +720,7 @@ export default function App() {
     const loadSectionData = async () => {
       const jobs: Array<Promise<void>> = [];
 
-      // 1. Students (60m cache — 0 reads on repeat visits & refreshes)
+      // 1. Students (12h indexed cache + Incremental Delta Sync — 0 reads on repeat visits & local edits!)
       if (sectionNeedsStudents) {
         if (students.length === 0) setDataLoading(true);
         jobs.push(
@@ -723,6 +729,7 @@ export default function App() {
             scopedCentre,
             scopedQuery('students'),
             CACHE_TTL_MS.BULK_DATA,
+            { deltaSyncField: 'updatedAt' },
           )
             .then((items) => {
               if (!cancelled) {
@@ -739,7 +746,7 @@ export default function App() {
         setDataLoading(false);
       }
 
-      // 2. Department collections (60m cache, strictly on-demand)
+      // 2. Department collections (12h indexed cache + Incremental Delta Sync, strictly on-demand)
       const loadDeptIfNeeded = <T,>(
         needed: boolean,
         colName: string,
@@ -759,6 +766,7 @@ export default function App() {
             scopedCentre,
             scopedQuery(colName),
             CACHE_TTL_MS.BULK_DATA,
+            { deltaSyncField: 'updatedAt' },
           )
             .then((items) => {
               if (!cancelled) {
@@ -806,7 +814,7 @@ export default function App() {
         setAdmissionRecords,
       );
 
-      // 3. Admin/Centre Head Calling Tasks (10m cache, branch-scoped, only on Fee/Practical/TMA/Settings)
+      // 3. Admin/Centre Head Calling Tasks (30m indexed cache + delta sync, branch-scoped)
       if (sectionNeedsAdminTasks) {
         jobs.push(
           fetchCollectionCached<WorkAssignmentTask>(
@@ -814,6 +822,7 @@ export default function App() {
             scopedCentre,
             scopedQuery('work_assignment_tasks'),
             CACHE_TTL_MS.OPERATIONAL,
+            { deltaSyncField: 'updatedAt' },
           )
             .then((items) => {
               if (!cancelled) setWorkAssignmentTasks(items);
@@ -993,7 +1002,8 @@ export default function App() {
       default:
         colsToRefresh.push('students');
     }
-    invalidateCacheForCollections(colsToRefresh);
+    // Use Incremental Delta Sync on manual Sync so only newly modified docs are fetched from Firestore!
+    invalidateCacheForCollections(colsToRefresh, { preserveDeltaBaseline: true });
     setCacheVersion((v) => v + 1);
   }, [resolvedActiveSection]);
 

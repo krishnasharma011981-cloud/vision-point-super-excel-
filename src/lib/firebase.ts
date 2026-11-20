@@ -1,9 +1,12 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import {
+  CACHE_SIZE_UNLIMITED,
   doc,
+  enablePersistentCacheIndexAutoCreation,
   getDocFromServer,
   getFirestore,
+  getPersistentCacheIndexManager,
   initializeFirestore,
   persistentLocalCache,
   persistentMultipleTabManager,
@@ -13,14 +16,15 @@ import firebaseConfig from '../../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
 
-// Enable multi-tab persistent IndexedDB local cache so page reloads and tab switches
-// serve unchanged documents locally instead of burning Firestore daily read quota.
+// Enable multi-tab unlimited persistent IndexedDB local cache + automatic local query indexing
+// so page reloads, tab switches, and filtered queries run locally at 0 Firestore server reads.
 let dbInstance: Firestore;
 try {
   dbInstance = initializeFirestore(
     app,
     {
       localCache: persistentLocalCache({
+        cacheSizeBytes: CACHE_SIZE_UNLIMITED,
         tabManager: persistentMultipleTabManager(),
       }),
     },
@@ -28,6 +32,17 @@ try {
   );
 } catch {
   dbInstance = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+}
+
+// Automatically create & maintain local IndexedDB indexes for every filtered/ordered query
+// (centreId, staffUid, createdAt, updatedAt) so cache-first reads are instant without full scans.
+try {
+  const indexManager = getPersistentCacheIndexManager(dbInstance);
+  if (indexManager) {
+    enablePersistentCacheIndexAutoCreation(indexManager);
+  }
+} catch {
+  // Ignore if browser environment restricts IndexedDB index management
 }
 
 export const db: Firestore = dbInstance;
@@ -63,40 +78,35 @@ export interface FirestoreErrorInfo {
 }
 
 export function isFirestoreQuotaError(error: unknown): boolean {
-  const raw =
-    error instanceof Error
-      ? `${(error as { code?: string }).code || ''} ${error.message}`
-      : String(error || '');
+  const raw = error instanceof Error ? error.message : String(error || '');
   const lower = raw.toLowerCase();
   return (
-    lower.includes('quota exceeded') ||
     lower.includes('quota limit exceeded') ||
-    lower.includes('daily read quota') ||
+    lower.includes('quota exceeded') ||
     lower.includes('resource-exhausted') ||
     lower.includes('resource_exhausted') ||
     lower.includes('free daily read units')
   );
 }
 
-export function formatFirestoreUserError(error: unknown): string {
+export function formatFirestoreUserError(error: unknown, fallback = 'Database request failed.'): string {
   if (isFirestoreQuotaError(error)) {
-    return 'Firebase Free Daily Read Quota aaj ke liye poora ho gaya hai. Ye quota kal automatically reset ho jayega, ya aap Firebase Console se database upgrade kar sakte hain.';
+    return 'Firestore free daily read limit reached for today. Cached data remains accessible; full live sync resumes automatically after daily quota reset (or upgrade this Firebase project to Blaze plan).';
   }
-  const msg = error instanceof Error ? error.message : String(error || 'Database error');
-  if (msg.startsWith('{') && msg.includes('"error"')) {
-    try {
-      const parsed = JSON.parse(msg) as { error?: string };
-      if (parsed.error) {
-        if (isFirestoreQuotaError(parsed.error)) {
-          return 'Firebase Free Daily Read Quota aaj ke liye poora ho gaya hai. Ye quota kal automatically reset ho jayega, ya aap Firebase Console se database upgrade kar sakte hain.';
-        }
-        return parsed.error;
+  const raw = error instanceof Error ? error.message : String(error || '');
+  if (!raw) return fallback;
+  try {
+    const parsed = JSON.parse(raw) as { error?: string };
+    if (parsed && typeof parsed.error === 'string' && parsed.error.trim()) {
+      if (isFirestoreQuotaError(parsed.error)) {
+        return 'Firestore free daily read limit reached for today. Cached data remains accessible; full live sync resumes automatically after daily quota reset (or upgrade this Firebase project to Blaze plan).';
       }
-    } catch {
-      // fall through
+      return parsed.error.trim();
     }
+  } catch {
+    // Not a serialized FirestoreErrorInfo JSON string
   }
-  return msg;
+  return raw;
 }
 
 export function handleFirestoreError(
@@ -129,12 +139,22 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
-const CONNECTION_CHECK_SESSION_KEY = 'vp_fs_conn_checked_v1';
+const CONNECTION_CHECK_SESSION_KEY = 'vp_fs_conn_checked_v2';
 
 export async function testFirestoreConnection(): Promise<void> {
   try {
-    if (typeof window !== 'undefined' && window.sessionStorage?.getItem(CONNECTION_CHECK_SESSION_KEY)) {
-      return;
+    if (typeof window !== 'undefined') {
+      if (window.sessionStorage?.getItem(CONNECTION_CHECK_SESSION_KEY)) {
+        return;
+      }
+      // If local cache metadata already exists for this project, skip burning a startup server read
+      for (let i = 0; i < window.localStorage.length; i += 1) {
+        const key = window.localStorage.key(i);
+        if (key && key.startsWith('vp_fscache_v2::')) {
+          window.sessionStorage?.setItem(CONNECTION_CHECK_SESSION_KEY, '1');
+          return;
+        }
+      }
     }
     await getDocFromServer(doc(db, 'test', 'connection'));
     if (typeof window !== 'undefined') {
